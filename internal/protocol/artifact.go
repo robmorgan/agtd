@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/robmorgan/agtd/internal/session"
+	"agtd.sh/internal/session"
 )
 
 // Git state and artifacts.

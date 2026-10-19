@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/robmorgan/agtd/internal/protocol"
-	"github.com/robmorgan/agtd/internal/transport"
+	"agtd.sh/internal/protocol"
+	"agtd.sh/internal/transport"
 )
 
 // controlStream carries the CLI's one-shot requests to a daemon over one

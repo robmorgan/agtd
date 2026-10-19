@@ -15,6 +15,8 @@ export default defineConfig({
 				{ tag: 'link', attrs: { rel: 'icon', href: '/favicon-32.png', sizes: '32x32', type: 'image/png' } },
 				{ tag: 'link', attrs: { rel: 'apple-touch-icon', href: '/apple-touch-icon.png' } },
 				{ tag: 'meta', attrs: { property: 'og:image', content: 'https://agtd.sh/agtd-icon-512.png' } },
+				// The Go import path agtd.sh resolves to the GitHub repository; see README.md.
+				{ tag: 'meta', attrs: { name: 'go-import', content: 'agtd.sh git https://github.com/robmorgan/agtd' } },
 			],
 			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/robmorgan/agtd' }],
 			editLink: { baseUrl: 'https://github.com/robmorgan/agtd/edit/main/website/' },

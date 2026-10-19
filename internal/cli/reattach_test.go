@@ -8,8 +8,8 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/robmorgan/agtd/internal/protocol"
-	"github.com/robmorgan/agtd/internal/transport"
+	"agtd.sh/internal/protocol"
+	"agtd.sh/internal/transport"
 )
 
 // How an attach stream ends decides whether the CLI attaches again: a

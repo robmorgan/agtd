@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/robmorgan/agtd/internal/session"
+	"agtd.sh/internal/session"
 )
 
 func TestEventMessagesRoundTrip(t *testing.T) {

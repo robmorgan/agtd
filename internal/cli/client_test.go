@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/robmorgan/agtd/internal/paths"
-	"github.com/robmorgan/agtd/internal/protocol"
-	"github.com/robmorgan/agtd/internal/transport"
+	"agtd.sh/internal/paths"
+	"agtd.sh/internal/protocol"
+	"agtd.sh/internal/transport"
 )
 
 // fakeDaemon listens on a runtime root's socket and answers every

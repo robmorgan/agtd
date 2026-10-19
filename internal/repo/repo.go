@@ -49,7 +49,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/robmorgan/agtd/internal/session"
+	"agtd.sh/internal/session"
 )
 
 var (

@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/robmorgan/agtd/internal/protocol"
-	"github.com/robmorgan/agtd/internal/repo"
-	"github.com/robmorgan/agtd/internal/session"
-	"github.com/robmorgan/agtd/internal/transport"
+	"agtd.sh/internal/protocol"
+	"agtd.sh/internal/repo"
+	"agtd.sh/internal/session"
+	"agtd.sh/internal/transport"
 )
 
 // What a session produced: its git state and its artifacts. The daemon

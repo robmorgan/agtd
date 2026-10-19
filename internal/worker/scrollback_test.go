@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/robmorgan/agtd/internal/protocol"
+	"agtd.sh/internal/protocol"
 	"go.mitchellh.com/libghostty"
 )
 

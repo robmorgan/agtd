@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/robmorgan/agtd/internal/protocol"
-	"github.com/robmorgan/agtd/internal/session"
-	"github.com/robmorgan/agtd/internal/transport"
+	"agtd.sh/internal/protocol"
+	"agtd.sh/internal/session"
+	"agtd.sh/internal/transport"
 )
 
 const handoffAgents = `

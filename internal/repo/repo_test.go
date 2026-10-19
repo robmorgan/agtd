@@ -18,7 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/robmorgan/agtd/internal/session"
+	"agtd.sh/internal/session"
 )
 
 // These tests run the real git against real temporary repositories.

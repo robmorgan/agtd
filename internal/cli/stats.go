@@ -9,8 +9,8 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/robmorgan/agtd/internal/protocol"
-	"github.com/robmorgan/agtd/internal/session"
+	"agtd.sh/internal/protocol"
+	"agtd.sh/internal/session"
 )
 
 // requireStats fails unless the daemon reports resource usage.

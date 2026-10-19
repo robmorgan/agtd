@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/robmorgan/agtd/internal/paths"
-	"github.com/robmorgan/agtd/internal/protocol"
-	"github.com/robmorgan/agtd/internal/session"
-	"github.com/robmorgan/agtd/internal/transport"
+	"agtd.sh/internal/paths"
+	"agtd.sh/internal/protocol"
+	"agtd.sh/internal/session"
+	"agtd.sh/internal/transport"
 )
 
 // servePair serves `agtd remote pair`: it opens the pairing window, sends

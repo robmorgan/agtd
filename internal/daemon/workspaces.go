@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/robmorgan/agtd/internal/db"
-	"github.com/robmorgan/agtd/internal/protocol"
-	"github.com/robmorgan/agtd/internal/session"
+	"agtd.sh/internal/db"
+	"agtd.sh/internal/protocol"
+	"agtd.sh/internal/session"
 )
 
 // Workspaces are named directories on this machine, stored in state.db and

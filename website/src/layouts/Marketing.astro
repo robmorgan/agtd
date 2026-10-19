@@ -35,6 +35,8 @@ const ogImage = new URL('/agtd-icon-512.png', Astro.site);
 		<meta property="og:image" content={ogImage} />
 		<meta name="twitter:card" content="summary" />
 		<meta name="theme-color" content="#0f1113" />
+		{/* The Go import path agtd.sh resolves to the GitHub repository; see README.md. */}
+		<meta name="go-import" content="agtd.sh git https://github.com/robmorgan/agtd" />
 		{/* The same logic as Starlight's ThemeProvider, inlined to avoid a flash. */}
 		<script is:inline>
 			(() => {

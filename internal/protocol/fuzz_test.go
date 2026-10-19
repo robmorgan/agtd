@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/robmorgan/agtd/internal/session"
+	"agtd.sh/internal/session"
 )
 
 // The decoders read bytes straight off the network. These fuzz tests check

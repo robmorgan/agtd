@@ -5,7 +5,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/robmorgan/agtd/internal/protocol"
+	"agtd.sh/internal/protocol"
 )
 
 // statsSupported reports whether procstat has an OS reader here.

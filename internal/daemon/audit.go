@@ -7,10 +7,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/robmorgan/agtd/internal/db"
-	"github.com/robmorgan/agtd/internal/paths"
-	"github.com/robmorgan/agtd/internal/session"
-	"github.com/robmorgan/agtd/internal/transport"
+	"agtd.sh/internal/db"
+	"agtd.sh/internal/paths"
+	"agtd.sh/internal/session"
+	"agtd.sh/internal/transport"
 )
 
 // Host events (db.RecordHostEvent) are the audit record of who can reach

@@ -21,6 +21,24 @@ npm run build    # static output in dist/
 `public/install.sh` first, so `curl -fsSL https://agtd.sh/install.sh | bash`
 always serves the script on the deployed commit. The copy is not checked in.
 
+## Go import path
+
+The Go module is `agtd.sh`, and the site is what makes that resolve: `go get`
+fetches `https://agtd.sh/<package>?go-get=1` for the package path and each of
+its prefixes, looking for a `go-import` meta tag that names the repository.
+`public/go-import.html` holds the tag, a rewrite in `vercel.json` serves it for
+any path asked with `go-get=1` (`/cmd/agt`, `/internal/cli`, ... have no page),
+and the landing page and every docs page carry the same tag in their head, since
+Vercel serves an existing page before it applies rewrites. The `go-source` tag
+only gives pkg.go.dev its source links.
+
+To check a deployment:
+
+```sh
+curl -s 'https://agtd.sh/?go-get=1' | grep go-import
+curl -s 'https://agtd.sh/cmd/agt?go-get=1' | grep go-import
+```
+
 ## Deploying
 
 Vercel, with the project's Root Directory set to `website`. `vercel.json` sets

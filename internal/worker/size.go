@@ -5,7 +5,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/robmorgan/agtd/internal/protocol"
+	"agtd.sh/internal/protocol"
 )
 
 // Size ownership. One attachment, the size owner, decides the session's
