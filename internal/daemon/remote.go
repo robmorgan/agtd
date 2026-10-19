@@ -17,11 +17,12 @@ import (
 	"github.com/BurntSushi/toml"
 
 	"agtd.sh/internal/config"
+	"agtd.sh/internal/transport"
 )
 
 // DefaultRemotePort is the UDP port `agtd remote enable` listens on when
-// the address does not name one.
-const DefaultRemotePort = "7433"
+// the address does not name one: the port clients dial by default.
+const DefaultRemotePort = transport.DefaultPort
 
 // AddressKind says what kind of network an address is on, which decides
 // whether `agtd remote enable` may use a detected address without asking.
@@ -209,17 +210,7 @@ func classifyAddress(ip net.IP) AddressKind {
 // ListenAddress turns what the user typed (a host, or host:port) into a
 // listen address, adding the default port.
 func ListenAddress(s string) (string, error) {
-	if host, port, err := net.SplitHostPort(s); err == nil {
-		if host == "" || port == "" {
-			return "", fmt.Errorf("`%s` is not an address (expected HOST or HOST:PORT)", s)
-		}
-		return s, nil
-	}
-	host := strings.Trim(s, "[]")
-	if host == "" || strings.ContainsAny(host, " /") {
-		return "", fmt.Errorf("`%s` is not an address (expected HOST or HOST:PORT)", s)
-	}
-	return net.JoinHostPort(host, DefaultRemotePort), nil
+	return transport.WithDefaultPort(s)
 }
 
 var (

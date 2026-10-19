@@ -3,6 +3,7 @@ package transport
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"slices"
 	"strings"
@@ -12,6 +13,29 @@ import (
 	"agtd.sh/internal/session"
 )
 
+// DefaultPort is the UDP port a daemon's QUIC listener uses unless its
+// listen address names another: `agtd remote enable` listens on it, and
+// `agt host add` dials it when an address is a bare host. There is one
+// port because one daemon multiplexes every session over one connection.
+const DefaultPort = "7433"
+
+// WithDefaultPort turns what the user typed (a host, or host:port) into a
+// host:port address, adding DefaultPort. A bare IPv6 address may be given
+// with or without brackets.
+func WithDefaultPort(s string) (string, error) {
+	if host, port, err := net.SplitHostPort(s); err == nil {
+		if host == "" || port == "" {
+			return "", fmt.Errorf("`%s` is not an address (expected HOST or HOST:PORT)", s)
+		}
+		return s, nil
+	}
+	host := strings.Trim(s, "[]")
+	if host == "" || strings.ContainsAny(host, " /") {
+		return "", fmt.Errorf("`%s` is not an address (expected HOST or HOST:PORT)", s)
+	}
+	return net.JoinHostPort(host, DefaultPort), nil
+}
+
 // Host is a remote daemon this machine can reach, pinned to its key.
 //
 // hosts.toml in the runtime root is the client side of agtd's SSH-style
@@ -20,7 +44,8 @@ import (
 // authorized-clients file.
 type Host struct {
 	Name string `toml:"-"`
-	// Address is the UDP host:port of the daemon's QUIC listener.
+	// Address is the UDP host:port of the daemon's QUIC listener. A host
+	// without a port (hosts.toml edited by hand) is dialed on DefaultPort.
 	Address string `toml:"address"`
 	// Fingerprint is the key the daemon must present.
 	Fingerprint string `toml:"fingerprint"`

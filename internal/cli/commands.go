@@ -471,8 +471,8 @@ _TIME. Following reconnects by itself and resumes after the last event shown.`}
 	cmds = append(cmds, hosts)
 	cmds = append(cmds, group("host", "Manage remote hosts this machine can reach",
 		"Remote hosts running agtd with `[remote] listen` set.",
-		"Examples:\n  agt host add devbox 100.64.0.5:7433 --code 123-456-789\n  agt host add devbox 100.64.0.5:7433\n  agt host ls\n  agt --host devbox ls\n  agt attach devbox/auth-refactor\n  agt --host auto new --workspace mono fix-tests",
-		annotate(hostAdd, "[OPTIONS] <NAME> <ADDRESS>", "<NAME>     \n<ADDRESS>  HOST:PORT of the remote agtd's QUIC listener"),
+		"Examples:\n  agt host add devbox 100.64.0.5:7433 --code 123-456-789\n  agt host add devbox 100.64.0.5\n  agt host ls\n  agt --host devbox ls\n  agt attach devbox/auth-refactor\n  agt --host auto new --workspace mono fix-tests",
+		annotate(hostAdd, "[OPTIONS] <NAME> <ADDRESS>", "<NAME>     \n<ADDRESS>  HOST[:PORT] of the remote agtd's QUIC listener (port "+transport.DefaultPort+" unless given)"),
 		hostList,
 		annotate(a.command("info NAME", "Show a host's machine, daemon, and capabilities", oneArg, func(args []string) error {
 			return a.hostInfo(args[0])
@@ -527,7 +527,7 @@ func (a *app) listHosts(noProbe bool) error {
 			return err
 		}
 		if len(hosts) == 0 {
-			fmt.Println("no hosts; add one with `agt host add NAME HOST:PORT`")
+			fmt.Println("no hosts; add one with `agt host add NAME HOST[:PORT]`")
 		}
 		for _, h := range hosts {
 			fmt.Printf("%s\t%s\t%s\n", h.Name, h.Address, h.Fingerprint)
@@ -540,7 +540,7 @@ func (a *app) listHosts(noProbe bool) error {
 	}
 	renderHosts(os.Stdout, probes)
 	if len(probes) == 1 {
-		fmt.Println("no remote hosts; add one with `agt host add NAME HOST:PORT`")
+		fmt.Println("no remote hosts; add one with `agt host add NAME HOST[:PORT]`")
 	}
 	return nil
 }
@@ -957,7 +957,9 @@ func parseSendInput(args []string) (sendInputArgs, error) {
 // arguments.
 var errHelp = errors.New("help requested")
 
-// hostAdd adds a remote host and pins its daemon's key. With a pairing
+// hostAdd adds a remote host and pins its daemon's key. The address is a
+// host or host:port; a bare host means the daemon's default port, and the
+// full host:port is what gets saved. With a pairing
 // code (--code, or typed at the prompt) it pairs, which also authorizes this
 // machine there; with --fingerprint, or by confirming the key it shows, it
 // only pins the key and says how to authorize this machine. A host that is
@@ -966,6 +968,10 @@ var errHelp = errors.New("help requested")
 func (a *app) hostAdd(name, address, fingerprint, code string) error {
 	path := a.paths.HostsPath()
 	if err := transport.ValidHostName(name); err != nil {
+		return err
+	}
+	address, err := transport.WithDefaultPort(address)
+	if err != nil {
 		return err
 	}
 	existing, err := transport.LookupHost(path, name)
