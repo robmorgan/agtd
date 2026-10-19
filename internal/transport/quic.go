@@ -497,7 +497,8 @@ func IsConnectionLost(err error) bool {
 	return false
 }
 
-// dialEach tries every address addr resolves to. With a pin it stops at the
+// dialEach tries every address addr (a host, or host:port) resolves to,
+// on DefaultPort when addr names none. With a pin it stops at the
 // first connection, or at a daemon presenting another key; without one
 // (pinned == "") it stops at the first daemon that presents a key, whether
 // or not the handshake then completes. presented is the key the daemon
@@ -505,6 +506,10 @@ func IsConnectionLost(err error) bool {
 func dialEach(ctx context.Context, addr string, id *Identity, pinned, alpn string) (conn *quic.Conn, presented string, err error) {
 	ctx, cancel := context.WithTimeout(ctx, DialTimeout)
 	defer cancel()
+	addr, err = WithDefaultPort(addr)
+	if err != nil {
+		return nil, "", err
+	}
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, "", err

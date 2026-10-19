@@ -518,8 +518,9 @@ On the machine you connect from, run:
 Waiting until 14:05:12 (Ctrl-C to cancel)...
 ```
 
-**On the laptop**, run that command. Or leave out `--code`: `agt host add` then shows the key
-the devbox presents and asks for the code:
+**On the laptop**, run that command. The port can be left out: `agt host add devbox 100.64.0.5`
+means port 7433, the default. Or leave out `--code`: `agt host add` then shows the key the devbox
+presents and asks for the code:
 
 ```text
 $ agt host add devbox 100.64.0.5:7433
