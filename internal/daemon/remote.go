@@ -16,7 +16,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
-	"github.com/robmorgan/agtd/internal/config"
+	"agtd.sh/internal/config"
 )
 
 // DefaultRemotePort is the UDP port `agtd remote enable` listens on when

@@ -17,10 +17,10 @@ import (
 	"github.com/creack/pty"
 	"golang.org/x/sys/unix"
 
-	"github.com/robmorgan/agtd/internal/paths"
-	"github.com/robmorgan/agtd/internal/protocol"
-	"github.com/robmorgan/agtd/internal/transport"
-	"github.com/robmorgan/agtd/internal/transport/transporttest"
+	"agtd.sh/internal/paths"
+	"agtd.sh/internal/protocol"
+	"agtd.sh/internal/transport"
+	"agtd.sh/internal/transport/transporttest"
 )
 
 // These tests drive the real agt and agtd binaries through real PTYs.

@@ -16,10 +16,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/robmorgan/agtd/internal/db"
-	"github.com/robmorgan/agtd/internal/paths"
-	"github.com/robmorgan/agtd/internal/protocol"
-	"github.com/robmorgan/agtd/internal/session"
+	"agtd.sh/internal/db"
+	"agtd.sh/internal/paths"
+	"agtd.sh/internal/protocol"
+	"agtd.sh/internal/session"
 )
 
 // These tests run the real worker (Run) in-process against a real PTY and

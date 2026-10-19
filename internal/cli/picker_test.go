@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/robmorgan/agtd/internal/session"
+	"agtd.sh/internal/session"
 )
 
 func testPicker(t *testing.T, sessions ...session.Record) *picker {

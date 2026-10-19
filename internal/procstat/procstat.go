@@ -16,7 +16,7 @@ import (
 	"runtime/metrics"
 	"time"
 
-	"github.com/robmorgan/agtd/internal/protocol"
+	"agtd.sh/internal/protocol"
 )
 
 // ErrUnsupported is returned by Read on platforms it has no reader for.

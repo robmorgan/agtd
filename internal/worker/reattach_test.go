@@ -8,7 +8,7 @@ import (
 
 	"go.mitchellh.com/libghostty"
 
-	"github.com/robmorgan/agtd/internal/protocol"
+	"agtd.sh/internal/protocol"
 )
 
 // These tests check the snapshot a real worker sends on attach, restored

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/robmorgan/agtd/internal/session"
+	"agtd.sh/internal/session"
 )
 
 func strp(s string) *string { return &s }

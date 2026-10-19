@@ -10,7 +10,7 @@ import (
 
 	"go.mitchellh.com/libghostty"
 
-	"github.com/robmorgan/agtd/internal/session"
+	"agtd.sh/internal/session"
 )
 
 // native builds a nativeStatus as deriveNow would, summary included.

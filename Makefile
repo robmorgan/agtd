@@ -6,8 +6,8 @@ BINDIR ?= $(or $(GOBIN),$(shell go env GOPATH)/bin)
 PKG_CONFIG_PATH := $(CURDIR)/.build/ghostty-out/share/pkgconfig
 export PKG_CONFIG_PATH
 # Both binaries report the same version.
-LDFLAGS := -X github.com/robmorgan/agtd/internal/cli.Version=$(VERSION) \
-	-X github.com/robmorgan/agtd/internal/daemon.Version=$(VERSION)
+LDFLAGS := -X agtd.sh/internal/cli.Version=$(VERSION) \
+	-X agtd.sh/internal/daemon.Version=$(VERSION)
 
 # libghostty-vt, which agtd links, needs Zig 0.16+ (see README.md).
 libghostty:

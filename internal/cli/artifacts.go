@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/robmorgan/agtd/internal/protocol"
-	"github.com/robmorgan/agtd/internal/session"
+	"agtd.sh/internal/protocol"
+	"agtd.sh/internal/session"
 )
 
 // What a session produced: `agt diff`, `agt artifacts`, `agt

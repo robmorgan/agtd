@@ -5,7 +5,7 @@ package main
 import (
 	"os"
 
-	"github.com/robmorgan/agtd/internal/cli"
+	"agtd.sh/internal/cli"
 )
 
 func main() {

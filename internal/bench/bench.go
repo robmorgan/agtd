@@ -33,12 +33,12 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/robmorgan/agtd/internal/db"
-	"github.com/robmorgan/agtd/internal/paths"
-	"github.com/robmorgan/agtd/internal/procstat"
-	"github.com/robmorgan/agtd/internal/protocol"
-	"github.com/robmorgan/agtd/internal/session"
-	"github.com/robmorgan/agtd/internal/transport"
+	"agtd.sh/internal/db"
+	"agtd.sh/internal/paths"
+	"agtd.sh/internal/procstat"
+	"agtd.sh/internal/protocol"
+	"agtd.sh/internal/session"
+	"agtd.sh/internal/transport"
 )
 
 type processStats = protocol.ProcessStats

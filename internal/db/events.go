@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/robmorgan/agtd/internal/session"
+	"agtd.sh/internal/session"
 )
 
 // Events (see session.Event) are rows of the events table, written by the

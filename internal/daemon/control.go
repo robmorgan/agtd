@@ -7,8 +7,8 @@ import (
 	"runtime"
 	"sync"
 
-	"github.com/robmorgan/agtd/internal/protocol"
-	"github.com/robmorgan/agtd/internal/transport"
+	"agtd.sh/internal/protocol"
+	"agtd.sh/internal/transport"
 )
 
 // maxControlInFlight bounds the requests one control stream may have in

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/robmorgan/agtd/internal/session"
+	"agtd.sh/internal/session"
 )
 
 func featuresOf(caps ...string) Features { return NegotiateFeatures(caps, caps) }

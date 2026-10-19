@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/robmorgan/agtd/internal/session"
+	"agtd.sh/internal/session"
 )
 
 const sampleDiff = `diff --git a/a.txt b/a.txt

@@ -7,8 +7,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/robmorgan/agtd/internal/protocol"
-	"github.com/robmorgan/agtd/internal/session"
+	"agtd.sh/internal/protocol"
+	"agtd.sh/internal/session"
 )
 
 // Sessions across hosts. Every host's daemon owns its own sessions; the CLI

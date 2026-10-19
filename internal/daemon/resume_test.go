@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/robmorgan/agtd/internal/protocol"
-	"github.com/robmorgan/agtd/internal/session"
-	"github.com/robmorgan/agtd/internal/transport"
-	"github.com/robmorgan/agtd/internal/transport/transporttest"
+	"agtd.sh/internal/protocol"
+	"agtd.sh/internal/session"
+	"agtd.sh/internal/transport"
+	"agtd.sh/internal/transport/transporttest"
 )
 
 // These tests cover session resumption: session UIDs, attachment

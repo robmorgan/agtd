@@ -220,7 +220,7 @@ source_dir() {
     here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   fi
   if [[ -n "${here}" && -f "${here}/go.mod" ]] &&
-    grep -q '^module github.com/robmorgan/agtd$' "${here}/go.mod"; then
+    grep -q '^module agtd.sh$' "${here}/go.mod"; then
     step "Source: ${here} (this checkout)"
     echo "${here}"
     return

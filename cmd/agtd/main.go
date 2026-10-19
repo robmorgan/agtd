@@ -22,14 +22,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/robmorgan/agtd/internal/bench"
-	"github.com/robmorgan/agtd/internal/config"
-	"github.com/robmorgan/agtd/internal/daemon"
-	"github.com/robmorgan/agtd/internal/paths"
-	"github.com/robmorgan/agtd/internal/protocol"
-	"github.com/robmorgan/agtd/internal/session"
-	"github.com/robmorgan/agtd/internal/transport"
-	"github.com/robmorgan/agtd/internal/worker"
+	"agtd.sh/internal/bench"
+	"agtd.sh/internal/config"
+	"agtd.sh/internal/daemon"
+	"agtd.sh/internal/paths"
+	"agtd.sh/internal/protocol"
+	"agtd.sh/internal/session"
+	"agtd.sh/internal/transport"
+	"agtd.sh/internal/worker"
 	"golang.org/x/term"
 )
 

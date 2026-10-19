@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/robmorgan/agtd/internal/db"
+	"agtd.sh/internal/db"
 )
 
 // The bench runs a freshly built agtd as its daemon and workers.

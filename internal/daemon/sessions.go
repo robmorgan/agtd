@@ -11,11 +11,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/robmorgan/agtd/internal/db"
-	"github.com/robmorgan/agtd/internal/protocol"
-	"github.com/robmorgan/agtd/internal/repo"
-	"github.com/robmorgan/agtd/internal/session"
-	"github.com/robmorgan/agtd/internal/transport"
+	"agtd.sh/internal/db"
+	"agtd.sh/internal/protocol"
+	"agtd.sh/internal/repo"
+	"agtd.sh/internal/session"
+	"agtd.sh/internal/transport"
 )
 
 const (

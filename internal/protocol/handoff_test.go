@@ -4,7 +4,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/robmorgan/agtd/internal/session"
+	"agtd.sh/internal/session"
 )
 
 func TestHandoffRoundTrips(t *testing.T) {
