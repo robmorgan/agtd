@@ -65,6 +65,7 @@ func (a *app) commands() []*cobra.Command {
 		if err != nil {
 			return err
 		}
+		req.Colors = terminalColors()
 		resp, err := c.call(&protocol.Request{CreateSession: req}, 0, func(r *protocol.Response) bool { return r.CreateSession != nil })
 		if err != nil {
 			return err

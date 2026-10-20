@@ -554,7 +554,7 @@ func (c *client) createFromUI(name, agent string) (id, message string, err error
 	if err != nil {
 		return "", "", err
 	}
-	req := &protocol.CreateSession{Cwd: cwd, Agent: agent}
+	req := &protocol.CreateSession{Cwd: cwd, Agent: agent, Colors: terminalColors()}
 	if name != "" {
 		req.Name = &name
 	}

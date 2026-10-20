@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -97,12 +98,18 @@ func newRoot(t testing.TB) (string, *harness) {
 
 func startWorkerWith(t testing.TB, script string) *harness {
 	t.Helper()
+	return startWorkerArgs(t, script, nil)
+}
+
+// startWorkerArgs is startWorkerWith with the creating terminal's colours.
+func startWorkerArgs(t testing.TB, script string, colors *protocol.TerminalColors) *harness {
+	t.Helper()
 	dir, h := newRoot(t)
 	p := h.paths
 	go func() {
 		h.done <- Run(Args{
 			SessionID: h.sessionID, Cwd: dir, CreatedAt: h.createdAt, UID: h.uid,
-			AgentName: "sh", Command: "/bin/sh", Args: []string{"-c", script},
+			AgentName: "sh", Command: "/bin/sh", Args: []string{"-c", script}, Colors: colors,
 		})
 	}()
 	t.Cleanup(h.cleanup)
@@ -844,4 +851,29 @@ func TestSnapshotIsAnExactBoundary(t *testing.T) {
 	c.input("done\n")
 	c.expectEnd()
 	h.waitExit()
+}
+
+// The agent's terminal is the worker's shadow terminal, so it is told so
+// when the daemon's environment says nothing, or says "dumb".
+func TestAgentTerminalEnv(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		env  []string
+		want []string
+	}{
+		{"missing", []string{"HOME=/h"}, []string{"HOME=/h", "TERM=xterm-256color", "COLORTERM=truecolor"}},
+		{"dumb", []string{"TERM=dumb", "HOME=/h"}, []string{"HOME=/h", "TERM=xterm-256color", "COLORTERM=truecolor"}},
+		{"empty", []string{"TERM=", "COLORTERM=24bit"}, []string{"COLORTERM=24bit", "TERM=xterm-256color"}},
+		{"kept", []string{"TERM=xterm-ghostty", "COLORTERM=truecolor"}, []string{"TERM=xterm-ghostty", "COLORTERM=truecolor"}},
+	} {
+		if got := agentTerminalEnv(c.env); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+	// And the agent sees it.
+	t.Setenv("TERM", "dumb")
+	h := startWorkerWith(t, `echo "term=$TERM color=$COLORTERM"; exec sleep 60`)
+	c := h.attach(protocol.Geometry{Cols: 80, Rows: 24})
+	c.output.Write(c.snapshot)
+	c.expectOutput("term=xterm-256color color=truecolor")
 }

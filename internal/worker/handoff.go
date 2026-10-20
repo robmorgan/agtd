@@ -114,6 +114,9 @@ type handoffState struct {
 	// agent must stay blocked across a handoff, since the program will
 	// not re-report on its own. Nil from an older image.
 	Status *statusHandoff
+	// Colors are the client terminal's default colours (colors.go). Nil
+	// from an older image, or when no terminal reported them.
+	Colors *protocol.TerminalColors
 
 	// Inherited descriptors.
 	PTYFD      int
@@ -215,6 +218,13 @@ func (rt *runtime) tryHandoff(req *handoffRequest, state *ownerState) (err error
 
 	var st *handoffState
 	if err := rt.owner.do(func(s *ownerState) error {
+		// The start of a colour query held back for its end goes to the
+		// terminal now: the next image starts with nothing held.
+		if tail := s.colorQueries.flush(); len(tail) > 0 {
+			if err := s.publishScanned(tail); err != nil {
+				return err
+			}
+		}
 		term, err := s.terminal.handoff()
 		if err != nil {
 			return err
@@ -229,6 +239,7 @@ func (rt *runtime) tryHandoff(req *handoffRequest, state *ownerState) (err error
 			Geometry:  s.geometry,
 			SizeOwner: s.sizeOwner,
 			Status:    s.status.handoff(),
+			Colors:    s.colors,
 		}
 		if s.activity != nil {
 			s.activity.exportAlertMemory(st.Status)
@@ -500,6 +511,7 @@ func resumeRuntime(st *handoffState) (*runtime, *ownerState, error) {
 	state.owner = rt.owner
 	state.geometry = st.Geometry
 	state.sizeOwner = st.SizeOwner
+	state.colors = st.Colors
 	if state.sizeOwner != "" {
 		state.armSizeOwnerGrace()
 	}

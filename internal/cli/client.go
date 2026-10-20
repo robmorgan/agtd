@@ -614,6 +614,8 @@ func describeResponse(r *protocol.Response) string {
 	switch {
 	case r.DaemonInfo != nil:
 		return "DaemonInfo"
+	case r.Field != nil:
+		return "Field"
 	case r.CreateSession != nil:
 		return "CreateSession"
 	case r.KillSession != nil:

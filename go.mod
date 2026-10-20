@@ -3,9 +3,11 @@ module github.com/robmorgan/agtd
 go 1.26.0
 
 require (
+	filippo.io/cpace v0.0.0-20210101143347-24d601e2e469
 	github.com/BurntSushi/toml v1.6.0
 	github.com/creack/pty v1.1.24
 	github.com/quic-go/quic-go v0.63.0
+	github.com/rivo/uniseg v0.4.7
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.9
 	go.mitchellh.com/libghostty v0.0.0-20261007030428-8812ad0e0f79
@@ -15,7 +17,6 @@ require (
 )
 
 require (
-	filippo.io/cpace v0.0.0-20210101143347-24d601e2e469 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gtank/ristretto255 v0.1.2 // indirect

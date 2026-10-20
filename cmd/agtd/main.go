@@ -66,7 +66,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "       agtd remote enable [ADDRESS] [--yes] | disable | status")
 	fmt.Fprintln(os.Stderr, "       agtd remote pair | id | list | authorize FINGERPRINT [NAME] | revoke FINGERPRINT")
 	fmt.Fprintln(os.Stderr, "       agtd bench sessions [--count N] [--output-heavy N] [--attach K] [--duration D] [--fill-lines L] [--json] [--json-file F]")
-	fmt.Fprintln(os.Stderr, "       agtd session-worker --session-id ID --cwd DIR --created-at TS --session-uid UID --agent-name NAME --command CMD [--model M] [--arg A]...")
+	fmt.Fprintln(os.Stderr, "       agtd session-worker --session-id ID --cwd DIR --created-at TS --session-uid UID --agent-name NAME --command CMD [--model M] [--colors FG/BG] [--arg A]...")
 }
 
 func runServe(argv []string) int {
@@ -562,6 +562,7 @@ func runSessionWorker(argv []string) int {
 	fs.StringVar(&args.AgentName, "agent-name", "", "agent name")
 	fs.StringVar(&args.Command, "command", "", "agent command")
 	fs.StringVar(&args.Model, "model", "", "model")
+	colors := fs.String("colors", "", "default colours of the creating terminal, foreground/background as rrggbb/rrggbb")
 	fs.Var(&extra, "arg", "agent argument (repeatable)")
 	probe := fs.Bool("handoff-probe", false, "print the handoff formats this binary can resume from")
 	resumeFD := fs.Int("resume-fd", -1, "resume a session handed off by a previous image (internal)")
@@ -580,6 +581,14 @@ func runSessionWorker(argv []string) int {
 		return 0
 	}
 	args.Args = extra
+	if *colors != "" {
+		c, err := protocol.ParseTerminalColors(*colors)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "session-worker: %v\n", err)
+			return 2
+		}
+		args.Colors = c
+	}
 	for name, v := range map[string]string{
 		"--session-id": args.SessionID, "--cwd": args.Cwd, "--created-at": args.CreatedAt, "--session-uid": args.UID,
 		"--agent-name": args.AgentName, "--command": args.Command,

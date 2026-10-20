@@ -23,10 +23,17 @@ import (
 // backpressure to the typist; nothing is buffered without bound.
 func stdinChunks() <-chan []byte {
 	stdinOnce.Do(func() {
+		// The colour probe reads stdin itself, so it runs before the
+		// reader starts; keys it read that were not replies come first.
+		terminalColors()
 		ch := make(chan []byte, stdinQueue)
 		stdinCh = ch
 		go func() {
 			defer close(ch)
+			if len(stdinLeftover) > 0 {
+				ch <- stdinLeftover
+				stdinLeftover = nil
+			}
 			for {
 				buf := make([]byte, 4096)
 				n, err := os.Stdin.Read(buf)
@@ -263,6 +270,9 @@ type keyEvent struct {
 	mods    keyMods
 	paste   string
 	isPaste bool
+	// raw is the bytes the terminal sent for it, so the local echo can
+	// forward a key exactly as it arrived.
+	raw []byte
 }
 
 // keyDecoder turns terminal input into key events. It reads the legacy
@@ -290,8 +300,9 @@ func (d *keyDecoder) push(chunk []byte) []keyEvent {
 				d.pending = append([]byte(nil), b...)
 				break
 			}
-			events = append(events, keyEvent{isPaste: true, paste: string(b[len(pasteStart):end])})
-			b = b[end+len(pasteEnd):]
+			n := end + len(pasteEnd)
+			events = append(events, keyEvent{isPaste: true, paste: string(b[len(pasteStart):end]), raw: append([]byte(nil), b[:n]...)})
+			b = b[n:]
 			continue
 		}
 		ev, n := decodeKey(b)
@@ -299,6 +310,7 @@ func (d *keyDecoder) push(chunk []byte) []keyEvent {
 			d.pending = append([]byte(nil), b...)
 			break
 		}
+		ev.raw = append([]byte(nil), b[:n]...)
 		if ev.code != keyNone {
 			events = append(events, ev)
 		}

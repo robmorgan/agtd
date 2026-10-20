@@ -22,7 +22,7 @@ func seedFrames(f *testing.F) {
 		{Hello: NewHello("seed")},
 		{CreateSession: &CreateSession{Cwd: "/w", Name: strp("fix"), Agent: "codex", Workspace: strp("ws")}},
 		{AttachSession: &AttachSession{SessionID: "ab", Kind: session.AttachmentAttach, Geometry: Geometry{80, 24, 0, 0}}},
-		{AttachSession: &AttachSession{SessionID: "ab", Kind: session.AttachmentAttach, Features: AttachCapabilities(), ExpectUID: "u", Replaces: "attach-1"}},
+		{AttachSession: &AttachSession{SessionID: "ab", Kind: session.AttachmentAttach, Features: AttachCapabilities(), ExpectUID: "u", Replaces: "attach-1", Colors: &TerminalColors{Foreground: RGB{1, 2, 3}, Background: RGB{4, 5, 6}}}},
 		{SendInput: &SendInput{SessionID: "ab", Data: []byte("hi\r")}},
 		{ListSessions: Empty},
 		{GetGitState: &SessionRef{"ab"}},
@@ -33,6 +33,7 @@ func seedFrames(f *testing.F) {
 		{HandoffSession: &HandoffSession{SessionID: "ab", Executable: "/bin/agtd"}},
 		{AttachTakeSize: &Geometry{Cols: 120, Rows: 40}},
 		{AttachLeave: Empty},
+		{AttachField: Empty},
 	}
 	resps := []*Response{
 		{Welcome: &Welcome{Version: 1, Capabilities: []string{CapControlStream}, Host: HostInfo{Agents: []string{"a"}}}},
@@ -41,6 +42,9 @@ func seedFrames(f *testing.F) {
 		{Attached: &Attached{AttachID: "attach-1", Features: []string{CapSessionUID, CapAttachResync}, SessionUID: "u"}},
 		{AttachResync: &Bytes{Data: []byte("\x1b[2J")}},
 		{AttachSizeOwner: &SizeOwnership{Owner: true, OwnerID: "attach-1", Geometry: Geometry{80, 24, 0, 0}}},
+		{Field: &Field{Found: true, Cols: 120, Lines: 40, Alternate: true, Row: 36, Col: 2, TextCol: 2, Width: 117, GrowsUp: true,
+			Rows: []string{"hello"}, Style: []byte("\x1b[0m"), Chrome: []ScreenRow{{Index: 35, VT: []byte("\u2500")}}}},
+		{Field: &Field{Cols: 80, Lines: 24}},
 		{Attachments: &[]session.AttachmentRecord{{AttachID: "a", SessionID: "b", Kind: session.AttachmentTui, ConnectedAt: now}}},
 		ErrorResponsef("no"),
 		{GitState: sampleGitState()},

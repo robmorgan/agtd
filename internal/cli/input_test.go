@@ -2,6 +2,7 @@ package cli
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -62,11 +63,20 @@ func TestKeyDecoder(t *testing.T) {
 	} {
 		var d keyDecoder
 		var got []keyEvent
+		var raw []byte
 		for _, chunk := range tc.chunks {
-			got = append(got, d.push([]byte(chunk))...)
+			for _, ev := range d.push([]byte(chunk)) {
+				// Every event carries the bytes it came from, in order.
+				raw = append(raw, ev.raw...)
+				ev.raw = nil
+				got = append(got, ev)
+			}
 		}
 		if !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("%s: got %+v, want %+v", tc.name, got, tc.want)
+		}
+		if all := strings.Join(tc.chunks, ""); tc.want != nil && !strings.Contains(all, string(raw)) {
+			t.Errorf("%s: raw bytes %q are not from the input %q", tc.name, raw, all)
 		}
 	}
 }

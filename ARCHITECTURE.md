@@ -456,7 +456,7 @@ separate negotiation round trip is needed (`protocol.Request.Role`):
 |---|---|---|
 | request | any one-shot request | one response, then the stream ends |
 | control | `Hello` | `Welcome`, then any number of tagged one-shot requests and their tagged responses, in any order |
-| attach | `AttachSession` | `Attached` with a snapshot, then `PtyOutput` (and `AttachResync`, `AttachSizeOwner`, if negotiated) frames one way and `AttachInput`, `AttachResize`, `AttachSnapshot` (and `AttachTakeSize`, `AttachLeave`) the other, until either side ends it |
+| attach | `AttachSession` | `Attached` with a snapshot, then `PtyOutput` (and `AttachResync`, `AttachSizeOwner`, `Field`, if negotiated) frames one way and `AttachInput`, `AttachResize`, `AttachSnapshot` (and `AttachTakeSize`, `AttachLeave`, `AttachField`) the other, until either side ends it |
 | events | `SubscribeEvents` | `Event` frames, server to client, in id order: the backlog the request asked for, then live ones, until the client closes the stream |
 | artifact | `GetArtifact` | `ArtifactChunk` frames, then `EndOfStream` (or an `Error`: the artifact is incomplete). On a stream of its own, a large transfer never delays the control stream or an attachment |
 | artifact | `GetHistory` | one `History` response holding the whole history (the `history` artifacts stream the same content) |
@@ -499,6 +499,8 @@ features both listed. Today there is one protocol version (1), and these capabil
 | `terminal-memory` | the shadow terminal's memory appended to `SessionStats` |
 | `attach-scrollback` | attach stream: `AttachSession.ScrollbackRows` caps the scrollback in the attach snapshot (see "Bounded scrollback") |
 | `attach-size-owner` | attach stream: `AttachSession.TakeSize`, `Attached.SizeOwner`, `AttachTakeSize`, `AttachLeave` and `AttachSizeOwner`; attachment records carry their sizes after the list (see "Size ownership") |
+| `attach-field` | attach stream: `AttachField` asks where the program's input field is, answered with `Field` (see "The input field and local echo") |
+| `terminal-colors` | `CreateSession.Colors` and, on an attach stream, `AttachSession.Colors` carry the client terminal's default colours; the worker answers the program's OSC 10 and 11 queries with the most recent ones itself (see "Terminal queries") |
 
 The protocol grows without breaking older peers this way: a new message kind, or a field appended
 to the end of an existing message or struct (a session record, even inside a list), comes with a
@@ -555,13 +557,14 @@ tokened request after a lost remote connection (see "Duplicate And Replayed Requ
 | `GetSessionStats` | `SessionStats` (`runtime-stats`) | request |
 | `GetDaemonStats` | `DaemonStats` (`runtime-stats`) | request |
 | `SubscribeEvents` | `Event`, repeated | events |
-| `AttachSession` | `Attached` (or `SessionEnded` for a finished session), then `PtyOutput`, `AttachSnapshot`, `AttachResync`, `AttachSizeOwner`, and finally `SessionEnded`, `EndOfStream`, `SessionRestarting` or `Error` | attach |
+| `AttachSession` | `Attached` (or `SessionEnded` for a finished session), then `PtyOutput`, `AttachSnapshot`, `AttachResync`, `AttachSizeOwner`, `Field`, and finally `SessionEnded`, `EndOfStream`, `SessionRestarting` or `Error` | attach |
+| `AttachField` | `Field` (`attach-field`), on an attach stream | attach |
 | `HandoffSession` | `HandedOff` (from the new image) | request, agtd to a worker only |
 
 Any request may instead be answered with `Error`. Kinds are numbered by area so that parallel work
 does not collide: 1-19 and 101-118 are the base protocol, 30-39 and 130-139 git state and
-artifacts, 50-59 and 150-159 attach streams (`AttachTakeSize` is 50, `AttachLeave` 51, `AttachResync` 150,
-`AttachSizeOwner` 151), 60-69 and 160-169 worker handoff.
+artifacts, 50-59 and 150-159 attach streams (`AttachTakeSize` is 50, `AttachLeave` 51, `AttachField` 52,
+`AttachResync` 150, `AttachSizeOwner` 151, `Field` 152), 60-69 and 160-169 worker handoff.
 
 `attach` is the bidirectional case. After the initial `AttachSession` request and `Attached`
 response (which carries a snapshot of the current screen), the worker streams `PtyOutput` frames
@@ -645,6 +648,23 @@ removed once Claude Code adopted it. The worker answers the protocol's detection
 itself; the identical reply of a client terminal that also supports the protocol is dropped from
 the input, since the worker has already answered and a terminal's reflex must not count as the
 user typing.
+
+### Terminal queries
+
+The other queries a program makes (cursor position, device attributes, keyboard flags, mode
+states) are answered by the shadow terminal only while no client terminal is attached; with one
+attached, the query is relayed and the terminal answers. The default colour queries (OSC 10 and
+11) are the exception. libghostty has no default colours to answer with, and a remote terminal's
+answer takes a round trip, which is more than the 250 ms Codex waits at startup before it gives up
+on styling its composer. So `agt new` and `agt attach` ask their own terminal once, at startup
+(OSC 10 and 11, then the primary device attributes as the sentinel every terminal answers, 300 ms
+at most; `internal/cli/colors.go`), and send the answer with `CreateSession` and `AttachSession`
+(`terminal-colors`). The worker keeps the most recent colours, answers the program with them at
+once whether or not a terminal is attached, and removes the query from the output, so an attached
+terminal does not answer a second time, late, with what the program would take for typed text
+(`internal/worker/colors.go`; a query split across PTY reads is held for its end, at most
+`groundTimeout`). The colours ride along a handoff. With none reported, the queries pass through
+as before.
 
 **Persistence.** Events are rows of the `events` table in `state.db`, written by the daemon and
 the workers. Ids come from `AUTOINCREMENT`, so they increase per runtime root and are never reused;
@@ -739,7 +759,11 @@ When you create a session (`agt new [--cwd DIR] [NAME]`), the daemon:
 5. Waits for the worker to report the session running and bind its socket.
 
 The worker spawns the configured agent inside a PTY in `cwd`, with `AGTD_SESSION_ID`,
-`AGTD_SESSION_NAME` and `AGTD_CWD` injected. The daemon socket is deliberately not passed in.
+`AGTD_SESSION_NAME` and `AGTD_CWD` injected, and with `TERM=xterm-256color` and
+`COLORTERM=truecolor` when the daemon's environment has no `TERM` (it was started by systemd or
+over ssh) or has `TERM=dumb` (a login shell there): the agent's terminal is the worker's shadow
+terminal whatever started the daemon, and without this an agent turns colour off. A `TERM` the
+environment names on purpose is kept. The daemon socket is deliberately not passed in.
 That is not a boundary: agents run as the socket owner and can still find the socket at its
 well-known path, so isolating them needs a sandbox around the agent process.
 
@@ -956,6 +980,76 @@ snapshot and everything after it following as output. Offsets would only help a 
 the missed bytes themselves, which would mean the worker retaining a replay buffer per session, and
 a terminal does not need them: replaying them would only redraw what the snapshot already shows. A
 consumer that wants the full transcript reads history instead.
+
+## The Input Field And Local Echo
+
+Over a slow link every keystroke costs a round trip before the agent's echo of it comes back.
+`agt attach` therefore draws typing locally, in the agent's own input field, exactly where the
+agent will draw it, and sends the keys as typed (`internal/cli/echo.go`). Nothing of agt's own
+is drawn: no panel, no legend, no mode. The design, the measurements it rests on and the phases
+still to come (screen frames) are in `docs/designs/smooth-remote-attach.md`.
+
+**The field.** The worker holds the agent's screen, so it is the one that can say where typed
+text lands. `AttachField` on an attach stream (`attach-field`) is answered, in order with the
+output, by a `protocol.Field` found on the shadow terminal (`internal/worker/field.go`): the
+insertion point (the terminal's cursor, or the one inverse-video cell a program that hides the
+cursor paints as its own), the column the text starts at (after a prompt glyph such as `❯ › >
+$`, or column 0 in a box between rules, or column 0 at a shell prompt), how many columns a row
+holds, which way the box grows (up on the alternate screen, down on the primary), the text on
+each of its rows as the program has drawn it (a faint placeholder is not text; blanks between the
+text and the cursor on its row are spaces the user typed, and are kept), the pen typed text is
+drawn in, and the rows around the field as VT bytes (its rules and the rows it may grow into),
+so the client can grow the box the way the program would and put the rows back. The answer
+waits for the PTY to go quiet for 40 ms (200 ms at most), since the client asks right after
+sending keys and the program draws them a moment after reading them, and it is written after the
+output queued for that client before it, so it describes the screen the client has. What the
+screen cannot tell is in a small per-program profile: Claude Code leaves two columns spare at
+the right, Codex and pi one, and pi keeps a space that falls on a wrap where the other two drop
+it. These were measured on the three programs (the `*-field` streams in
+`internal/worker/testdata/streams`, with marks for each state; `TestFieldFixtures` pins the
+detector against them, so a program that changes its box fails the test and gets re-recorded).
+There is no field, and keys go raw, while the program reports it is `blocked` (OSC 7501), while
+something other than the agent or a shell holds the PTY's foreground (an editor takes keys as
+commands), or while a menu is up (the cursor hidden or highlighted rows: nothing to type into).
+
+**The echo.** The CLI asks for the field once output has been quiet for 150 ms and after each
+batch of keys. With a field in hand, a key is drawn at once and appended to a batch that goes to
+the agent after at most `[composer] flush_after` (50 ms; `0` sends each key on its own). Only
+keys every editor handles the same way are predicted: printable text, Backspace, Delete, Left,
+Right and the Shift-Enter and Alt-Enter newlines (measured: Ctrl-J is a newline in Claude Code
+and Codex but nothing in pi, and Ctrl-Enter submits in Claude Code, is a newline in Codex and
+nothing in pi, so neither is predicted). Any other key (Enter, Tab, Esc, Ctrl-C, Up, Down, ...)
+goes at once, with the batch before it, and the echo pauses until the field is seen again, so the
+agent's own menus, completions and submit work as they always did, one round trip late. The drawing is a
+prediction; the agent is the authority. The CLI keeps the states it predicted, each with its key,
+and an observed field that equals one of them confirms the keys up to it; the keys after it are
+replayed over the observed field (the agent may have wrapped or placed the cursor differently),
+and a field that equals none means the agent did something unpredicted, so its field is adopted
+and the predictions dropped: one visible correction. At most 512 predictions are kept; past that
+the echo lets keys through raw.
+
+**Holding and repainting.** While keys are unconfirmed the attachment's output is dropped by the
+CLI (the agent's own redraw of the field would fight the drawing), and counted. The field is then
+asked for 150 ms after the last flush, together with a snapshot when a repaint is owed; once the
+field confirms every key, the snapshot is painted inside synchronized output (DEC 2026: one
+clear and repaint that the terminal shows as a single change) and output flows again. The one
+visible compromise: while keys are in flight the screen behind the drawing is still, for about
+a round trip after each pause in typing. Nothing is buffered for it: dropped output is gone, and
+the snapshot is the recovery, as for a lagging client. After a lost connection the CLI reattaches
+as before, then asks for the field: the keys it proves missing are sent again, and keys it does
+not account for are dropped, never resent on a guess.
+
+**Growth.** When the drawing needs more rows than the agent has, the rows the box pushes move
+with it (the rule above it on the alternate screen, the rule and status rows below it on the
+primary one), and a box that would pass the bottom of the primary screen scrolls the terminal,
+as pi's own growth does. Rows the agent will fill once it catches up (a shrinking box) are
+blanked until the repaint.
+
+**Limits.** A program that draws a right border loses it under the drawing until the repaint
+(none of the three measured programs draws one). The field is detected on quiet, so a program
+that moves its box while the user types is corrected at the next field. Keys typed during a
+reconnect are still dropped. Frames (the next phase of the design) remove the hold and the
+repaint by composing the drawing over the agent's live screen.
 
 ## Duplicate And Replayed Requests
 

@@ -431,6 +431,9 @@ The daemon injects:
 - `AGTD_SESSION_ID`
 - `AGTD_CWD`
 - `AGTD_SESSION_NAME` (same as `AGTD_SESSION_ID`)
+- `TERM=xterm-256color` and `COLORTERM=truecolor` when the daemon's environment has no `TERM`
+  (a daemon started at boot or over ssh) or `TERM=dumb`: the agent's terminal is agtd's own,
+  whatever started the daemon, and without them agents turn colour off
 
 The daemon socket is not passed to agents. They are not sandboxed, though: an agent runs as your
 user, so it can still reach the daemon at its usual path. There is no structured event channel for
@@ -461,6 +464,24 @@ reconnects by itself, or repaints after the overlay closes or after falling behi
 the screen, since your terminal already has the scrollback. A client
 that falls behind a fast agent (a slow link, a stalled terminal) never slows the agent down: it
 skips output it cannot keep up with and is repainted from the current screen once it catches up.
+
+Typing is local. Over a slow link every key would otherwise wait a round trip for the agent to
+draw it, so `agt attach` draws what you type in the agent's own input box at once, in the
+agent's own wrapping and pen, and sends the keys as you type them, batched for at most 50 ms
+(`[composer] flush_after` in `config.toml`; `enabled = false` turns the local drawing off). The
+worker finds the input box on the session's screen, so this works for Claude Code, Codex, pi and
+a shell prompt alike, and never draws where it cannot be sure: in a menu, a permission prompt or
+an editor, keys go raw as before. Text, Backspace, Delete, Left, Right and the Shift-Enter or
+Alt-Enter newline are drawn locally; Enter, Tab, Esc, Ctrl-C, Ctrl-J, Ctrl-Enter and the other
+keys are never predicted, so the agent's own menus, completions and history work as they always
+did, one round trip late. The agent's rendering replaces the drawing as soon as it arrives; the one thing you may
+notice is that the screen behind the box stands still for about a round trip after you pause
+typing. ARCHITECTURE.md, "The Input Field And Local Echo", has the details.
+
+The CLI also tells the daemon its terminal's default colours (`agt new` and `agt attach` ask for
+them once, at startup), and the worker answers an agent's colour queries with them at once. Codex
+styles its composer by that answer and waits 250 ms for it, less than a round trip to a distant
+host, so without this its composer has no background when attached from afar.
 
 Every session has a UID (`agt status` shows it) as well as its name. A name can be reused once
 its session is removed; the UID never is, so a reconnecting client can tell that the session under

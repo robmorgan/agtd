@@ -314,6 +314,9 @@ func (s *Server) createSession(req *protocol.CreateSession) (*session.CreateResu
 	if req.Model != nil {
 		args = append(args, "--model", *req.Model)
 	}
+	if req.Colors != nil {
+		args = append(args, "--colors", req.Colors.String())
+	}
 	launchArgs := append([]string(nil), agent.Args...)
 	if req.Model != nil && agent.Flag() != "" {
 		launchArgs = append(launchArgs, agent.Flag(), *req.Model)
