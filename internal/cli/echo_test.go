@@ -205,6 +205,18 @@ func TestEchoUnpredictedKeysGoAtOnceAndPause(t *testing.T) {
 	if send, paint := typeKeys(e, "d"); send != nil || paint == nil {
 		t.Fatalf("resumed: send %q, paint %q", send, paint)
 	}
+	// Value: protects=keys typed before an unpredicted key in the same
+	// read are not drawn after it; fails_when=input paints whenever a
+	// key was drawn, even after the pause dropped the predictions;
+	// why_new=the cases above type the unpredicted key in a read of its
+	// own; seam=none; no_claim=what the agent then draws.
+	// Typed in one read, the Enter submits the text before it: drawing
+	// that text after it would show what the agent has just cleared.
+	e.probe()
+	e.fieldAnswer(claudeField([]string{""}))
+	if send, paint := e.input([]byte("ef\r")); string(send) != "def\r" || paint != nil || !e.paused {
+		t.Fatalf("one read: send %q, paint %q, paused %v", send, paint, e.paused)
+	}
 }
 
 // Shift-Enter (kitty form) and Alt-Enter are newlines on every agent;
@@ -623,5 +635,72 @@ func TestEchoPaintsOnceForARead(t *testing.T) {
 	p := string(paint)
 	if strings.Count(p, syncBegin) != 1 || strings.Count(p, cup(9, 0)+"\n") != 1 || e.offset != 1 || !strings.HasSuffix(p, cup(8, 1)+syncEnd) {
 		t.Fatalf("one read:\n%q (offset %d)", p, e.offset)
+	}
+}
+
+// Value: protects=bytes the decoder holds go out after echoIncompleteAfter
+// in a real attach, where tick runs only when the echo's timer fires;
+// fails_when=schedule stops arming the timer for decodeDue;
+// why_new=TestEchoExpiresIncompleteSequences calls tick by hand and never
+// waits on the timer; seam=none; no_claim=the length of the wait.
+// The attach loop runs tick when the timer fires, so the timer must fire
+// for what the decoder holds, even while a field is asked for.
+func TestEchoTimerFiresForHeldBytes(t *testing.T) {
+	e, now := fixedClockEcho(echoFlushAfter)
+	e.probe()
+	e.input([]byte("\x1b["))
+	select {
+	case <-e.timerC():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the timer never fired for the held bytes")
+	}
+	if send, _ := e.tick(now.Add(echoIncompleteAfter)); string(send) != "\x1b[" {
+		t.Fatalf("sent %q", send)
+	}
+}
+
+// Value: protects=keys still batched and keys typed while a resend is owed
+// are sent, in order, when the field is not found or the overlay opens;
+// fails_when=fieldAnswer's not-found branch or suspend leaves the resend
+// owed, so flush keeps returning nothing;
+// why_new=TestEchoReattachSendsEachKeyOnce answers only with a found field
+// and never suspends; seam=none; no_claim=resending keys sent on the lost
+// connection, which no field can prove missing here.
+// Keys held for a resend are not stranded when no field settles it.
+func TestEchoReattachReleasesHeldKeysWithoutAField(t *testing.T) {
+	owed := func() *echo {
+		e, now := fixedClockEcho(echoFlushAfter)
+		e.fieldAnswer(claudeField([]string{""}))
+		typeKeys(e, "ab")
+		e.tick(now.Add(time.Second)) // "ab" sent
+		typeKeys(e, "c")             // batched
+		e.reattached()
+		if send, _ := e.input([]byte("d")); send != nil {
+			t.Fatalf("typed while the resend is owed: send %q", send)
+		}
+		return e
+	}
+
+	// The agent's field is gone (another screen took over).
+	e := owed()
+	if _, reqs := e.tick(e.now()); len(reqs) == 0 || reqs[0].AttachField == nil {
+		t.Fatalf("not asked: %v", reqs)
+	}
+	if send, paint := e.fieldAnswer(&protocol.Field{}); string(send) != "cd" || paint != nil {
+		t.Fatalf("no field: send %q, paint %q", send, paint)
+	}
+	if send, _ := e.input([]byte("e")); string(send) != "e" {
+		t.Fatalf("after the answer: send %q", send)
+	}
+
+	// The overlay opens before the field answers.
+	e = owed()
+	if send := e.suspend(); string(send) != "cd" {
+		t.Fatalf("suspend sent %q", send)
+	}
+	// Afterwards keys are batched and go as usual.
+	e.input([]byte("e"))
+	if send, _ := e.tick(e.now().Add(time.Second)); string(send) != "e" {
+		t.Fatalf("after the overlay: send %q", send)
 	}
 }
