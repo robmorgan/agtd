@@ -400,7 +400,7 @@ request token the daemon recognises (see "Duplicate And Replayed Requests"). Oth
 
 The daemon's tests run full sessions over QUIC, and over a TCP stand-in, to keep the seam honest.
 The QUIC ones also run through a UDP relay standing in for the network
-(`internal/transport/transporttest`), which can black-hole traffic, block new connections, or move
+(`internal/transport/transporttest`), which can black-hole traffic, delay it by a chosen one-way time, block new connections, or move
 a client to a new address: they cover an address change mid-attachment, a hard network switch, an
 outage longer than the dead-peer timeout, a client that stops reading while its session writes
 about 67 MB (checking the daemon's heap and the worker's RSS stay flat), and fifty abrupt reconnects in a row, counting goroutines, file descriptors, streams and attachments
