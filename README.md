@@ -426,7 +426,11 @@ a session in a devbox's checkout without knowing the devbox's paths.
 
 ## Configure Agents
 
-Create `<runtime-root>/config.toml`:
+The first `agt` command on a machine writes `<runtime-root>/config.toml` with Claude Code
+(`claude`), Codex (`codex`) and pi (`pi`) configured. The default agent, the one `agt new` starts
+without `--agent`, is the first of those three found on `PATH` at that moment (`claude` when
+none is), so a machine with just one of them installed needs no configuration. Edit the file to
+change it; it is never rewritten. For example:
 
 ```toml
 default_agent = "claude"
@@ -450,8 +454,8 @@ scrollback_rows = 1000
 
 Agent picker order follows the order of the `[agents.*]` tables in this file. `default_agent`
 must name one of those configured agents. Without it, the default is `claude` if configured,
-otherwise the first agent listed. With no `config.toml` at all, `claude` and `codex` are
-configured and `claude` is the default.
+otherwise the first agent listed. With no `config.toml` at all, the built-in defaults are the
+ones written above.
 
 The daemon injects:
 
