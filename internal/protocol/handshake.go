@@ -195,6 +195,15 @@ const (
 	// AttachLeave requests and AttachSizeOwner frames; on a control stream, attachment
 	// records carry SizeOwner, Cols and Rows.
 	CapAttachSizeOwner = "attach-size-owner"
+	// CapAttachField (attach stream): AttachField asks the worker where
+	// the program's input field is, answered with Field, so a client can
+	// echo typed text locally where the program will draw it.
+	CapAttachField = "attach-field"
+	// CapTerminalColors: CreateSession.Colors and AttachSession.Colors
+	// carry the client terminal's default colours, and the worker answers
+	// the program's OSC 10 and 11 queries with the most recent ones
+	// itself, whether or not a terminal is attached.
+	CapTerminalColors = "terminal-colors"
 )
 
 // GlobalSessionID identifies one incarnation of a session across every
@@ -215,13 +224,14 @@ const MinProtocolVersion uint16 = 1
 // Capabilities is what this build supports.
 func Capabilities() []string {
 	return []string{CapControlStream, CapGitState, CapArtifacts, CapSessionUID, CapRequestTokens, CapAttachFeatures, CapAttachReplace, CapAttachResync, CapRuntimeStats,
-		CapEvents, CapSessionActivity, CapSessionStatus, CapDaemonID, CapSessionRestart, CapWorkerHandoff, CapTerminalMemory, CapAttachScrollback, CapAttachSizeOwner}
+		CapEvents, CapSessionActivity, CapSessionStatus, CapDaemonID, CapSessionRestart, CapWorkerHandoff, CapTerminalMemory, CapAttachScrollback, CapAttachSizeOwner,
+		CapAttachField, CapTerminalColors}
 }
 
 // AttachCapabilities are the capabilities that apply to an attach stream,
 // listed in AttachSession.Features.
 func AttachCapabilities() []string {
-	return []string{CapSessionUID, CapAttachReplace, CapAttachResync, CapSessionRestart, CapAttachScrollback, CapAttachSizeOwner}
+	return []string{CapSessionUID, CapAttachReplace, CapAttachResync, CapSessionRestart, CapAttachScrollback, CapAttachSizeOwner, CapAttachField, CapTerminalColors}
 }
 
 // AttachFeatures is the attach-stream features a client may ask for given

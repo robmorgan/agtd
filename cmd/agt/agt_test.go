@@ -181,6 +181,7 @@ func (e *env) startSized(rows, cols uint16, args ...string) *term {
 			tm.mu.Lock()
 			tm.out.Write(buf[:n])
 			tm.mu.Unlock()
+			tm.answerQueries(buf[:n])
 			if err != nil {
 				return
 			}
@@ -193,6 +194,24 @@ func (e *env) startSized(rows, cols uint16, args ...string) *term {
 		tty.Close()
 	})
 	return tm
+}
+
+// termColors are what this terminal answers the colour queries with.
+const termColors = "dddddd/1e1e2e"
+
+// answerQueries answers the queries a terminal would: the primary device
+// attributes, and the default colours (the CLI asks for them at startup,
+// and the worker answers the agent's from what the CLI reported).
+func (tm *term) answerQueries(out []byte) {
+	for _, q := range []struct{ query, reply string }{
+		{"\x1b[c", "\x1b[?62;22c"},
+		{"\x1b]10;?", "\x1b]10;rgb:dddd/dddd/dddd\x1b\\"},
+		{"\x1b]11;?", "\x1b]11;rgb:1e1e/1e1e/2e2e\x1b\\"},
+	} {
+		for range bytes.Count(out, []byte(q.query)) {
+			tm.pty.Write([]byte(q.reply))
+		}
+	}
 }
 
 func (tm *term) output() string {
@@ -274,7 +293,7 @@ func (tm *term) wait() {
 // detachSequence clears the screen after Ctrl-\ detaches.
 const detachSequence = "\x1b[H\x1b[2J"
 
-const restoreSequence = "\x1b[?1049l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?1004l\x1b[<u\x1b[>4m\x1b[?25h"
+const restoreSequence = "\x1b[?2026l\x1b[?1049l\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?2004l\x1b[?1004l\x1b[<32u\x1b[>4m\x1b[?7h\x1b[m\x1b[0 q\x1b[?25h"
 
 func TestAttachEndToEnd(t *testing.T) {
 	e := newEnv(t, "")
@@ -966,4 +985,65 @@ func (b *syncBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+// Typing is echoed locally in the shell's own prompt: the drawing arrives
+// inside synchronized output, keys still reach the shell (batched), and
+// Enter runs the command. With the echo off, nothing is drawn.
+func TestLocalEchoEndToEnd(t *testing.T) {
+	e := newEnv(t, "")
+	tm := e.start("new", "demo")
+	m := tm.expect(0, "attached to demo")
+	m = tm.expect(m, "$ ")
+	// The field is asked for once output has been quiet for a moment.
+	time.Sleep(500 * time.Millisecond)
+	tm.write("echo hi-$((1+2))")
+	m = tm.expect(m, "\x1b[?2026h")
+	m = tm.expect(m, "echo hi-$((1+2))")
+	// The echo holds the shell's own echo until the field confirms the
+	// keys, then repaints the screen from a snapshot, in one step.
+	m = tm.expect(m, "\x1b[?2026h\x1b[2J\x1b[H")
+	m = tm.expect(m, "\x1b[?2026l")
+	tm.write("\r")
+	m = tm.expect(m, "hi-3")
+	tm.write("\x1c")
+	tm.wait()
+	if out := e.mustRun("agt", "history", "demo"); !strings.Contains(out, "hi-3") {
+		t.Fatalf("history:\n%s", out)
+	}
+
+	e2 := newEnv(t, "\n[composer]\nenabled = false\n")
+	tm = e2.start("new", "demo")
+	m = tm.expect(0, "$ ")
+	time.Sleep(500 * time.Millisecond)
+	tm.write("echo off-$((2+2))\r")
+	m = tm.expect(m, "off-4")
+	if strings.Contains(tm.output(), "\x1b[?2026h") {
+		t.Fatal("the echo drew with [composer] enabled = false")
+	}
+	tm.write("\x1c")
+	tm.wait()
+}
+
+// The worker answers the agent's colour queries with the colours the
+// terminal reported, at once and without the terminal seeing the query;
+// the answer survives a live handoff.
+func TestTerminalColorsAnswered(t *testing.T) {
+	e := newEnv(t, "")
+	tm := e.start("new", "demo")
+	m := tm.expect(0, "$ ")
+	const querier = `stty raw -echo min 0 time 10; printf '\033]11;?\033\\'; r=$(dd bs=1 count=25 2>/dev/null | tr -d '\033'); stty sane; echo "reply:$r"`
+	tm.write(querier + "\r")
+	m2 := tm.expect(m, "reply:]11;rgb:1e1e/1e1e/2e2e")
+	if strings.Contains(tm.output()[m:m2], "\x1b]11;?") {
+		t.Fatal("the colour query reached the terminal")
+	}
+	if out := e.mustRun("agt", "daemon", "upgrade"); !strings.Contains(out, "Session demo now runs") {
+		t.Fatalf("upgrade did not hand the session off:\n%s", out)
+	}
+	m = tm.expect(m2, "$ ")
+	tm.write(querier + "\r")
+	tm.expect(m, "reply:]11;rgb:1e1e/1e1e/2e2e")
+	tm.write("\x1c")
+	tm.wait()
 }

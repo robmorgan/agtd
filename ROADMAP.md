@@ -1095,6 +1095,26 @@ Do not build these before direct networking demonstrates the need.
 
 ---
 
+# Phase 14 — A remote attach that feels local
+
+The design (`docs/designs/smooth-remote-attach.md`): typing drawn at once in the agent's own
+input field and sent as typed, with the agent as the authority; then the screen as frames paced
+by the client, so lag never flashes.
+
+## Deliverables
+
+* [x] The input field found on the worker's screen (`attach-field`, `Field`), with fixtures
+      recorded from Claude Code, Codex and pi
+* [x] Local echo in the field: predicted keys, batching, the hold while keys are in flight, the
+      atomic repaint once the field confirms them, resend after a reattach for the keys the
+      field proves missing
+* [ ] Measurements on a real slow link (`agt bench echo`, a delay knob on the test relay)
+* [ ] Screen frames (`attach-frames`): rows diffed per attachment, one frame in flight, the echo
+      composed over the live screen, native scrollback kept
+* [ ] `attach-compose` for scripts, submit-and-switch
+
+---
+
 # Optional compatibility transports
 
 QUIC is the primary remote transport.

@@ -363,7 +363,12 @@ upgrade_daemon() {
     return
   fi
   step "Daemon: running; upgrading it, sessions are handed over live"
-  if ! "${bindir}/agtd" upgrade; then
+  # Through a login shell, as the systemd unit starts the daemon: the new
+  # daemon's environment goes to every session it spawns, and this script
+  # often runs over a plain ssh connection whose PATH lacks ~/.local/bin,
+  # where claude lives.
+  # shellcheck disable=SC2016 # $0 is for the login shell to expand
+  if ! "${SHELL:-/bin/sh}" -l -c 'exec "$0" upgrade' "${bindir}/agtd"; then
     note "the upgrade failed; the old daemon may still be running. Retry with \`agt daemon upgrade\`."
   fi
 }

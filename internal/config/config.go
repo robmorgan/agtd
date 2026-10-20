@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -15,6 +16,7 @@ type Config struct {
 	Agents       map[string]AgentConfig `toml:"agents"`
 	Remote       RemoteConfig           `toml:"remote"`
 	Attach       AttachConfig           `toml:"attach"`
+	Composer     ComposerConfig         `toml:"composer"`
 
 	// agentOrder lists the Agents keys in file order, which a map loses.
 	agentOrder []string
@@ -51,6 +53,41 @@ func (a AttachConfig) AttachScrollbackRows() int {
 	return *a.ScrollbackRows
 }
 
+// ComposerConfig is the local echo of typing in `agt attach`: keys are drawn
+// in the agent's own input field at once and sent as typed.
+type ComposerConfig struct {
+	// Enabled turns the local echo on (the default) or off, in which
+	// case keys are sent as they are typed with no local drawing.
+	Enabled *bool `toml:"enabled"`
+	// FlushAfter is how long typed keys wait for company before they go
+	// to the agent, as a duration ("50ms"); the local drawing never
+	// waits. 0 sends every key at once. Unset means DefaultFlushAfter.
+	FlushAfter string `toml:"flush_after"`
+}
+
+// DefaultFlushAfter batches keys typed within the window into one write,
+// the way fast typing arrives, so the agent redraws per batch rather than
+// per key.
+const DefaultFlushAfter = 50 * time.Millisecond
+
+// MaxFlushAfter bounds the batching; past it the agent would notice.
+const MaxFlushAfter = 500 * time.Millisecond
+
+// EchoEnabled is Enabled with its default applied.
+func (c ComposerConfig) EchoEnabled() bool { return c.Enabled == nil || *c.Enabled }
+
+// EchoFlushAfter is FlushAfter parsed, with its default applied.
+func (c ComposerConfig) EchoFlushAfter() time.Duration {
+	if c.FlushAfter == "" {
+		return DefaultFlushAfter
+	}
+	d, err := time.ParseDuration(c.FlushAfter)
+	if err != nil {
+		return DefaultFlushAfter
+	}
+	return d
+}
+
 type AgentConfig struct {
 	Command string   `toml:"command"`
 	Args    []string `toml:"args"`
@@ -85,6 +122,14 @@ model_flag = "--model"
 # "agt history" has the rest.
 [attach]
 scrollback_rows = 1000
+
+# Typing in "agt attach" is drawn in the agent's own input field at once
+# and sent as typed, batched for at most flush_after ("0" sends every key
+# on its own). enabled = false sends keys as they are typed with no local
+# drawing.
+[composer]
+enabled = true
+flush_after = "50ms"
 `
 
 func defaultConfig() *Config {
@@ -126,6 +171,12 @@ func Load(path string) (*Config, error) {
 	}
 	if n := cfg.Attach.ScrollbackRows; n != nil && *n < -1 {
 		return nil, fmt.Errorf("[attach] scrollback_rows must be -1 (all), 0 or more in %s", path)
+	}
+	if f := cfg.Composer.FlushAfter; f != "" {
+		d, err := time.ParseDuration(f)
+		if err != nil || d < 0 || d > MaxFlushAfter {
+			return nil, fmt.Errorf("[composer] flush_after must be a duration between 0 and %s in %s", MaxFlushAfter, path)
+		}
 	}
 	if len(cfg.Agents) > 0 {
 		if _, ok := cfg.Agents[cfg.DefaultAgent]; !ok {

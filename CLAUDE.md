@@ -540,6 +540,7 @@ Done:
 - Releases: a `v*` tag runs `.github/workflows/release.yml` (`scripts/release-build.sh`): Linux amd64/arm64 linked against glibc 2.28 by `zig cc`, a universal macOS binary signed and notarized, each smoke tested, published with `SHA256SUMS`.
 
 - Audit: pairings, failed pairings, manual authorizations and revocations, and remote connections are host events (empty session id) in `agt events` (`internal/daemon/audit.go`).
+- Local echo: the worker finds the program's input field on its screen (`internal/worker/field.go`, `AttachField`/`Field` under `attach-field`, fixtures from Claude Code, Codex and pi) and `agt attach` draws typing there at once, sending keys as typed (`internal/cli/echo.go`, `[composer]` in config.toml); the design and its next phases are in `docs/designs/smooth-remote-attach.md`. The worker answers the program's default colour queries (OSC 10/11) with the client terminal's colours (`terminal-colors`, `internal/worker/colors.go`), since Codex waits only 250 ms for them.
 
 Next:
 1. Per-client permissions, if remote peers need to be limited.

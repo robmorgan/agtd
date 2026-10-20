@@ -22,13 +22,23 @@ import (
 const (
 	// attachEnterSequence pushes the kitty keyboard protocol's
 	// "disambiguate" flag, so Ctrl-[ and Esc arrive as different keys.
+	// It is written once per attachment: the agent's own flags, which
+	// the snapshot and its output set on top, live on this level.
 	attachEnterSequence = "\x1b[>1u"
-	// attachRestoreSequence undoes what an agent may have turned on: the
-	// alternate screen, mouse reporting, bracketed paste, focus events, the
-	// kitty keyboard flags (popped), xterm's modifyOtherKeys (which
-	// Claude Code sets, and which leaves a shell reading Ctrl-R as
-	// "27;5;114~") and a hidden cursor.
-	attachRestoreSequence = "\x1b[?1049l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?1004l\x1b[<u\x1b[>4m\x1b[?25h"
+	// attachRestoreSequence undoes what an agent may have turned on: an
+	// open synchronized-output block, the alternate screen, mouse reporting
+	// (every mode and encoding, as crossterm's EnableMouseCapture sets
+	// 1015 too), bracketed paste, focus events, the kitty keyboard flags,
+	// xterm's modifyOtherKeys (which Claude Code sets, and which leaves a
+	// shell reading Ctrl-R as "27;5;114~"), disabled line wrap, text
+	// attributes, the cursor shape and a hidden cursor. The keyboard flag
+	// stack is emptied (popping more levels than it holds empties it): the
+	// level attach pushed, and any an agent pushed and never popped,
+	// relayed to this terminal as output. pi pushes release reporting,
+	// which left a shell printing ":3A" for every arrow key after a detach
+	// that popped one level. The stack is per screen, so the pop follows
+	// the return to the main screen, where attach pushed its level.
+	attachRestoreSequence = "\x1b[?2026l\x1b[?1049l\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?2004l\x1b[?1004l\x1b[<32u\x1b[>4m\x1b[?7h\x1b[m\x1b[0 q\x1b[?25h"
 	attachClearSequence   = "\x1b[2J\x1b[H"
 	// attachDetachSequence clears the session's screen after a detach, so
 	// the shell's prompt does not land in the middle of the agent's UI. The
@@ -222,6 +232,9 @@ func (c *client) connectAttach(ctx context.Context, id string, prev attachIdenti
 		}
 	}
 	attach.TakeSize = takeSize && attach.HasFeature(protocol.CapAttachSizeOwner)
+	if attach.HasFeature(protocol.CapTerminalColors) {
+		attach.Colors = terminalColors()
+	}
 	req := &protocol.Request{AttachSession: attach}
 	if err := protocol.WriteRequest(s, req); err != nil {
 		s.Close()
@@ -310,9 +323,11 @@ func (c *client) attachOnce(id, uid string, titled *bool) (res attachResult, err
 	keys := stdinChunks()
 	var parser attachParser
 	snapshot := attached.Snapshot
+	ech := c.newEchoFor(attached)
+	writeOut([]byte(attachEnterSequence))
 	for {
 		writeOut(attachStartupBytes(snapshot))
-		res, err := c.runAttachment(id, stream, keys, &parser, winch, quit, sizeOwnership(attached))
+		res, err := c.runAttachment(id, stream, keys, &parser, winch, quit, sizeOwnership(attached), ech)
 		if err == nil || !c.reconnectable(err) {
 			return res, err
 		}
@@ -328,7 +343,30 @@ func (c *client) attachOnce(id, uid string, titled *bool) (res attachResult, err
 		// An overlay that was open when the connection dropped may have
 		// hidden the cursor.
 		writeOut([]byte("\x1b[?25h"))
+		// The echo keeps the keys it had not seen the agent draw; once
+		// the new snapshot is up it asks the field which ones landed.
+		switch {
+		case ech == nil:
+		case attached.HasFeature(protocol.CapAttachField):
+			ech.reattached()
+		default:
+			ech = nil
+		}
 	}
+}
+
+// newEchoFor is the local echo for an attachment, nil when the worker
+// does not report the input field (CapAttachField) or the echo is off
+// ([composer] enabled = false).
+func (c *client) newEchoFor(attached *protocol.Attached) *echo {
+	if !attached.HasFeature(protocol.CapAttachField) {
+		return nil
+	}
+	cfg, err := config.Load(c.paths.Config)
+	if err != nil || !cfg.Composer.EchoEnabled() {
+		return nil
+	}
+	return newEcho(echoConfig{flushAfter: cfg.Composer.EchoFlushAfter()})
 }
 
 // sizeOwnership is the attachment's size ownership as it attached, nil when
@@ -355,10 +393,36 @@ func (c *client) attachScrollbackRows() int {
 // switches, or it fails.
 //
 // size is the attachment's size ownership (nil if not tracked), kept up to
-// date from AttachSizeOwner frames for the overlay.
-func (c *client) runAttachment(id string, stream *attachStream, keys <-chan []byte, parser *attachParser, winch, quit <-chan os.Signal, size *protocol.SizeOwnership) (attachResult, error) {
+// date from AttachSizeOwner frames for the overlay. ech is the local echo
+// of typing (nil for none): typed bytes go through it, and so do the
+// worker's answers about the input field.
+func (c *client) runAttachment(id string, stream *attachStream, keys <-chan []byte, parser *attachParser, winch, quit <-chan os.Signal, size *protocol.SizeOwnership, ech *echo) (attachResult, error) {
 	var ov *overlay
 	redraw := false
+	// sendInput writes typed bytes to the stream, through the echo when
+	// there is one (which may hold them back for a moment, and draw).
+	sendInput := func(data []byte) error {
+		if ech != nil {
+			send, paint := ech.input(data)
+			writeOut(paint)
+			data = send
+		}
+		if len(data) == 0 {
+			return nil
+		}
+		return stream.send(&protocol.Request{AttachInput: &protocol.Bytes{Data: data}})
+	}
+	// flushEcho sends what the echo holds before the attachment is left
+	// or the overlay takes the keys.
+	flushEcho := func() error {
+		if ech == nil {
+			return nil
+		}
+		if send := ech.suspend(); len(send) > 0 {
+			return stream.send(&protocol.Request{AttachInput: &protocol.Bytes{Data: send}})
+		}
+		return nil
+	}
 	for {
 		// The overlay is drawn over the session's screen, which nothing
 		// else writes to while it is open, so it only changes after input
@@ -370,11 +434,12 @@ func (c *client) runAttachment(id string, stream *attachStream, keys <-chan []by
 		select {
 		case chunk, ok := <-keys:
 			if !ok {
+				_ = flushEcho()
 				return attachResult{outcome: outcomeDetached}, nil
 			}
 			redraw = true
 			if ov != nil {
-				res, closed, err := c.overlayInput(ov, chunk, stream, size)
+				res, closed, err := c.overlayInput(ov, chunk, stream, size, ech)
 				if err != nil || res != nil {
 					return deref(res), err
 				}
@@ -386,12 +451,16 @@ func (c *client) runAttachment(id string, stream *attachStream, keys <-chan []by
 			for _, action := range parser.push(chunk) {
 				switch action.kind {
 				case actionData:
-					if err := stream.send(&protocol.Request{AttachInput: &protocol.Bytes{Data: action.data}}); err != nil {
+					if err := sendInput(action.data); err != nil {
 						return attachResult{}, err
 					}
 				case actionDetach:
+					_ = flushEcho()
 					return attachResult{outcome: outcomeDetached}, nil
 				case actionOpenOverlay:
+					if err := flushEcho(); err != nil {
+						return attachResult{}, err
+					}
 					ov = newOverlay(c, id, size)
 					if err := ov.open(); err != nil {
 						return attachResult{}, err
@@ -402,6 +471,7 @@ func (c *client) runAttachment(id string, stream *attachStream, keys <-chan []by
 						return attachResult{}, err
 					}
 					if next != "" {
+						_ = flushEcho()
 						return attachResult{outcome: outcomeSwitch, next: next}, nil
 					}
 				}
@@ -411,15 +481,31 @@ func (c *client) runAttachment(id string, stream *attachStream, keys <-chan []by
 					break
 				}
 			}
+		case <-ech.timerC():
+			send, reqs := ech.tick(time.Now())
+			if len(send) > 0 {
+				if err := stream.send(&protocol.Request{AttachInput: &protocol.Bytes{Data: send}}); err != nil {
+					return attachResult{}, err
+				}
+			}
+			for _, req := range reqs {
+				if err := stream.send(req); err != nil {
+					return attachResult{}, err
+				}
+			}
 		case <-quit:
+			_ = flushEcho()
 			return attachResult{outcome: outcomeDetached}, nil
 		case <-winch:
 			redraw = true
+			if ech != nil {
+				ech.resized()
+			}
 			if err := stream.send(resizeRequest()); err != nil {
 				return attachResult{}, err
 			}
 		case f := <-stream.frames:
-			res, done, err := handleFrame(f, ov != nil, size)
+			res, done, err := handleFrame(f, ov != nil, size, ech, stream)
 			if err != nil || done {
 				return res, err
 			}
@@ -584,8 +670,10 @@ func deref(r *attachResult) attachResult {
 
 // handleFrame handles one frame of a live attachment. While the overlay is
 // open, output is dropped: the screen is redrawn from a snapshot when it
-// closes. Size ownership notes update size.
-func handleFrame(f frame, overlayOpen bool, size *protocol.SizeOwnership) (attachResult, bool, error) {
+// closes. So is it while the echo holds keys the agent has not been seen to
+// draw (echo.go). Size ownership notes update size; the worker's answers
+// about the input field go to the echo.
+func handleFrame(f frame, overlayOpen bool, size *protocol.SizeOwnership, ech *echo, stream *attachStream) (attachResult, bool, error) {
 	switch {
 	case f.err != nil:
 		return attachResult{}, true, f.err
@@ -596,8 +684,12 @@ func handleFrame(f frame, overlayOpen bool, size *protocol.SizeOwnership) (attac
 	case f.resp.SessionRestarting != nil:
 		return attachResult{}, true, errSessionRestarting
 	case f.resp.PtyOutput != nil:
-		if !overlayOpen {
-			writeOut(f.resp.PtyOutput.Data)
+		data := f.resp.PtyOutput.Data
+		if !overlayOpen && !ech.holding() {
+			writeOut(data)
+		}
+		if ech != nil {
+			ech.output(len(data))
 		}
 		return attachResult{}, false, nil
 	case f.resp.SessionEnded != nil:
@@ -605,8 +697,11 @@ func handleFrame(f frame, overlayOpen bool, size *protocol.SizeOwnership) (attac
 	case f.resp.AttachResync != nil:
 		// The worker dropped output while this client lagged; the
 		// snapshot replaces the screen, and output continues from it.
-		if !overlayOpen {
+		if !overlayOpen && !ech.holding() {
 			writeOut(resyncBytes(f.resp.AttachResync.Data))
+		}
+		if ech != nil {
+			ech.output(len(f.resp.AttachResync.Data))
 		}
 		return attachResult{}, false, nil
 	case f.resp.AttachSizeOwner != nil:
@@ -614,11 +709,30 @@ func handleFrame(f frame, overlayOpen bool, size *protocol.SizeOwnership) (attac
 			*size = *f.resp.AttachSizeOwner
 		}
 		return attachResult{}, false, nil
-	case f.resp.AttachSnapshot != nil:
-		if overlayOpen {
-			return attachResult{}, true, errors.New("unexpected attach snapshot response outside overlay restore")
+	case f.resp.Field != nil:
+		if ech == nil {
+			return attachResult{}, true, errors.New("unexpected input field response")
 		}
-		return attachResult{}, true, errors.New("unexpected attach snapshot response during passthrough")
+		send, paint := ech.fieldAnswer(f.resp.Field)
+		if !overlayOpen {
+			writeOut(paint)
+		}
+		if len(send) > 0 {
+			if err := stream.send(&protocol.Request{AttachInput: &protocol.Bytes{Data: send}}); err != nil {
+				return attachResult{}, true, err
+			}
+		}
+		return attachResult{}, false, nil
+	case f.resp.AttachSnapshot != nil:
+		if ech == nil {
+			return attachResult{}, true, errors.New("unexpected attach snapshot response during passthrough")
+		}
+		// Asked for by the echo, to repaint the screen once the agent
+		// has drawn everything typed.
+		if paint := ech.snapshotAnswer(f.resp.AttachSnapshot.Data); !overlayOpen {
+			writeOut(paint)
+		}
+		return attachResult{}, false, nil
 	case f.resp.Error != nil:
 		return attachResult{}, true, errors.New(f.resp.Error.Message)
 	}
@@ -627,7 +741,7 @@ func handleFrame(f frame, overlayOpen bool, size *protocol.SizeOwnership) (attac
 
 // overlayInput feeds input to the open overlay. closed reports that it
 // closed and the screen was restored.
-func (c *client) overlayInput(ov *overlay, chunk []byte, stream *attachStream, size *protocol.SizeOwnership) (res *attachResult, closed bool, err error) {
+func (c *client) overlayInput(ov *overlay, chunk []byte, stream *attachStream, size *protocol.SizeOwnership, ech *echo) (res *attachResult, closed bool, err error) {
 	for _, ev := range ov.keys.push(chunk) {
 		out, err := ov.handle(ev)
 		if err != nil {
@@ -643,7 +757,7 @@ func (c *client) overlayInput(ov *overlay, chunk []byte, stream *attachStream, s
 					return nil, false, err
 				}
 			}
-			restored, ended, err := restoreSnapshot(stream, size)
+			restored, ended, err := restoreSnapshot(stream, size, ech)
 			if err != nil {
 				return nil, false, err
 			}
@@ -662,8 +776,9 @@ func (c *client) overlayInput(ov *overlay, chunk []byte, stream *attachStream, s
 
 // restoreSnapshot asks for the current screen after the overlay closes,
 // skipping output that arrives first. Input waits (bounded, in the stdin
-// channel) until it is done.
-func restoreSnapshot(stream *attachStream, size *protocol.SizeOwnership) ([]byte, *protocol.SessionEnded, error) {
+// channel) until it is done. A snapshot the echo asked for before the
+// overlay opened is answered first, and is not the one wanted.
+func restoreSnapshot(stream *attachStream, size *protocol.SizeOwnership, ech *echo) ([]byte, *protocol.SessionEnded, error) {
 	if err := stream.send(&protocol.Request{AttachSnapshot: protocol.Empty}); err != nil {
 		return nil, nil, err
 	}
@@ -676,7 +791,15 @@ func restoreSnapshot(stream *attachStream, size *protocol.SizeOwnership) ([]byte
 		case f.resp.SessionRestarting != nil:
 			return nil, nil, errSessionRestarting
 		case f.resp.AttachSnapshot != nil:
+			if ech != nil && ech.snapshotDue {
+				ech.snapshotAnswer(nil)
+				continue
+			}
 			return f.resp.AttachSnapshot.Data, nil, nil
+		case f.resp.Field != nil:
+			if ech != nil {
+				ech.fieldAnswer(f.resp.Field)
+			}
 		case f.resp.PtyOutput != nil, f.resp.AttachResync != nil:
 			// Superseded by the snapshot asked for.
 		case f.resp.AttachSizeOwner != nil:
@@ -701,16 +824,16 @@ func resizeRequest() *protocol.Request {
 	return &protocol.Request{AttachResize: &protocol.Geometry{Cols: cols, Rows: rows, PixelWidth: pw, PixelHeight: ph}}
 }
 
+// attachStartupBytes paints a snapshot on a cleared screen: at attach, after
+// a reattach, and after the overlay closes. The keyboard flags are not
+// pushed here (attachEnterSequence is written once per attachment): the
+// snapshot sets the agent's flags on the level already pushed, and every
+// push would be one more level for the detach to pop.
 func attachStartupBytes(snapshot []byte) []byte {
-	out := make([]byte, 0, len(attachEnterSequence)+len(attachClearSequence)+len(snapshot))
-	out = append(out, attachEnterSequence...)
-	out = append(out, attachClearSequence...)
-	return append(out, snapshot...)
+	return append([]byte(attachClearSequence), snapshot...)
 }
 
-// resyncBytes repaints the screen from a resync snapshot. Unlike
-// attachStartupBytes it pushes no keyboard flags: the attachment's are
-// already in place.
+// resyncBytes repaints the screen from a resync snapshot.
 func resyncBytes(snapshot []byte) []byte {
 	return append([]byte(attachClearSequence), snapshot...)
 }

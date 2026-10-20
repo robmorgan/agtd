@@ -15,6 +15,14 @@ benchmarks.
 | `nvim.vt.gz` | Neovim 0.12, `--clean` | The same as Vim. Truecolor, synchronized output. |
 | `go-test.vt.gz` | `go test -v` | A throwaway module with passing, failing, skipped and panicking tests and subtests. |
 | `clang.vt.gz` | Apple clang 21 | `-fsyntax-only -fcolor-diagnostics` on a generated C file: 750 errors and 500 warnings with notes, about 500 KB of colored diagnostics. |
+| `claude-field.vt.gz` | Claude Code 2.1 | The input field (`field.go`): idle with its placeholder, 176 characters typed past a wrap, an Alt-Enter newline, cleared, three pasted lines, a word longer than a row. Nothing is sent to the model. |
+| `codex-field.vt.gz` | Codex 0.160 | The same. |
+| `pi-field.vt.gz` | pi 0.72 | The same; pi draws on the primary screen and paints its own cursor. |
+
+The `*-field` streams come with `NAME.marks.json`: the byte offset in the stream at which
+each scripted state (`idle`, `typed`, `newline`, `cleared`, `pasted`, `longword`) was on screen.
+`TestFieldFixtures` replays a stream to each mark and checks what the field detector reads off
+the screen. When an agent changes its input box, that test fails: re-record the stream.
 
 ## Re-recording
 

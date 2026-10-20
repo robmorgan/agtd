@@ -371,6 +371,21 @@ func roundDuration(d time.Duration) string {
 	return fmt.Sprintf("%dh", int(d/time.Hour))
 }
 
+// foregroundTakesText reports whether what holds the PTY's foreground takes
+// typed text: the agent itself (or nothing known yet), or a shell at its
+// prompt. An editor or a pager in the foreground takes keys as commands,
+// and the worker then describes no input field (field.go).
+func (a *activityTracker) foregroundTakesText() bool {
+	if a.fgPGID == 0 || a.fgPGID == a.agentPGID {
+		return true
+	}
+	switch a.foreground {
+	case "sh", "bash", "zsh", "fish", "dash", "ksh":
+		return true
+	}
+	return false
+}
+
 // foregroundPGID is the PTY's foreground process group, read from the
 // master side (0 if it cannot be read). It goes through SyscallConn rather
 // than Fd, which would switch the PTY to blocking mode under the pump.

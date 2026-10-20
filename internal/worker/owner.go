@@ -40,6 +40,17 @@ type ownerState struct {
 	// status keeps the program's own status records (OSC 7501), the
 	// primary source of activity; see status.go.
 	status *statusTracker
+	// agentName and command are the session's agent as configured and
+	// the command it runs, which pick the input field's profile (field.go).
+	agentName, command string
+	// colors are the default colours of the terminal the session was
+	// created from or most recently attached by, which answer the
+	// program's colour queries (colors.go); nil until one reports them.
+	colors       *protocol.TerminalColors
+	colorQueries colorQueries
+	// colorFlushArmed is whether a timer will publish a held query start
+	// that never completed.
+	colorFlushArmed bool
 	// owner is the goroutine this state belongs to, for timers that need
 	// to get back onto it.
 	owner *owner
@@ -243,14 +254,50 @@ func (s *ownerState) resize(g protocol.Geometry) error {
 	return nil
 }
 
-// publishOutput feeds PTY output through the shadow terminal, answers any
+// publishOutput answers the program's colour queries (colors.go) and
+// publishes the rest of the output (publishScanned).
+func (s *ownerState) publishOutput(data []byte) error {
+	data, replies := s.colorQueries.scan(data, s.colors)
+	for _, reply := range replies {
+		if err := s.input.enqueue(reply); err != nil {
+			fmt.Fprintf(os.Stderr, "session worker: dropped colour query reply: %v\n", err)
+		}
+	}
+	if len(s.colorQueries.held) > 0 {
+		switch {
+		case s.owner == nil:
+			data = append(data, s.colorQueries.flush()...)
+		case !s.colorFlushArmed:
+			// A query start that the next chunk does not complete is
+			// published as it is, as a snapshot's wait for a sequence
+			// boundary is bounded (groundTimeout).
+			s.colorFlushArmed = true
+			time.AfterFunc(groundTimeout, func() {
+				s.owner.post(func(s *ownerState) {
+					s.colorFlushArmed = false
+					if tail := s.colorQueries.flush(); len(tail) > 0 {
+						if err := s.publishScanned(tail); err != nil {
+							fmt.Fprintf(os.Stderr, "session worker: %v\n", err)
+						}
+					}
+				})
+			})
+		}
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	return s.publishScanned(data)
+}
+
+// publishScanned feeds PTY output through the shadow terminal, answers any
 // terminal queries on behalf of absent clients, then fans the raw bytes out.
 //
 // While snapshots are waiting for the parser to be between sequences (see
 // atGround), it feeds only up to that point first, runs them, and then
 // handles the rest: subscribers get the chunk in two pieces, and a client
 // attaching there gets only the second, after its snapshot.
-func (s *ownerState) publishOutput(data []byte) error {
+func (s *ownerState) publishScanned(data []byte) error {
 	s.outputBytes += uint64(len(data))
 	s.outputChunks++
 	if len(s.groundWaiters) > 0 {
@@ -371,6 +418,24 @@ func (s *ownerState) history(vt bool) (string, error) {
 
 func (s *ownerState) snapshot(scrollback int) ([]byte, error) {
 	return s.terminal.snapshot(scrollback)
+}
+
+// field finds the program's input field (field.go). There is none while
+// the program reports it is blocked on a dialog, or while something other
+// than the agent or a shell holds the PTY's foreground (an editor takes
+// keys as commands).
+func (s *ownerState) field() (*protocol.Field, error) {
+	app, blocked := "", false
+	if s.status != nil {
+		if n := s.status.derive(); n != nil {
+			app = n.app
+			blocked = n.activity == session.ActivityBlocked
+		}
+	}
+	if s.activity != nil && !s.activity.foregroundTakesText() {
+		blocked = true
+	}
+	return detectField(s.terminal.term, fieldProfileFor(app, s.agentName, s.command), blocked)
 }
 
 type attachResult struct {
