@@ -578,6 +578,9 @@ func (c *QUICClient) OpenStream(ctx context.Context) (Stream, error) {
 
 func (c *QUICClient) Close() error { return c.conn.CloseWithError(0, "") }
 
+// RTT is QUIC's smoothed round-trip time estimate for the connection.
+func (c *QUICClient) RTT() time.Duration { return c.conn.ConnectionStats().SmoothedRTT }
+
 // quicStream adapts a QUIC stream to Stream. Closing a QUIC stream only ends
 // its send side, which is exactly CloseWrite; Close also stops receiving.
 // onClose, if set, runs once, at the first Close.

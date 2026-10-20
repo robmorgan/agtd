@@ -96,10 +96,13 @@ type overlay struct {
 	toast            string
 	theme            *overlayTheme
 	now              func() time.Time
+	// latency is the round trip to the attached session's host, or 0 for
+	// the local daemon.
+	latency func() time.Duration
 }
 
 func newOverlay(c *client, id string, size *protocol.SizeOwnership) *overlay {
-	return &overlay{c: c, session: id, size: size, theme: overlayThemeFor(os.Getenv), now: time.Now}
+	return &overlay{c: c, session: id, size: size, theme: overlayThemeFor(os.Getenv), now: time.Now, latency: c.latency}
 }
 
 func (o *overlay) open() error {
@@ -597,9 +600,13 @@ func (o *overlay) body(width, height int) []line {
 	}
 
 	// The title row: the mode on the left; the attached session as
-	// host/session and how long it has been running on the right.
+	// host/session, the remote host's latency and how long the session has
+	// been running on the right.
 	name := escapeControls(o.session)
 	right := []span{{"", o.hostName() + "/" + name}}
+	if rtt := o.latency(); rtt > 0 {
+		right = append(right, span{t.mutedFG, "  " + formatOverlayLatency(rtt)})
+	}
 	if up := o.uptime(); up != "" {
 		right = append(right, span{t.mutedFG, "  " + up})
 	}
@@ -719,6 +726,15 @@ func (o *overlay) hostName() string {
 	}
 	name, _, _ := strings.Cut(localHostname(), ".")
 	return escapeControls(name)
+}
+
+// formatOverlayLatency spells a round trip in milliseconds: "0.4ms",
+// "8.2ms", "143ms".
+func formatOverlayLatency(d time.Duration) string {
+	if d < 10*time.Millisecond {
+		return fmt.Sprintf("%.1fms", float64(d.Microseconds())/1000)
+	}
+	return fmt.Sprintf("%dms", d.Milliseconds())
 }
 
 // uptime is how long the attached session has run ("2d3h44m"), or ""

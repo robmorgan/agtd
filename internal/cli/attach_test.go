@@ -102,6 +102,18 @@ func TestOverlayDraws(t *testing.T) {
 	if got := stripANSI(body[1].render(60, o.theme)); !strings.HasPrefix(got, " Commands ") || !strings.Contains(got, "/alpha  ") || strings.Contains(got, "╱") {
 		t.Fatalf("title %q", got)
 	}
+	o.latency = func() time.Duration { return 8240 * time.Microsecond }
+	if got := stripANSI(o.body(60, 20)[1].render(60, o.theme)); !strings.Contains(got, "/alpha  8.2ms  ") {
+		t.Fatalf("title with latency %q", got)
+	}
+	for d, want := range map[time.Duration]string{
+		400 * time.Microsecond: "0.4ms",
+		143 * time.Millisecond: "143ms",
+	} {
+		if got := formatOverlayLatency(d); got != want {
+			t.Errorf("formatOverlayLatency(%v) = %q, want %q", d, got, want)
+		}
+	}
 	if got := stripANSI(body[3].render(60, o.theme)); !strings.HasPrefix(got, " ❯ ") || runeLen(got) != 60 {
 		t.Fatalf("prompt %q", got)
 	}
