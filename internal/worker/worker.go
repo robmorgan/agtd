@@ -27,6 +27,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -50,6 +51,42 @@ const (
 	pumpDrainTimeout           = 250 * time.Millisecond
 )
 
+// The terminal the agent runs in is the worker's shadow terminal, whatever
+// the daemon was started from: a daemon started by systemd or over ssh has
+// no TERM at all, and a login shell there gives "dumb", either of which
+// makes an agent turn colour and the keyboard protocols off. The agent is
+// told what it is really talking to.
+const (
+	agentTERM      = "xterm-256color"
+	agentCOLORTERM = "truecolor"
+)
+
+// agentTerminalEnv is env with TERM set to the shadow terminal's when it is
+// missing or "dumb", and COLORTERM when it is missing. A TERM the daemon's
+// environment names on purpose is kept.
+func agentTerminalEnv(env []string) []string {
+	out := make([]string, 0, len(env)+2)
+	term, colorterm := false, false
+	for _, kv := range env {
+		switch {
+		case kv == "TERM=" || kv == "TERM=dumb":
+			continue
+		case strings.HasPrefix(kv, "TERM="):
+			term = true
+		case strings.HasPrefix(kv, "COLORTERM="):
+			colorterm = true
+		}
+		out = append(out, kv)
+	}
+	if !term {
+		out = append(out, "TERM="+agentTERM)
+	}
+	if !colorterm {
+		out = append(out, "COLORTERM="+agentCOLORTERM)
+	}
+	return out
+}
+
 // agentKillGrace is how long a killed agent gets between SIGTERM and SIGKILL.
 // A variable so tests can shorten it.
 var agentKillGrace = 5 * time.Second
@@ -70,6 +107,9 @@ type Args struct {
 	Command   string
 	Model     string
 	Args      []string
+	// Colors are the default colours of the terminal the session was
+	// created from (CreateSession.Colors), nil when unknown; see colors.go.
+	Colors *protocol.TerminalColors
 }
 
 type sessionEnded struct {
@@ -222,7 +262,7 @@ func Run(args Args) error {
 	}
 	cmd := exec.Command(args.Command, args.Args...)
 	cmd.Dir = args.Cwd
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(agentTerminalEnv(os.Environ()),
 		"AGTD_SESSION_ID="+args.SessionID,
 		"AGTD_SESSION_NAME="+args.SessionID,
 		"AGTD_CWD="+args.Cwd,
@@ -273,6 +313,8 @@ func Run(args Args) error {
 	}
 
 	state := newOwnerState(args.SessionID, ptmx, terminal)
+	state.agentName, state.command = args.AgentName, args.Command
+	state.colors = args.Colors
 	state.activity = newActivityTracker(rt.recorder, agentPID, time.Now())
 	state.owner = rt.owner
 	return rt.run(state, nil)
@@ -731,7 +773,17 @@ func (rt *runtime) serveAttach(conn transport.Stream, reader *bufio.Reader, req 
 	// Size ownership applies to every attachment; only a client that
 	// asked for CapAttachSizeOwner can take the size or hear who has it.
 	sizeOwner := slices.Contains(features, protocol.CapAttachSizeOwner)
+	// A client that asked for CapAttachField may ask where the input
+	// field is (field.go).
+	hasField := slices.Contains(features, protocol.CapAttachField)
 	takeSize := sizeOwner && req.TakeSize
+	// A client that asked for CapTerminalColors may report its terminal's
+	// default colours, which answer the program's colour queries from now
+	// on (colors.go).
+	var colors *protocol.TerminalColors
+	if slices.Contains(features, protocol.CapTerminalColors) {
+		colors = req.Colors
+	}
 
 	seq, err := rt.nextAttachSeq()
 	if errors.Is(err, db.ErrNoSuchIncarnation) {
@@ -746,6 +798,9 @@ func (rt *runtime) serveAttach(conn transport.Stream, reader *bufio.Reader, req 
 		att, err = s.attach(fmt.Sprintf("%s-%d", req.Kind, seq), req.Kind, req.Geometry, replaces, initial, takeSize, sizeOwner)
 		if err == nil {
 			ownership = s.ownership(att.attachID)
+			if colors != nil {
+				s.colors = colors
+			}
 		}
 		return err
 	}); err != nil {
@@ -913,6 +968,39 @@ loop:
 				if err := rt.sendSnapshot(conn, att.sub, false, repaint); err != nil {
 					return err
 				}
+			case in.req.AttachField != nil && hasField:
+				// The client asks after sending keys, to learn which the
+				// program has drawn; the program draws them a moment
+				// after reading them, so wait for its output to settle
+				// first, or every answer would be a round trip stale.
+				// Then answer in order with the output: what was queued
+				// for this client before the field was read goes first,
+				// so the field describes the screen the client has.
+				rt.waitForOutputToSettle()
+				var chunks [][]byte
+				var field *protocol.Field
+				if err := rt.owner.do(func(s *ownerState) error {
+					for {
+						data, ok := att.sub.next()
+						if !ok {
+							break
+						}
+						chunks = append(chunks, data)
+					}
+					var err error
+					field, err = s.field()
+					return err
+				}); err != nil {
+					return err
+				}
+				for _, data := range chunks {
+					if err := protocol.WriteResponse(conn, &protocol.Response{PtyOutput: &protocol.Bytes{Data: data}}); err != nil {
+						return err
+					}
+				}
+				if err := protocol.WriteResponse(conn, &protocol.Response{Field: field}); err != nil {
+					return err
+				}
 			default:
 				final = protocol.ErrorResponsef("unexpected request during attach")
 				break loop
@@ -921,6 +1009,34 @@ loop:
 	}
 
 	return protocol.WriteResponse(conn, final)
+}
+
+// Field answers wait for the program to finish drawing: fieldSettle without
+// PTY output, fieldSettleMax at most (a program streaming output never
+// settles, and the field is read as it is).
+const (
+	fieldSettle    = 40 * time.Millisecond
+	fieldSettleMax = 200 * time.Millisecond
+)
+
+// waitForOutputToSettle returns once the PTY has produced nothing for
+// fieldSettle, or after fieldSettleMax.
+func (rt *runtime) waitForOutputToSettle() {
+	deadline := time.Now().Add(fieldSettleMax)
+	chunks := func() uint64 {
+		var n uint64
+		_ = rt.owner.do(func(s *ownerState) error { n = s.outputChunks; return nil })
+		return n
+	}
+	last := chunks()
+	for time.Now().Before(deadline) {
+		time.Sleep(fieldSettle)
+		if n := chunks(); n == last {
+			return
+		} else {
+			last = n
+		}
+	}
 }
 
 // sendSnapshot sends the client a snapshot of the screen: AttachSnapshot

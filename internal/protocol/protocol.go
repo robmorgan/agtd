@@ -56,14 +56,17 @@ type Request struct {
 	DetachAttachment *DetachAttachment
 	AttachInput      *Bytes
 	AttachSnapshot   *struct{}
-	SendInput        *SendInput
-	GetSession       *SessionRef
-	ListSessions     *struct{}
-	ListAttachments  *SessionRef
-	GetHistory       *GetHistory
-	ListWorkspaces   *struct{}
-	AddWorkspace     *AddWorkspace
-	RemoveWorkspace  *WorkspaceRef
+	// AttachField (CapAttachField), on an attach stream, asks where the
+	// program's input field is; the worker answers with Field.
+	AttachField     *struct{}
+	SendInput       *SendInput
+	GetSession      *SessionRef
+	ListSessions    *struct{}
+	ListAttachments *SessionRef
+	GetHistory      *GetHistory
+	ListWorkspaces  *struct{}
+	AddWorkspace    *AddWorkspace
+	RemoveWorkspace *WorkspaceRef
 	// Hello opens a control stream; see handshake.go.
 	Hello *Hello
 	// Git state and artifacts (CapGitState, CapArtifacts); see artifact.go.
@@ -99,6 +102,41 @@ type CreateSession struct {
 	// Token (CapRequestTokens) identifies this request across retries; see
 	// RequestToken. Empty means none.
 	Token string
+	// Colors (CapTerminalColors) are the default colours of the terminal
+	// the session is created from, which the worker answers the program's
+	// colour queries with until an attachment reports its own. Nil when
+	// the client has no terminal.
+	Colors *TerminalColors
+}
+
+// RGB is an 8-bit colour.
+type RGB struct{ R, G, B uint8 }
+
+// TerminalColors are a client terminal's default foreground and background:
+// what it answers the OSC 10 and OSC 11 queries with. Programs such as
+// Codex ask for them at startup and style themselves accordingly, but
+// only wait briefly, so the worker answers on the terminal's behalf (see
+// CapTerminalColors).
+type TerminalColors struct {
+	Foreground, Background RGB
+}
+
+// String formats c as "rrggbb/rrggbb" (foreground/background), the form
+// ParseTerminalColors reads.
+func (c *TerminalColors) String() string {
+	if c == nil {
+		return ""
+	}
+	return fmt.Sprintf("%02x%02x%02x/%02x%02x%02x", c.Foreground.R, c.Foreground.G, c.Foreground.B, c.Background.R, c.Background.G, c.Background.B)
+}
+
+// ParseTerminalColors reads the form String writes.
+func ParseTerminalColors(s string) (*TerminalColors, error) {
+	var c TerminalColors
+	if _, err := fmt.Sscanf(s, "%02x%02x%02x/%02x%02x%02x", &c.Foreground.R, &c.Foreground.G, &c.Foreground.B, &c.Background.R, &c.Background.G, &c.Background.B); err != nil || len(s) != 13 {
+		return nil, fmt.Errorf("invalid terminal colours %q: want rrggbb/rrggbb", s)
+	}
+	return &c, nil
 }
 
 // AddWorkspace registers Path under Name. Path is resolved on the daemon's
@@ -152,6 +190,10 @@ type AttachSession struct {
 	// TakeSize (CapAttachSizeOwner) makes this attachment the size owner
 	// even if another attachment owns the size.
 	TakeSize bool
+	// Colors (CapTerminalColors) are the attaching terminal's default
+	// colours; the worker answers the program's colour queries with the
+	// most recently reported ones. Nil when unknown.
+	Colors *TerminalColors
 }
 
 // SizeOwnership tells an attachment who owns the session's size: only the
@@ -169,6 +211,65 @@ type SizeOwnership struct {
 // AllScrollbackRows in AttachSession.ScrollbackRows asks for every
 // retained row of scrollback.
 const AllScrollbackRows = ^uint32(0)
+
+// Field is where typed text lands on the session's screen: the program's
+// input field, as the worker finds it on its shadow terminal, with the text
+// already in it. A client uses it to echo keystrokes locally exactly where
+// the program will draw them (CapAttachField; see ARCHITECTURE.md, "The
+// input field"). Positions are 0-based cells.
+type Field struct {
+	// Found reports that a field was detected. The other fields mean
+	// nothing when it is false, except Cols, Lines and Alternate.
+	Found bool
+	// Cols and Lines are the screen's size, which the field is laid out for.
+	Cols, Lines uint16
+	// Alternate is set while the program has the alternate screen up.
+	Alternate bool
+	// Row and Col are the insertion point: the cursor's cell. Top is the
+	// row of Rows[0], so the cursor is on Rows[Row-Top].
+	Row, Col, Top uint16
+	// BoxTop and BoxBottom are the first and last rows of the box the
+	// program draws around the field: its rules, when it draws them,
+	// else the field's own first and last rows.
+	BoxTop, BoxBottom uint16
+	// TextCol is the column the field's text starts at on every one of
+	// its rows: after the prompt glyph on the first, and as the indent of
+	// the rows the text wraps onto.
+	TextCol uint16
+	// Width is how many columns of text a row holds before the program
+	// wraps it.
+	Width uint16
+	// GrowsUp reports that the box takes rows above it as the text
+	// wraps onto more rows (a full-screen program keeps its field at the
+	// bottom); otherwise it takes rows below.
+	GrowsUp bool
+	// InverseCursor reports that the terminal's cursor is hidden and the
+	// program draws its own as one inverse-video cell.
+	InverseCursor bool
+	// WrapKeepsSpace reports that a space at a wrap point stays in the
+	// text, at the end of the row it fits on or at the start of the next
+	// (pi); otherwise the program drops it at the wrap (Claude Code,
+	// Codex).
+	WrapKeepsSpace bool
+	// Rows is the text on each of the field's rows after TextCol, top to
+	// bottom, trailing blanks trimmed, as the program has drawn it: a
+	// placeholder shown in an empty field is not text.
+	Rows []string
+	// Style is the SGR sequence typed text is drawn in.
+	Style []byte
+	// Chrome is the rows around the field as VT bytes: its own rows, the
+	// rules the program draws around them, and the rows the box may grow
+	// into, so a client can grow the box the way the program would and
+	// put the rows back afterwards.
+	Chrome []ScreenRow
+}
+
+// ScreenRow is one row of the screen, as the VT bytes that draw it from
+// column 0 in a default pen.
+type ScreenRow struct {
+	Index uint16
+	VT    []byte
+}
 
 // HasFeature reports whether the attach stream asked for capability c.
 func (a *AttachSession) HasFeature(c string) bool { return slices.Contains(a.Features, c) }
@@ -251,8 +352,10 @@ type Response struct {
 	// AttachSizeOwner (CapAttachSizeOwner) is unsolicited on an attach
 	// stream: the size owner or the session's size changed.
 	AttachSizeOwner *SizeOwnership
-	Event           *session.Event
-	Events          *[]session.Event
+	// Field (CapAttachField) answers AttachField on an attach stream.
+	Field  *Field
+	Event  *session.Event
+	Events *[]session.Event
 	// HandedOff answers HandoffSession (CapWorkerHandoff).
 	HandedOff *HandedOff
 	// SessionRestarting (CapSessionRestart) ends an attach stream whose
@@ -341,6 +444,7 @@ const (
 	// 50-59: attach streams.
 	kAttachTakeSizeRequest kind = 50
 	kAttachLeaveRequest    kind = 51
+	kAttachFieldRequest    kind = 52
 
 	kDaemonInfoResponse     kind = 101
 	kCreateSessionResponse  kind = 102
@@ -374,6 +478,8 @@ const (
 	kAttachResyncResponse kind = 150
 	// Size ownership on attach streams.
 	kAttachSizeOwnerResponse kind = 151
+	// The input field (CapAttachField).
+	kFieldResponse kind = 152
 
 	// Worker handoff (kinds 160-169).
 	kHandedOffResponse         kind = 160
@@ -620,6 +726,9 @@ func encodeRequest(req *Request, f Features) (kind, []byte, error) {
 		e.optStr(c.Model)
 		e.optStr(c.Workspace)
 		e.token(c.Token)
+		if e.f.Has(CapTerminalColors) {
+			e.colors(c.Colors)
+		}
 		return kCreateSessionRequest, e.buf, e.err
 	case req.KillSession != nil:
 		e.str(req.KillSession.SessionID)
@@ -645,6 +754,9 @@ func encodeRequest(req *Request, f Features) (kind, []byte, error) {
 			if a.HasFeature(CapAttachSizeOwner) {
 				e.bool(a.TakeSize)
 			}
+			if a.HasFeature(CapTerminalColors) {
+				e.colors(a.Colors)
+			}
 		}
 		return kAttachSessionRequest, e.buf, e.err
 	case req.AttachResize != nil:
@@ -655,6 +767,8 @@ func encodeRequest(req *Request, f Features) (kind, []byte, error) {
 		return kAttachTakeSizeRequest, e.buf, e.err
 	case req.AttachLeave != nil:
 		return kAttachLeaveRequest, nil, nil
+	case req.AttachField != nil:
+		return kAttachFieldRequest, nil, nil
 	case req.DetachSession != nil:
 		e.str(req.DetachSession.SessionID)
 		e.bool(req.DetachSession.All)
@@ -756,6 +870,9 @@ func decodeRequest(k kind, payload []byte, f Features) (*Request, error) {
 			Workspace: d.optStr(),
 		}
 		req.CreateSession.Token = d.token()
+		if d.f.Has(CapTerminalColors) {
+			req.CreateSession.Colors = d.colors()
+		}
 	case kKillSessionRequest:
 		req.KillSession = &KillSession{SessionID: d.str(), Remove: d.bool()}
 		req.KillSession.Token = d.token()
@@ -778,6 +895,9 @@ func decodeRequest(k kind, payload []byte, f Features) (*Request, error) {
 			if a.HasFeature(CapAttachSizeOwner) {
 				a.TakeSize = d.bool()
 			}
+			if a.HasFeature(CapTerminalColors) {
+				a.Colors = d.colors()
+			}
 		}
 		req.AttachSession = a
 	case kAttachResizeRequest:
@@ -788,6 +908,8 @@ func decodeRequest(k kind, payload []byte, f Features) (*Request, error) {
 		req.AttachTakeSize = &g
 	case kAttachLeaveRequest:
 		req.AttachLeave = Empty
+	case kAttachFieldRequest:
+		req.AttachField = Empty
 	case kDetachSessionRequest:
 		req.DetachSession = &DetachSession{SessionID: d.str(), All: d.bool()}
 	case kDetachAttachmentRequest:
@@ -983,6 +1105,9 @@ func encodeResponse(resp *Response, f Features) (kind, []byte, error) {
 	case resp.AttachSizeOwner != nil:
 		e.sizeOwnership(*resp.AttachSizeOwner)
 		return kAttachSizeOwnerResponse, e.buf, e.err
+	case resp.Field != nil:
+		e.field(resp.Field)
+		return kFieldResponse, e.buf, e.err
 	case resp.Event != nil:
 		e.event(resp.Event)
 		return kEventResponse, e.buf, e.err
@@ -1118,6 +1243,8 @@ func decodeResponse(k kind, payload []byte, f Features) (*Response, error) {
 	case kAttachSizeOwnerResponse:
 		o := d.sizeOwnership()
 		resp.AttachSizeOwner = &o
+	case kFieldResponse:
+		resp.Field = d.field()
 	case kEventResponse:
 		ev := d.event()
 		resp.Event = &ev
@@ -1222,6 +1349,42 @@ func (e *encoder) geometry(g Geometry) {
 	e.u16(g.Rows)
 	e.u16(g.PixelWidth)
 	e.u16(g.PixelHeight)
+}
+
+func (e *encoder) field(f *Field) {
+	e.bool(f.Found)
+	e.u16(f.Cols)
+	e.u16(f.Lines)
+	e.bool(f.Alternate)
+	e.u16(f.Row)
+	e.u16(f.Col)
+	e.u16(f.Top)
+	e.u16(f.BoxTop)
+	e.u16(f.BoxBottom)
+	e.u16(f.TextCol)
+	e.u16(f.Width)
+	e.bool(f.GrowsUp)
+	e.bool(f.InverseCursor)
+	e.bool(f.WrapKeepsSpace)
+	e.strs(f.Rows)
+	e.bytes(f.Style)
+	e.length(len(f.Chrome))
+	for _, r := range f.Chrome {
+		e.u16(r.Index)
+		e.bytes(r.VT)
+	}
+}
+
+// colors writes c as a presence flag and six bytes.
+func (e *encoder) colors(c *TerminalColors) {
+	e.bool(c != nil)
+	if c != nil {
+		for _, v := range []RGB{c.Foreground, c.Background} {
+			e.u8(v.R)
+			e.u8(v.G)
+			e.u8(v.B)
+		}
+	}
 }
 
 func (e *encoder) sizeOwnership(o SizeOwnership) {
@@ -1537,6 +1700,38 @@ func (d *decoder) optI32() *int32 {
 
 func (d *decoder) geometry() Geometry {
 	return Geometry{Cols: d.u16(), Rows: d.u16(), PixelWidth: d.u16(), PixelHeight: d.u16()}
+}
+
+func (d *decoder) field() *Field {
+	f := &Field{Found: d.bool(), Cols: d.u16(), Lines: d.u16(), Alternate: d.bool(), Row: d.u16(), Col: d.u16(), Top: d.u16(),
+		BoxTop: d.u16(), BoxBottom: d.u16(), TextCol: d.u16(), Width: d.u16(), GrowsUp: d.bool(), InverseCursor: d.bool(), WrapKeepsSpace: d.bool()}
+	// Empty lists decode as nil, so a Field that was not found compares
+	// equal to its zero value.
+	if f.Rows = d.strs(); len(f.Rows) == 0 {
+		f.Rows = nil
+	}
+	if f.Style = d.bytes(); len(f.Style) == 0 {
+		f.Style = nil
+	}
+	n := d.length()
+	if n > 0 {
+		f.Chrome = make([]ScreenRow, 0, d.capacity(n))
+	}
+	for i := 0; i < n && d.err == nil; i++ {
+		f.Chrome = append(f.Chrome, ScreenRow{Index: d.u16(), VT: d.bytes()})
+	}
+	return f
+}
+
+func (d *decoder) colors() *TerminalColors {
+	if !d.bool() {
+		return nil
+	}
+	var c TerminalColors
+	for _, v := range []*RGB{&c.Foreground, &c.Background} {
+		v.R, v.G, v.B = d.u8(), d.u8(), d.u8()
+	}
+	return &c
 }
 
 func (d *decoder) sizeOwnership() SizeOwnership {

@@ -11,12 +11,17 @@ import (
 )
 
 func TestAttachSequences(t *testing.T) {
-	if attachRestoreSequence != "\x1b[?1049l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?1004l\x1b[<u\x1b[>4m\x1b[?25h" {
+	if attachRestoreSequence != "\x1b[?2026l\x1b[?1049l\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?2004l\x1b[?1004l\x1b[<32u\x1b[>4m\x1b[?7h\x1b[m\x1b[0 q\x1b[?25h" {
 		t.Fatal("restore sequence changed")
 	}
+	// A snapshot is painted without pushing keyboard flags: the push is
+	// once per attachment, and the detach empties the stack.
 	got := string(attachStartupBytes([]byte("snapshot")))
-	if got != "\x1b[>1u\x1b[2J\x1b[Hsnapshot" {
+	if got != "\x1b[2J\x1b[Hsnapshot" {
 		t.Fatalf("startup %q", got)
+	}
+	if attachEnterSequence != "\x1b[>1u" {
+		t.Fatal("enter sequence changed")
 	}
 	if strings.Contains(got, "\x1b[?1049") {
 		t.Fatal("attach enters the alternate screen")
@@ -199,11 +204,11 @@ func TestSizeOwnerFrames(t *testing.T) {
 	note := protocol.SizeOwnership{Owner: true, OwnerID: "attach-2", Geometry: protocol.Geometry{Cols: 90, Rows: 20}}
 	for _, overlay := range []bool{false, true} {
 		*size = protocol.SizeOwnership{}
-		if _, done, err := handleFrame(frame{resp: &protocol.Response{AttachSizeOwner: &note}}, overlay, size); done || err != nil || *size != note {
+		if _, done, err := handleFrame(frame{resp: &protocol.Response{AttachSizeOwner: &note}}, overlay, size, nil, nil); done || err != nil || *size != note {
 			t.Fatalf("size note (overlay %v): done %v err %v size %+v", overlay, done, err, size)
 		}
 	}
-	if _, done, err := handleFrame(frame{resp: &protocol.Response{AttachSizeOwner: &note}}, false, nil); done || err != nil {
+	if _, done, err := handleFrame(frame{resp: &protocol.Response{AttachSizeOwner: &note}}, false, nil, nil, nil); done || err != nil {
 		t.Fatalf("size note without tracking: done %v err %v", done, err)
 	}
 }

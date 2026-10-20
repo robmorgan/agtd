@@ -466,6 +466,20 @@ The idle round trip was 0.09 ms before attachment ids were numbered in `state.db
 Incarnations And Attachments" in ARCHITECTURE.md), and 0.50 ms with a database write per attach.
 Workers now reserve ids in blocks, so an attach no longer writes.
 
+### Input field detection
+
+`BenchmarkDetectField`: finding the input field (`internal/worker/field.go`) on a 200x50
+alternate screen with 44 rows of coloured transcript and a prompt row between two rules, through
+libghostty's render state, one `StyleInto` and one `GraphemesInto` per cell:
+
+| | Per detection |
+| --- | --- |
+| 200x50 screen | 1.5 ms, 14,000 allocations |
+
+It runs once per quiet period and once per batch of keys, a few times a second at most while
+someone types, so this is far from the budget; reading rows as packed cells (`CellsRaw`) would
+cut it by an order of magnitude if detection ever ran per frame.
+
 ### Attach latency through the daemon
 
 `agtd bench sessions --count 10 --fill-lines 0`, attaching to each idle session once, one at a

@@ -17,6 +17,7 @@ package main
 import (
 	"bytes"
 	"compress/gzip"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -51,6 +52,10 @@ type step struct {
 	only  string
 	send  string
 	pause time.Duration
+	// mark, if set, records where in the output this step ended, under
+	// this name, in NAME.marks.json beside the stream: a test replays the
+	// stream up to a mark to see the screen as it was then.
+	mark string
 }
 
 type scenario struct {
@@ -74,11 +79,12 @@ func main() {
 		if *only != "" && sc.name != *only {
 			continue
 		}
-		data, err := record(sc)
+		data, marks, err := record(sc)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s: %v\n", sc.name, err)
 			os.Exit(1)
 		}
+		// Scrubbing keeps every offset, so the marks stay right.
 		data = scrub(data, secrets)
 		for _, s := range secrets {
 			if bytes.Contains(asciiLower(data), asciiLower([]byte(s))) {
@@ -91,7 +97,14 @@ func main() {
 			fmt.Fprintf(os.Stderr, "%s: %v\n", sc.name, err)
 			os.Exit(1)
 		}
-		fmt.Printf("%s: %d bytes\n", path, len(data))
+		if len(marks) > 0 {
+			js, _ := json.MarshalIndent(marks, "", "  ")
+			if err := os.WriteFile(filepath.Join(*out, sc.name+".marks.json"), append(js, '\n'), 0o644); err != nil {
+				fmt.Fprintf(os.Stderr, "%s: %v\n", sc.name, err)
+				os.Exit(1)
+			}
+		}
+		fmt.Printf("%s: %d bytes, %d marks\n", path, len(data), len(marks))
 	}
 }
 
@@ -176,6 +189,46 @@ func scenarios() []scenario {
 			},
 		},
 		{
+			// Claude Code's input field (field.go): idle with the
+			// placeholder, wrapped text, an Alt-Enter newline, a
+			// bracketed paste, a word longer than a row. Nothing is sent
+			// to the model. The first-run dialogs are answered if shown.
+			name:  "claude-field",
+			argv:  []string{"claude"},
+			env:   userEnv(),
+			setup: setupEmpty,
+			steps: append([]step{
+				{want: "❯", pause: 2 * time.Second},
+				{only: "Keep xhigh", send: "\r", pause: 3 * time.Second},
+				{only: "trust this folder", send: "\x1b[B", pause: 500 * time.Millisecond},
+				{only: "trust this folder", send: "\r", pause: 4 * time.Second},
+				{want: "Try \"", pause: 2 * time.Second, mark: "idle"},
+			}, append(fieldSteps, step{send: "\x03", pause: 300 * time.Millisecond}, step{send: "\x03", pause: 2 * time.Second})...),
+		},
+		{
+			// Codex's input field, the same way.
+			name:  "codex-field",
+			argv:  []string{"codex", "-c", "check_for_update_on_startup=false"},
+			env:   userEnv(),
+			setup: setupEmpty,
+			steps: append([]step{
+				{want: "›", pause: 2 * time.Second},
+				{only: "Trust this folder", send: "\r", pause: 4 * time.Second},
+				{want: "›", pause: 3 * time.Second, mark: "idle"},
+			}, append(fieldSteps, step{send: "\x03", pause: 500 * time.Millisecond}, step{send: "\x03", pause: 2 * time.Second})...),
+		},
+		{
+			// pi's input field, the same way (pi draws on the primary
+			// screen and paints its own cursor).
+			name:  "pi-field",
+			argv:  []string{"pi"},
+			env:   userEnv(),
+			setup: setupEmpty,
+			steps: append([]step{
+				{pause: 6 * time.Second, mark: "idle"},
+			}, append(fieldSteps, step{send: "\x03", pause: 500 * time.Millisecond}, step{send: "\x03", pause: 500 * time.Millisecond}, step{send: "\x04", pause: 2 * time.Second})...),
+		},
+		{
 			// Codex with the user's own login: startup, the slash command
 			// popup, the local /model picker, and quitting.
 			name:  "codex",
@@ -220,6 +273,22 @@ var editorSteps = []step{
 	{send: "\x17w50G", pause: 300 * time.Millisecond},
 	{send: ":qa!\r"},
 }
+
+// fieldSteps type into an agent's input field; fieldText is what the
+// field fixture tests expect to find.
+var (
+	fieldText  = strings.Repeat("the quick brown fox jumps over the lazy dog ", 4)
+	fieldClear = strings.Repeat("\x7f", 220)
+	fieldSteps = []step{
+		{send: fieldText, pause: 1500 * time.Millisecond, mark: "typed"},
+		{send: "\x1b\rsecond line", pause: 1200 * time.Millisecond, mark: "newline"},
+		{send: fieldClear, pause: 1200 * time.Millisecond, mark: "cleared"},
+		{send: "\x1b[200~line one\nline two\nline three\x1b[201~", pause: 1200 * time.Millisecond, mark: "pasted"},
+		{send: fieldClear, pause: 1200 * time.Millisecond},
+		{send: strings.Repeat("k", 130), pause: 1200 * time.Millisecond, mark: "longword"},
+		{send: fieldClear, pause: 1200 * time.Millisecond},
+	}
+)
 
 func setupEmpty(string) error { return nil }
 
@@ -370,18 +439,20 @@ func setupBrokenC(dir string) error {
 	return os.WriteFile(filepath.Join(dir, "broken.c"), []byte(b.String()), 0o644)
 }
 
-// record runs one scenario and returns everything it wrote to the PTY.
-func record(sc scenario) ([]byte, error) {
+// record runs one scenario and returns everything it wrote to the PTY, and
+// the marked offsets in it.
+func record(sc scenario) ([]byte, map[string]int, error) {
 	if err := os.RemoveAll(workDir); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := os.MkdirAll(workDir, 0o755); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer os.RemoveAll(workDir)
 	if err := sc.setup(workDir); err != nil {
-		return nil, fmt.Errorf("setup: %w", err)
+		return nil, nil, fmt.Errorf("setup: %w", err)
 	}
+	marks := map[string]int{}
 
 	var replies [][]byte
 	term, err := libghostty.NewTerminal(
@@ -394,7 +465,7 @@ func record(sc scenario) ([]byte, error) {
 		}),
 	)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer term.Close()
 
@@ -403,7 +474,7 @@ func record(sc scenario) ([]byte, error) {
 	cmd.Env = sc.env
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: rows, Cols: cols, X: cols * 8, Y: rows * 16})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer ptmx.Close()
 
@@ -483,7 +554,7 @@ func record(sc scenario) ([]byte, error) {
 				return false
 			})
 			if !ok {
-				return nil, fmt.Errorf("timed out waiting for %q; screen:\n%s", s.want, screen())
+				return nil, nil, fmt.Errorf("timed out waiting for %q; screen:\n%s", s.want, screen())
 			}
 		}
 		if s.only != "" && !strings.Contains(screen(), s.only) {
@@ -494,12 +565,15 @@ func record(sc scenario) ([]byte, error) {
 			// redraw per keystroke.
 			for _, k := range splitKeys(s.send) {
 				if _, err := ptmx.Write([]byte(k)); err != nil {
-					return nil, err
+					return nil, nil, err
 				}
 				pump(time.Now().Add(15*time.Millisecond), func() bool { return false })
 			}
 		}
 		pump(time.Now().Add(s.pause), func() bool { return false })
+		if s.mark != "" {
+			marks[s.mark] = out.Len()
+		}
 		if verbose {
 			fmt.Fprintf(os.Stderr, "--- after %q:\n%s\n", s.send, screen())
 		}
@@ -516,24 +590,38 @@ func record(sc scenario) ([]byte, error) {
 	}) {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		<-exited
-		return nil, errors.New("program did not exit; screen:\n" + screen())
+		return nil, nil, errors.New("program did not exit; screen:\n" + screen())
 	}
 	pump(time.Now().Add(500*time.Millisecond), func() bool { return false })
-	return out.Bytes(), nil
+	return out.Bytes(), marks, nil
 }
 
 // splitKeys splits scripted input into keystrokes, keeping escape
-// sequences such as arrow keys whole.
+// sequences such as arrow keys, bracketed pastes and Alt-Enter (ESC CR)
+// whole: a lone ESC followed by a CR a moment later reads as Esc then
+// Enter, which submits.
 func splitKeys(s string) []string {
 	var keys []string
 	for i := 0; i < len(s); {
-		if s[i] == 0x1b && i+2 < len(s) && s[i+1] == '[' {
+		switch {
+		case strings.HasPrefix(s[i:], "\x1b[200~"):
+			end := strings.Index(s[i:], "\x1b[201~")
+			if end >= 0 {
+				keys = append(keys, s[i:i+end+6])
+				i += end + 6
+				continue
+			}
+		case s[i] == 0x1b && i+2 < len(s) && s[i+1] == '[':
 			j := i + 2
 			for j < len(s) && (s[j] < 0x40 || s[j] > 0x7e) {
 				j++
 			}
 			keys = append(keys, s[i:j+1])
 			i = j + 1
+			continue
+		case s[i] == 0x1b && i+1 < len(s) && s[i+1] == '\r':
+			keys = append(keys, s[i:i+2])
+			i += 2
 			continue
 		}
 		keys = append(keys, s[i:i+1])
