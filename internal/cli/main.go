@@ -243,7 +243,7 @@ func (a *app) rootCommand() *cobra.Command {
 	}
 	root.Annotations = map[string]string{"intro": rootIntro, "after": rootExamples}
 	root.CompletionOptions.DisableDefaultCmd = true
-	root.PersistentFlags().StringVar(&a.host, "host", "", "Talk to the agtd on a remote host (see `agt host add`)")
+	root.PersistentFlags().StringVarP(&a.host, "host", "H", "", "Talk to the agtd on a remote host (see `agt host add`)")
 	root.PersistentFlags().Lookup("host").Annotations = map[string][]string{"value": {"NAME"}}
 	root.Flags().SortFlags = false
 	root.PersistentFlags().SortFlags = false

@@ -523,7 +523,7 @@ func (p *picker) handleDeleteKey(ev keyEvent) (string, bool, error) {
 }
 
 func remoteCreateHint(host string) string {
-	return fmt.Sprintf("start sessions on `%s` with `agt --host %s new --cwd DIR`", host, host)
+	return fmt.Sprintf("start sessions on `%s` with `agt new -C DIR %s/NAME`", host, host)
 }
 
 func (p *picker) createSession(agent string) (string, bool, error) {

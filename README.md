@@ -408,6 +408,7 @@ agt workspace add mono '~/src/mono'                         # or: agt workspace 
 agt workspace ls
 agt new --workspace mono auth-refactor                      # runs in ~/src/mono
 agt new --workspace mono --cwd services/api api-fix         # runs in ~/src/mono/services/api
+agt new -w mono -C services/api api-fix                     # the same, with short flags
 agt workspace rm mono
 ```
 
@@ -606,12 +607,12 @@ Back on the devbox, run that command:
 agtd remote authorize SHA256:... my-laptop
 ```
 
-Now any command can run on the devbox, with `--host` or a `host/session` address:
+Now any command can run on the devbox, with `--host` (or `-H`) or a `host/session` address:
 
 ```sh
-agt --host devbox new --cwd ~/repo auth-refactor      # a path on the devbox (absolute or ~/...)
+agt new --cwd ~/repo devbox/auth-refactor             # a path on the devbox (absolute or ~/...)
 agt --host devbox workspace add mono ~/src/mono       # name a directory on the devbox
-agt --host devbox new --workspace mono auth-tests      # and start sessions in it
+agt new -w mono devbox/auth-tests                     # and start sessions in it
 agt --host devbox ls
 agt attach devbox/auth-refactor
 agt send-input devbox/auth-refactor -- "run the tests"
