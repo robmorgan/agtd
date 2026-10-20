@@ -286,9 +286,30 @@ type keyEvent struct {
 // does not know (function keys, mouse reports, the terminal's replies to
 // queries) are events with code keyNone, carrying their bytes like any
 // other, so the local echo forwards them unchanged.
+//
+// What it holds is bounded. An incomplete sequence longer than
+// keySequenceMax is not a key, and goes as it is. A bracketed paste is held
+// until its end marker, up to pasteMax; a longer one is forwarded as it
+// arrives, in keyNone events, holding back only what may be the start of
+// its end marker. The end marker is looked for once in each byte. The local echo also calls
+// expire when nothing completes what is held.
 type keyDecoder struct {
 	pending []byte
+	// paste is the bracketed paste being read, from its start marker (or,
+	// once streaming, what is left of it after the last event); scanned
+	// is how much of it is known to hold no end marker.
+	paste     []byte
+	scanned   int
+	streaming bool
 }
+
+const (
+	// keySequenceMax bounds an incomplete escape sequence: the longest
+	// key a terminal sends (kitty CSI-u with every field) is far shorter.
+	keySequenceMax = 256
+	// pasteMax bounds the bracketed paste held for one event.
+	pasteMax = 64 << 10
+)
 
 var (
 	pasteStart = []byte("\x1b[200~")
@@ -296,31 +317,105 @@ var (
 )
 
 func (d *keyDecoder) push(chunk []byte) []keyEvent {
-	b := append(d.pending, chunk...)
-	d.pending = nil
+	b := chunk
+	if len(d.pending) > 0 {
+		b = append(d.pending, chunk...)
+		d.pending = nil
+	}
 	var events []keyEvent
 	for len(b) > 0 {
-		if bytes.HasPrefix(b, pasteStart) {
-			end := bytes.Index(b, pasteEnd)
-			if end < 0 {
-				d.pending = append([]byte(nil), b...)
-				break
+		if d.paste != nil {
+			var ev keyEvent
+			var ok bool
+			ev, ok, b = d.readPaste(b)
+			if ok {
+				events = append(events, ev)
 			}
-			n := end + len(pasteEnd)
-			events = append(events, keyEvent{isPaste: true, paste: string(b[len(pasteStart):end]), raw: append([]byte(nil), b[:n]...)})
-			b = b[n:]
+			continue
+		}
+		if bytes.HasPrefix(b, pasteStart) {
+			d.paste = append(make([]byte, 0, len(pasteStart)+len(b)), pasteStart...)
+			d.scanned = len(pasteStart)
+			b = b[len(pasteStart):]
 			continue
 		}
 		ev, n := decodeKey(b)
 		if n == 0 {
-			d.pending = append([]byte(nil), b...)
-			break
+			if len(b) <= keySequenceMax {
+				d.pending = append([]byte(nil), b...)
+				break
+			}
+			// Too long to be a key: it goes as it is.
+			ev, n = keyEvent{}, len(b)
 		}
 		ev.raw = append([]byte(nil), b[:n]...)
 		events = append(events, ev)
 		b = b[n:]
 	}
 	return events
+}
+
+// readPaste adds b to the paste being read. It returns the event that ends
+// the paste, or the part of a long one that can go, and what follows the
+// end marker in b.
+func (d *keyDecoder) readPaste(b []byte) (ev keyEvent, ok bool, rest []byte) {
+	before := len(d.paste)
+	d.paste = append(d.paste, b...)
+	from := max(d.scanned-(len(pasteEnd)-1), 0)
+	if i := bytes.Index(d.paste[from:], pasteEnd); i >= 0 {
+		end := from + i + len(pasteEnd)
+		ev.raw = d.paste[:end]
+		if !d.streaming {
+			ev.isPaste = true
+			ev.paste = string(ev.raw[len(pasteStart) : end-len(pasteEnd)])
+		}
+		rest = b[end-before:]
+		d.paste, d.scanned, d.streaming = nil, 0, false
+		return ev, true, rest
+	}
+	d.scanned = len(d.paste)
+	if d.streaming || len(d.paste) > pasteMax {
+		return d.streamPaste()
+	}
+	return keyEvent{}, false, nil
+}
+
+// streamPaste gives up holding the paste for one event: what is held goes
+// on as it is, but for what may be the start of the end marker.
+func (d *keyDecoder) streamPaste() (ev keyEvent, ok bool, rest []byte) {
+	d.streaming = true
+	keep := len(pasteEnd) - 1
+	if len(d.paste) <= keep {
+		return keyEvent{}, false, nil
+	}
+	ev.raw = append([]byte(nil), d.paste[:len(d.paste)-keep]...)
+	d.paste = append(make([]byte, 0, keep), d.paste[len(d.paste)-keep:]...)
+	d.scanned = len(d.paste)
+	return ev, true, nil
+}
+
+// held reports whether the decoder holds bytes that expire would give up.
+func (d *keyDecoder) held() bool {
+	return len(d.pending) > 0 || (d.paste != nil && (!d.streaming || len(d.paste) > len(pasteEnd)-1))
+}
+
+// expire gives up on what is held because nothing followed it: an
+// incomplete sequence goes as it is (Alt-[ in a legacy terminal is ESC [,
+// which waits for a final byte that never comes), and a paste whose end has
+// not come is forwarded as it arrives from then on.
+func (d *keyDecoder) expire() []keyEvent {
+	if d.paste != nil {
+		if ev, ok, _ := d.streamPaste(); ok {
+			return []keyEvent{ev}
+		}
+		return nil
+	}
+	if len(d.pending) == 0 {
+		return nil
+	}
+	ev := keyEvent{raw: d.pending}
+	d.pending = nil
+	return []keyEvent{ev}
 }
 
 // decodeKey decodes the key at the start of b, returning how many bytes it

@@ -556,3 +556,72 @@ func TestEchoReattachSendsEachKeyOnce(t *testing.T) {
 		t.Fatalf("resend %q, paused %v", send, e.paused)
 	}
 }
+
+// Bytes the decoder holds for the rest of a sequence go as they are when
+// nothing follows: Alt-[ in a legacy terminal is ESC [.
+func TestEchoExpiresIncompleteSequences(t *testing.T) {
+	for _, withField := range []bool{false, true} {
+		e, now := fixedClockEcho(echoFlushAfter)
+		if withField {
+			e.fieldAnswer(claudeField([]string{""}))
+		}
+		if send, _ := e.input([]byte("\x1b[")); send != nil {
+			t.Fatalf("sent at once: %q", send)
+		}
+		if send, _ := e.tick(now.Add(echoIncompleteAfter - time.Millisecond)); send != nil {
+			t.Fatalf("sent early: %q", send)
+		}
+		if send, _ := e.tick(now.Add(echoIncompleteAfter)); string(send) != "\x1b[" {
+			t.Fatalf("field %v: sent %q", withField, send)
+		}
+		if withField && !e.paused {
+			t.Fatal("an unknown sequence did not pause the echo")
+		}
+	}
+	// Leaving the attachment sends them too.
+	e, _ := fixedClockEcho(echoFlushAfter)
+	e.input([]byte("\x1bO"))
+	if send := e.suspend(); string(send) != "\x1bO" {
+		t.Fatalf("suspend sent %q", send)
+	}
+}
+
+// A long paste goes as it arrives, unpredicted; a short one is predicted.
+func TestEchoPastes(t *testing.T) {
+	e, now := fixedClockEcho(echoFlushAfter)
+	e.fieldAnswer(claudeField([]string{""}))
+	if send, paint := e.input([]byte("\x1b[200~hi\x1b[201~")); send != nil || !bytes.Contains(paint, []byte("hi")) {
+		t.Fatalf("short paste: send %q, paint %q", send, paint)
+	}
+	e.tick(now.Add(time.Second))
+
+	e, _ = fixedClockEcho(echoFlushAfter)
+	e.fieldAnswer(claudeField([]string{""}))
+	in := string(pasteStart) + strings.Repeat("x", 2*pasteMax) + string(pasteEnd)
+	var sent []byte
+	for _, chunk := range chunked(in, 4096) {
+		send, paint := e.input([]byte(chunk))
+		if paint != nil {
+			t.Fatal("a long paste was drawn")
+		}
+		sent = append(sent, send...)
+	}
+	if string(sent) != in || !e.paused {
+		t.Fatalf("sent %d of %d bytes, paused %v", len(sent), len(in), e.paused)
+	}
+}
+
+// Keys that arrive in one read are drawn once, after the last, and a box
+// that grows past the bottom on the way scrolls the screen once.
+func TestEchoPaintsOnceForARead(t *testing.T) {
+	f := &protocol.Field{Found: true, Cols: 80, Lines: 10, Row: 8, Col: 0, Top: 8, BoxTop: 7, BoxBottom: 9, TextCol: 0, Width: 79,
+		InverseCursor: true, WrapKeepsSpace: true, Rows: []string{""}, Style: []byte("\x1b[0m"),
+		Chrome: []protocol.ScreenRow{{Index: 7, VT: []byte("RULE")}, {Index: 8, VT: nil}, {Index: 9, VT: []byte("RULE")}}}
+	e := newEcho(echoConfig{flushAfter: echoFlushAfter})
+	e.fieldAnswer(f)
+	_, paint := e.input([]byte("a\x1b\rb"))
+	p := string(paint)
+	if strings.Count(p, syncBegin) != 1 || strings.Count(p, cup(9, 0)+"\n") != 1 || e.offset != 1 || !strings.HasSuffix(p, cup(8, 1)+syncEnd) {
+		t.Fatalf("one read:\n%q (offset %d)", p, e.offset)
+	}
+}

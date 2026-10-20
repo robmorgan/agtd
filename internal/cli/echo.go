@@ -62,6 +62,9 @@ const (
 	// echoProbeAfter is how long after the last flush (or the last
 	// output, when idle) the field is asked for.
 	echoProbeAfter = 150 * time.Millisecond
+	// echoIncompleteAfter is how long an incomplete escape sequence or
+	// paste waits for the rest before it goes as it is.
+	echoIncompleteAfter = 50 * time.Millisecond
 	// echoMaxStates bounds the unconfirmed predictions; past it the echo
 	// drops them and lets keys through raw, so an agent that stopped
 	// reading never pins a stale drawing.
@@ -405,6 +408,9 @@ type echo struct {
 	// pending is the batch of keys not yet sent; flushDue when it goes.
 	pending  []byte
 	flushDue time.Time
+	// decodeDue is when what the decoder holds (an incomplete sequence,
+	// a paste without its end yet) goes as it is.
+	decodeDue time.Time
 	// probeDue is when the field is asked for next; probing while an ask
 	// is outstanding. quietDue is the ask after output goes quiet.
 	probeDue, quietDue time.Time
@@ -469,40 +475,62 @@ func (e *echo) output(n int) {
 }
 
 // input takes typed bytes (hotkeys already removed). It returns what to
-// send now and what to draw.
+// send now and what to draw: the drawing after the last key, which also
+// makes any scrolling the keys before it called for.
 func (e *echo) input(data []byte) (send, paint []byte) {
+	drawn := false
 	for _, ev := range e.keys.push(data) {
-		if e.resend {
-			e.pending = append(e.pending, ev.raw...)
-			e.held = true
-			continue
-		}
-		if !e.active() || len(e.states) >= echoMaxStates {
-			e.pending = append(e.pending, ev.raw...)
-			send = append(send, e.flush()...)
-			continue
-		}
-		if ev.release {
-			// It changes nothing in the field: it goes with the keys
-			// around it.
-			send = append(send, e.queue(ev.raw)...)
-			continue
-		}
-		if !e.predict(ev) {
-			// Unpredicted: it goes now, with everything before it,
-			// and the drawing stops meaning anything.
-			e.pending = append(e.pending, ev.raw...)
-			send = append(send, e.flush()...)
-			e.pause()
-			continue
-		}
-		lay := layout(e.text, e.field)
-		e.states = append(e.states, echoState{rows: lay.texts(), cRow: lay.cRow, cCol: lay.cCol, key: ev})
-		send = append(send, e.queue(ev.raw)...)
-		paint = e.paint(lay)
+		s, d := e.key(ev)
+		send = append(send, s...)
+		drawn = drawn || d
 	}
+	if drawn && len(e.states) > 0 {
+		paint = e.paint(layout(e.text, e.field))
+	}
+	e.noteHeld()
 	e.schedule()
 	return send, paint
+}
+
+// key takes one key: it is held for a resend, sent, or predicted and
+// batched. It returns what to send now and whether the text changed.
+func (e *echo) key(ev keyEvent) (send []byte, drawn bool) {
+	if e.resend {
+		e.pending = append(e.pending, ev.raw...)
+		e.held = true
+		return nil, false
+	}
+	if !e.active() || len(e.states) >= echoMaxStates {
+		e.pending = append(e.pending, ev.raw...)
+		return e.flush(), false
+	}
+	if ev.release {
+		// It changes nothing in the field: it goes with the keys
+		// around it.
+		return e.queue(ev.raw), false
+	}
+	if !e.predict(ev) {
+		// Unpredicted: it goes now, with everything before it, and
+		// the drawing stops meaning anything.
+		e.pending = append(e.pending, ev.raw...)
+		send = e.flush()
+		e.pause()
+		return send, false
+	}
+	lay := layout(e.text, e.field)
+	e.states = append(e.states, echoState{rows: lay.texts(), cRow: lay.cRow, cCol: lay.cCol, key: ev})
+	return e.queue(ev.raw), true
+}
+
+// noteHeld arms the expiry of what the decoder holds: bytes that wait for
+// the rest of a sequence or a paste go as they are if nothing follows them
+// for echoIncompleteAfter.
+func (e *echo) noteHeld() {
+	if e.keys.held() {
+		e.decodeDue = e.now().Add(echoIncompleteAfter)
+	} else {
+		e.decodeDue = time.Time{}
+	}
 }
 
 // predict applies a key to the text if it is one every editor handles the
@@ -581,6 +609,14 @@ func (e *echo) tick(now time.Time) (send []byte, reqs []*protocol.Request) {
 	if !e.flushDue.IsZero() && !now.Before(e.flushDue) {
 		send = e.flush()
 	}
+	if !e.decodeDue.IsZero() && !now.Before(e.decodeDue) {
+		// Expired bytes are never keys the echo predicts.
+		for _, ev := range e.keys.expire() {
+			s, _ := e.key(ev)
+			send = append(send, s...)
+		}
+		e.noteHeld()
+	}
 	if !e.probing {
 		due := !e.probeDue.IsZero() && !now.Before(e.probeDue)
 		quiet := !e.quietDue.IsZero() && !now.Before(e.quietDue)
@@ -609,8 +645,12 @@ func (e *echo) probe() []*protocol.Request {
 // schedule arms the timer for the earliest due time.
 func (e *echo) schedule() {
 	var due time.Time
-	for _, t := range []time.Time{e.flushDue, e.probeDue, e.quietDue} {
-		if t.IsZero() || (e.probing && t != e.flushDue) {
+	times := []time.Time{e.flushDue, e.decodeDue}
+	if !e.probing {
+		times = append(times, e.probeDue, e.quietDue)
+	}
+	for _, t := range times {
+		if t.IsZero() {
 			continue
 		}
 		if due.IsZero() || t.Before(due) {
@@ -746,11 +786,18 @@ func (e *echo) snapshotAnswer(data []byte) (paint []byte) {
 }
 
 // suspend ends the echo for now (the overlay opens, the attachment ends):
-// pending keys go, predictions are dropped.
+// pending keys go, with what the decoder holds, and predictions are
+// dropped.
 func (e *echo) suspend() (send []byte) {
 	// Keys a reattach left unconfirmed are not sent again: the field
 	// that would say which never arrived.
 	e.resend, e.held = false, false
+	// What the decoder holds goes too, rather than in front of the next
+	// key typed after the overlay.
+	for _, ev := range e.keys.expire() {
+		e.pending = append(e.pending, ev.raw...)
+	}
+	e.noteHeld()
 	send = e.flush()
 	e.states = nil
 	e.paused = false

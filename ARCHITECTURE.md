@@ -1024,7 +1024,10 @@ agent's own menus, completions and submit work as they always did, one round tri
 asked for before such a key is stale when it arrives, so it is ignored and asked for again (so is
 one asked for before a resize). Sequences the CLI does not know (function keys, mouse reports,
 the terminal's replies to the agent's queries) go as they came, unpredicted, and kitty key
-releases go with the batch around them: the echo never drops or rewrites a byte. The drawing is
+releases go with the batch around them: the echo never drops or rewrites a byte. What the
+decoder holds is bounded: an incomplete sequence goes as it is after 256 bytes or 50 ms with
+nothing following (Alt-[ in a legacy terminal is a lone ESC [), and a bracketed paste over
+64 KiB, or whose end is late, is forwarded as it arrives, unpredicted. The drawing is
 a prediction; the agent is the authority. The CLI keeps the states it predicted, each with its
 key, and an observed field that equals one of them, text and cursor (Left and Right change only
 the cursor), confirms the keys up to it; the keys after it are

@@ -119,3 +119,106 @@ func TestKeyDecoderKeepsEveryByte(t *testing.T) {
 		t.Errorf("keypad 0: %+v", evs)
 	}
 }
+
+// pushAll feeds the decoder chunks and returns the events' bytes, checking
+// after each push that what it holds stays bounded.
+func pushAll(t *testing.T, d *keyDecoder, chunks []string) (raw []byte, events []keyEvent) {
+	t.Helper()
+	for _, chunk := range chunks {
+		evs := d.push([]byte(chunk))
+		for _, ev := range evs {
+			raw = append(raw, ev.raw...)
+		}
+		events = append(events, evs...)
+		if held := len(d.pending) + len(d.paste); held > pasteMax+len(chunk) {
+			t.Fatalf("holds %d bytes", held)
+		}
+	}
+	return raw, events
+}
+
+func chunked(s string, n int) []string {
+	var out []string
+	for len(s) > n {
+		out = append(out, s[:n])
+		s = s[n:]
+	}
+	return append(out, s)
+}
+
+// A paste longer than pasteMax is forwarded as it arrives, unpredicted,
+// whichever read splits its end marker; a shorter one is one event.
+func TestKeyDecoderStreamsLongPastes(t *testing.T) {
+	long := string(pasteStart) + strings.Repeat("0123456789abcdef", (4<<20)/16) + string(pasteEnd)
+	var d keyDecoder
+	raw, events := pushAll(t, &d, chunked(long+"x", 4096))
+	if string(raw) != long+"x" {
+		t.Fatalf("forwarded %d bytes of %d", len(raw), len(long)+1)
+	}
+	for _, ev := range events[:len(events)-1] {
+		if ev.isPaste || ev.code != keyNone {
+			t.Fatalf("a long paste was held for prediction: %+v", ev.code)
+		}
+	}
+	if last := events[len(events)-1]; last.code != keyChar || last.r != 'x' || d.paste != nil {
+		t.Fatalf("after the paste: %+v, still pasting %v", last, d.paste != nil)
+	}
+
+	for _, n := range []int{pasteMax / 2, pasteMax + 10} {
+		body := strings.Repeat("p", n)
+		in := string(pasteStart) + body + string(pasteEnd) + "x"
+		end := len(pasteStart) + n
+		for split := end - 1; split <= end+len(pasteEnd); split++ {
+			var d keyDecoder
+			raw, events := pushAll(t, &d, []string{in[:split], in[split:]})
+			if string(raw) != in {
+				t.Fatalf("%d bytes, split at %d: forwarded %d bytes", n, split, len(raw))
+			}
+			last := events[len(events)-1]
+			if last.r != 'x' {
+				t.Fatalf("%d bytes, split at %d: the end marker was missed", n, split)
+			}
+			if n < pasteMax && (len(events) != 2 || !events[0].isPaste || events[0].paste != body) {
+				t.Fatalf("%d bytes, split at %d: not one paste: %d events", n, split, len(events))
+			}
+		}
+	}
+}
+
+// An incomplete sequence longer than any key is not one, and what nothing
+// completes is given up by expire.
+func TestKeyDecoderBoundsIncompleteSequences(t *testing.T) {
+	long := "\x1b[" + strings.Repeat("1;", 200)
+	var d keyDecoder
+	if raw, _ := pushAll(t, &d, chunked(long, 50)); string(raw) != long || d.held() {
+		t.Fatalf("forwarded %q, holding %v", raw, d.held())
+	}
+
+	d = keyDecoder{}
+	if evs := d.push([]byte("\x1b[")); evs != nil || !d.held() {
+		t.Fatalf("Alt-[: %+v", evs)
+	}
+	if evs := d.expire(); len(evs) != 1 || string(evs[0].raw) != "\x1b[" || d.held() {
+		t.Fatalf("expired %+v", evs)
+	}
+
+	// A paste whose end is late is forwarded from then on.
+	d = keyDecoder{}
+	var raw []byte
+	for _, ev := range d.push([]byte("\x1b[200~abc")) {
+		raw = append(raw, ev.raw...)
+	}
+	for _, ev := range d.expire() {
+		raw = append(raw, ev.raw...)
+	}
+	if d.held() {
+		t.Fatal("still held after expiring")
+	}
+	evs := d.push([]byte("def\x1b[201~x"))
+	for _, ev := range evs {
+		raw = append(raw, ev.raw...)
+	}
+	if string(raw) != "\x1b[200~abcdef\x1b[201~x" || evs[len(evs)-1].r != 'x' {
+		t.Fatalf("forwarded %q", raw)
+	}
+}
