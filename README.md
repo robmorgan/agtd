@@ -305,7 +305,7 @@ make dev-run ARGS="list"
 On macOS 13+ or Linux (glibc 2.28+: Debian 10, Ubuntu 20.04, RHEL 8 or newer, Arch):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/robmorgan/agtd/main/install.sh | bash
+curl -fsSL https://agtd.sh/install.sh | bash
 ```
 
 This downloads the latest [release](https://github.com/robmorgan/agtd/releases)'s binaries and
