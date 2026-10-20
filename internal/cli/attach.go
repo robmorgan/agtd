@@ -743,6 +743,9 @@ func handleFrame(f frame, overlayOpen bool, size *protocol.SizeOwnership, ech *e
 // closed and the screen was restored.
 func (c *client) overlayInput(ov *overlay, chunk []byte, stream *attachStream, size *protocol.SizeOwnership, ech *echo) (res *attachResult, closed bool, err error) {
 	for _, ev := range ov.keys.push(chunk) {
+		if ev.code == keyNone && !ev.isPaste {
+			continue
+		}
 		out, err := ov.handle(ev)
 		if err != nil {
 			return nil, false, err

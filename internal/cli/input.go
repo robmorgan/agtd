@@ -270,6 +270,9 @@ type keyEvent struct {
 	mods    keyMods
 	paste   string
 	isPaste bool
+	// release: a key release (kitty keyboard protocol), which changes
+	// nothing in an input field.
+	release bool
 	// raw is the bytes the terminal sent for it, so the local echo can
 	// forward a key exactly as it arrived.
 	raw []byte
@@ -279,7 +282,10 @@ type keyEvent struct {
 // encodings a plain raw-mode terminal sends and the kitty keyboard
 // protocol's CSI-u form, which the overlay receives because attach enables
 // it. As with most terminal libraries, an ESC that ends a read is the Esc
-// key; any other incomplete sequence waits for the next read.
+// key; any other incomplete sequence waits for the next read. Sequences it
+// does not know (function keys, mouse reports, the terminal's replies to
+// queries) are events with code keyNone, carrying their bytes like any
+// other, so the local echo forwards them unchanged.
 type keyDecoder struct {
 	pending []byte
 }
@@ -311,9 +317,7 @@ func (d *keyDecoder) push(chunk []byte) []keyEvent {
 			break
 		}
 		ev.raw = append([]byte(nil), b[:n]...)
-		if ev.code != keyNone {
-			events = append(events, ev)
-		}
+		events = append(events, ev)
 		b = b[n:]
 	}
 	return events
@@ -395,7 +399,8 @@ func decodeCSI(b []byte) (keyEvent, int) {
 	final := b[i]
 	n := i + 1
 	if final < 0x40 || final > 0x7e {
-		// Not a CSI sequence after all: drop the ESC [ and go on.
+		// Not a CSI sequence after all: ESC [ is an event of its own,
+		// and what follows is decoded afresh.
 		return keyEvent{}, 2
 	}
 	params := splitParams(string(b[2:i]))
@@ -420,7 +425,7 @@ func decodeCSI(b []byte) (keyEvent, int) {
 		}
 	}
 	if param(1, 1) == 3 {
-		return keyEvent{}, n // a key release
+		return keyEvent{release: true}, n
 	}
 	var code keyCode
 	switch final {
@@ -452,7 +457,9 @@ func decodeCSI(b []byte) (keyEvent, int) {
 		case 127, 8:
 			code = keyBackspace
 		default:
-			if cp < 0x20 || cp > utf8.MaxRune {
+			if cp < 0x20 || cp > utf8.MaxRune || cp >= kittyFunctionalFirst && cp <= kittyFunctionalLast {
+				// Not text: a functional key (keypad, media, a
+				// modifier on its own) or a reply such as CSI ? flags u.
 				return keyEvent{}, n
 			}
 			r := rune(cp)
@@ -466,6 +473,13 @@ func decodeCSI(b []byte) (keyEvent, int) {
 	}
 	return keyEvent{code: code, mods: mods}, n
 }
+
+// The kitty keyboard protocol numbers its functional keys from the Unicode
+// private use area.
+const (
+	kittyFunctionalFirst = 57344
+	kittyFunctionalLast  = 63743
+)
 
 func splitParams(s string) [][]string {
 	if s == "" {

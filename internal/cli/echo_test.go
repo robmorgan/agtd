@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"agtd.sh/internal/protocol"
+	"agtd.sh/internal/transport"
 )
 
 // The wrap rules against what the agents drew (the probe measurements in
@@ -187,7 +188,7 @@ func TestEchoFlow(t *testing.T) {
 }
 
 func TestEchoUnpredictedKeysGoAtOnceAndPause(t *testing.T) {
-	e := newEcho(echoConfig{})
+	e := newEcho(echoConfig{flushAfter: echoFlushAfter})
 	e.fieldAnswer(claudeField([]string{""}))
 	typeKeys(e, "ab")
 	send, paint := e.input([]byte("\r"))
@@ -198,7 +199,8 @@ func TestEchoUnpredictedKeysGoAtOnceAndPause(t *testing.T) {
 	if send, paint := typeKeys(e, "c"); string(send) != "c" || paint != nil {
 		t.Fatalf("paused: send %q, paint %q", send, paint)
 	}
-	// The next field resumes the echo.
+	// The next field asked for resumes the echo.
+	e.probe()
 	e.fieldAnswer(claudeField([]string{""}))
 	if send, paint := typeKeys(e, "d"); send != nil || paint == nil {
 		t.Fatalf("resumed: send %q, paint %q", send, paint)
@@ -208,7 +210,7 @@ func TestEchoUnpredictedKeysGoAtOnceAndPause(t *testing.T) {
 // Shift-Enter (kitty form) and Alt-Enter are newlines on every agent;
 // Ctrl-Enter and Ctrl-J are not the same everywhere, so they go raw.
 func TestEchoNewlineKeys(t *testing.T) {
-	e := newEcho(echoConfig{})
+	e := newEcho(echoConfig{flushAfter: echoFlushAfter})
 	e.fieldAnswer(claudeField([]string{""}))
 	typeKeys(e, "one")
 	if send, paint := e.input([]byte("\x1b[13;2u")); send != nil || paint == nil || e.paused {
@@ -220,6 +222,7 @@ func TestEchoNewlineKeys(t *testing.T) {
 		t.Fatalf("rows %q", rows)
 	}
 	for _, key := range []string{"\x1b[13;5u", "\x1b[106;5u", "\r"} {
+		e.probe()
 		e.fieldAnswer(claudeField([]string{""}))
 		// Unpredicted: it goes at once, after whatever was still batched.
 		if send, _ := e.input([]byte(key)); !bytes.HasSuffix(send, []byte(key)) || !e.paused {
@@ -229,7 +232,7 @@ func TestEchoNewlineKeys(t *testing.T) {
 }
 
 func TestEchoAdoptsWhatTheAgentDrew(t *testing.T) {
-	e := newEcho(echoConfig{})
+	e := newEcho(echoConfig{flushAfter: echoFlushAfter})
 	e.fieldAnswer(claudeField([]string{""}))
 	typeKeys(e, "hel")
 	// The agent shows something none of the predictions match.
@@ -249,7 +252,7 @@ func TestEchoAdoptsWhatTheAgentDrew(t *testing.T) {
 // A confirmation that lands after a typed space must keep the space: the
 // worker reports blanks before the cursor as text, and so does the echo.
 func TestEchoKeepsTypedSpacesAcrossConfirmation(t *testing.T) {
-	e := newEcho(echoConfig{})
+	e := newEcho(echoConfig{flushAfter: echoFlushAfter})
 	e.fieldAnswer(claudeField([]string{""}))
 	typeKeys(e, "hello ")
 	if rows := e.states[len(e.states)-1].rows; rows[0] != "hello " {
@@ -271,7 +274,7 @@ func TestEchoKeepsTypedSpacesAcrossConfirmation(t *testing.T) {
 }
 
 func TestEchoResendsAfterReattach(t *testing.T) {
-	e := newEcho(echoConfig{})
+	e := newEcho(echoConfig{flushAfter: echoFlushAfter})
 	e.fieldAnswer(claudeField([]string{""}))
 	typeKeys(e, "abc")
 	e.tick(e.now().Add(time.Second)) // flushed
@@ -289,7 +292,7 @@ func TestEchoResendsAfterReattach(t *testing.T) {
 }
 
 func TestEchoPaintMovesTheRuleAsTheBoxGrows(t *testing.T) {
-	e := newEcho(echoConfig{})
+	e := newEcho(echoConfig{flushAfter: echoFlushAfter})
 	e.fieldAnswer(claudeField([]string{""}))
 	_, paint := typeKeys(e, "one")
 	p := string(paint)
@@ -311,7 +314,7 @@ func TestEchoPaintInverseCursorAndDownwardGrowth(t *testing.T) {
 	f := &protocol.Field{Found: true, Cols: 120, Lines: 40, Row: 28, Col: 0, Top: 28, BoxTop: 27, BoxBottom: 29, TextCol: 0, Width: 119,
 		InverseCursor: true, WrapKeepsSpace: true, Rows: []string{""}, Style: []byte("\x1b[0m"),
 		Chrome: []protocol.ScreenRow{{Index: 27, VT: []byte("RULE")}, {Index: 28, VT: nil}, {Index: 29, VT: []byte("RULE")}, {Index: 30, VT: []byte("status")}}}
-	e := newEcho(echoConfig{})
+	e := newEcho(echoConfig{flushAfter: echoFlushAfter})
 	e.fieldAnswer(f)
 	_, paint := typeKeys(e, "ab")
 	p := string(paint)
@@ -330,7 +333,7 @@ func TestEchoPaintScrollsWhenTheBoxReachesTheBottom(t *testing.T) {
 	f := &protocol.Field{Found: true, Cols: 80, Lines: 10, Row: 8, Col: 0, Top: 8, BoxTop: 7, BoxBottom: 9, TextCol: 0, Width: 79,
 		InverseCursor: true, WrapKeepsSpace: true, Rows: []string{""}, Style: []byte("\x1b[0m"),
 		Chrome: []protocol.ScreenRow{{Index: 7, VT: []byte("RULE")}, {Index: 8, VT: nil}, {Index: 9, VT: []byte("RULE")}}}
-	e := newEcho(echoConfig{})
+	e := newEcho(echoConfig{flushAfter: echoFlushAfter})
 	e.fieldAnswer(f)
 	var all []byte
 	for _, key := range []string{"a", "\x1b\r", "b"} {
@@ -349,11 +352,207 @@ func TestEchoPaintScrollsWhenTheBoxReachesTheBottom(t *testing.T) {
 // after the attach, even when nothing follows the snapshot: the prompt may
 // already be in it.
 func TestEchoAsksForTheFieldAfterAttach(t *testing.T) {
-	e := newEcho(echoConfig{})
+	e := newEcho(echoConfig{flushAfter: echoFlushAfter})
 	if _, reqs := e.tick(time.Now()); reqs != nil {
 		t.Fatalf("asked at once: %v", reqs)
 	}
 	if _, reqs := e.tick(time.Now().Add(echoProbeAfter)); len(reqs) != 1 || reqs[0].AttachField == nil {
 		t.Fatalf("not asked after the quiet moment: %v", reqs)
+	}
+}
+
+// fixedClockEcho is an echo with its clock stopped at the time it returns.
+func fixedClockEcho(flushAfter time.Duration) (*echo, time.Time) {
+	now := time.Unix(1_700_000_000, 0)
+	e := newEcho(echoConfig{flushAfter: flushAfter})
+	e.now = func() time.Time { return now }
+	return e, now
+}
+
+// The echo forwards the keys it does not predict exactly as they came,
+// whether or not it has a field: none is dropped or changed. A key release
+// does not stop the echo.
+func TestEchoForwardsWhatItDoesNotPredict(t *testing.T) {
+	keys := []string{"\x1b[15~", "\x1bOP", "\x1b[<0;10;5M", "\x1b[12;5R", "\x1b[?62;22c", "\x1b[?1u", "\x1b[I", "\x1b[57399u"}
+	for _, withField := range []bool{false, true} {
+		for _, key := range keys {
+			e, now := fixedClockEcho(echoFlushAfter)
+			if withField {
+				e.fieldAnswer(claudeField([]string{""}))
+			}
+			var sent []byte
+			for _, chunk := range []string{"a", key[:2], key[2:], "b"} {
+				send, _ := e.input([]byte(chunk))
+				sent = append(sent, send...)
+			}
+			send, _ := e.tick(now.Add(time.Second))
+			sent = append(sent, send...)
+			if string(sent) != "a"+key+"b" {
+				t.Errorf("field %v, %q: sent %q", withField, key, sent)
+			}
+		}
+	}
+	e, now := fixedClockEcho(echoFlushAfter)
+	e.fieldAnswer(claudeField([]string{""}))
+	_, paint := typeKeys(e, "a")
+	if send, _ := e.input([]byte("\x1b[97;1:3u")); send != nil || e.paused || paint == nil {
+		t.Fatalf("release: send %q, paused %v", send, e.paused)
+	}
+	if _, paint := typeKeys(e, "b"); paint == nil || e.unconfirmed() != 2 {
+		t.Fatalf("after a release: paint %q, unconfirmed %d", paint, e.unconfirmed())
+	}
+	if send, _ := e.tick(now.Add(time.Second)); string(send) != "a\x1b[97;1:3ub" {
+		t.Fatalf("batch %q", send)
+	}
+}
+
+// A field with the predicted text but not the predicted cursor has not
+// reached that state: Left and Right change only the cursor.
+func TestEchoMatchesTheCursorToo(t *testing.T) {
+	e, now := fixedClockEcho(echoFlushAfter)
+	e.fieldAnswer(claudeField([]string{"ab"}))
+	e.input([]byte("\x1b[D"))
+	e.tick(now.Add(time.Second))
+	e.probe()
+	// The agent has not moved its cursor yet.
+	e.fieldAnswer(claudeField([]string{"ab"}))
+	if e.unconfirmed() != 1 || !e.holding() {
+		t.Fatalf("left confirmed by the text alone: unconfirmed %d", e.unconfirmed())
+	}
+	moved := claudeField([]string{"ab"})
+	moved.Col--
+	e.probe()
+	e.fieldAnswer(moved)
+	if e.unconfirmed() != 0 {
+		t.Fatalf("left not confirmed by the cursor: unconfirmed %d", e.unconfirmed())
+	}
+
+	// After a reattach, editing keys the agent never got are sent again,
+	// although two of the states show the text it has.
+	e, now = fixedClockEcho(echoFlushAfter)
+	e.fieldAnswer(claudeField([]string{"abc"}))
+	edits := "\x1b[D\x1b[DX\x7f" // abc| ab|c a|bc aX|bc a|bc
+	e.input([]byte(edits))
+	e.tick(now.Add(time.Second))
+	e.reattached()
+	e.probe()
+	if send, _ := e.fieldAnswer(claudeField([]string{"abc"})); string(send) != edits || e.unconfirmed() != 4 {
+		t.Fatalf("none arrived: resend %q, unconfirmed %d", send, e.unconfirmed())
+	}
+	// The first Left arrived, the rest did not.
+	e, now = fixedClockEcho(echoFlushAfter)
+	e.fieldAnswer(claudeField([]string{"abc"}))
+	e.input([]byte(edits))
+	e.tick(now.Add(time.Second))
+	e.reattached()
+	e.probe()
+	oneLeft := claudeField([]string{"abc"})
+	oneLeft.Col--
+	if send, _ := e.fieldAnswer(oneLeft); string(send) != edits[3:] {
+		t.Fatalf("one arrived: resend %q", send)
+	}
+}
+
+// flush_after = "0" sends every key at once.
+func TestEchoWithoutBatching(t *testing.T) {
+	e, now := fixedClockEcho(0)
+	e.fieldAnswer(claudeField([]string{""}))
+	for _, k := range []string{"h", "i", "\x1b[D"} {
+		if send, paint := e.input([]byte(k)); string(send) != k || paint == nil {
+			t.Fatalf("%q: send %q, paint %q", k, send, paint)
+		}
+	}
+	if send, _ := e.tick(now.Add(time.Second)); send != nil {
+		t.Fatalf("left over: %q", send)
+	}
+}
+
+type discardStream struct{ transport.Stream }
+
+func (discardStream) Write(p []byte) (int, error) { return len(p), nil }
+
+// A snapshot asked for on a lost attachment is never answered; the overlay
+// must not wait for it on the new one.
+func TestEchoReattachForgetsTheLostSnapshot(t *testing.T) {
+	e, now := fixedClockEcho(echoFlushAfter)
+	e.fieldAnswer(claudeField([]string{""}))
+	typeKeys(e, "a")
+	if _, reqs := e.tick(now.Add(time.Second)); len(reqs) != 2 || !e.snapshotDue {
+		t.Fatalf("probe: %v", reqs)
+	}
+	e.reattached() // the connection went before the answers came
+	e.suspend()    // the overlay opens
+	stream := &attachStream{s: discardStream{}, frames: make(chan frame, 1)}
+	stream.frames <- frame{resp: &protocol.Response{AttachSnapshot: &protocol.Bytes{Data: []byte("NEW")}}}
+	close(stream.frames)
+	if got, _, err := restoreSnapshot(stream, nil, e); err != nil || string(got) != "NEW" {
+		t.Fatalf("restored %q, %v", got, err)
+	}
+}
+
+// A field asked for before an unpredicted key (or a resize) may show a
+// field that is gone: it does not resume the echo.
+func TestEchoIgnoresAFieldAskedBeforeAnUnpredictedKey(t *testing.T) {
+	e, now := fixedClockEcho(echoFlushAfter)
+	e.fieldAnswer(claudeField([]string{""}))
+	typeKeys(e, "abc")
+	e.tick(now.Add(time.Second))
+	e.probe()
+	e.input([]byte("\r")) // submits; the answer below was read before it
+	e.fieldAnswer(claudeField([]string{"abc"}))
+	if e.active() {
+		t.Fatal("a stale field resumed the echo")
+	}
+	if send, paint := typeKeys(e, "x"); string(send) != "x" || paint != nil {
+		t.Fatalf("after a stale field: send %q, paint %q", send, paint)
+	}
+	if _, reqs := e.tick(now.Add(time.Second)); len(reqs) == 0 || reqs[0].AttachField == nil {
+		t.Fatalf("not asked again: %v", reqs)
+	}
+	e.fieldAnswer(claudeField([]string{"x"}))
+	if !e.active() {
+		t.Fatal("a fresh field did not resume the echo")
+	}
+
+	e.probe()
+	e.resized()
+	e.fieldAnswer(claudeField([]string{"x"}))
+	if e.field != nil {
+		t.Fatal("a field from before a resize was adopted")
+	}
+}
+
+// Across a reattach every key goes once, in order: keys still batched are
+// not sent on top of the resend, and keys typed while it is owed follow it.
+func TestEchoReattachSendsEachKeyOnce(t *testing.T) {
+	e, now := fixedClockEcho(echoFlushAfter)
+	e.fieldAnswer(claudeField([]string{""}))
+	typeKeys(e, "abc") // batched, not sent, when the connection goes
+	e.reattached()
+	var sent []byte
+	send, reqs := e.tick(now.Add(time.Second))
+	sent = append(sent, send...)
+	if len(reqs) == 0 || reqs[0].AttachField == nil {
+		t.Fatalf("not asked: %v", reqs)
+	}
+	send, _ = e.fieldAnswer(claudeField([]string{""}))
+	sent = append(sent, send...)
+	if string(sent) != "abc" {
+		t.Fatalf("sent %q", sent)
+	}
+
+	e, now = fixedClockEcho(echoFlushAfter)
+	e.fieldAnswer(claudeField([]string{""}))
+	typeKeys(e, "ab")
+	e.tick(now.Add(time.Second)) // "ab" sent
+	typeKeys(e, "c")             // batched
+	e.reattached()
+	if send, paint := e.input([]byte("d\r")); send != nil || paint != nil {
+		t.Fatalf("typed while the resend is owed: send %q, paint %q", send, paint)
+	}
+	e.tick(now.Add(time.Second))
+	// The agent drew "a": "b" was lost with the connection.
+	if send, _ := e.fieldAnswer(claudeField([]string{"a"})); string(send) != "bcd\r" || !e.paused {
+		t.Fatalf("resend %q, paused %v", send, e.paused)
 	}
 }

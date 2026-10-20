@@ -57,7 +57,7 @@ func TestKeyDecoder(t *testing.T) {
 		{"alt letter", []string{"\x1bx"}, []keyEvent{{code: keyChar, r: 'x', mods: modAlt}}},
 		{"kitty esc", []string{"\x1b[27u"}, []keyEvent{key(keyEsc)}},
 		{"kitty enter and ctrl-y", []string{"\x1b[13u\x1b[121;5u"}, []keyEvent{key(keyEnter), {code: keyChar, r: 'y', mods: modCtrl}}},
-		{"kitty release dropped", []string{"\x1b[27;1:3u"}, nil},
+		{"kitty release", []string{"\x1b[27;1:3u"}, []keyEvent{{release: true}}},
 		{"csi split across reads", []string{"\x1b[", "B"}, []keyEvent{key(keyDown)}},
 		{"bracketed paste", []string{"\x1b[200~he", "llo\x1b[201~x"}, []keyEvent{{isPaste: true, paste: "hello"}, char('x')}},
 	} {
@@ -78,5 +78,44 @@ func TestKeyDecoder(t *testing.T) {
 		if all := strings.Join(tc.chunks, ""); tc.want != nil && !strings.Contains(all, string(raw)) {
 			t.Errorf("%s: raw bytes %q are not from the input %q", tc.name, raw, all)
 		}
+	}
+}
+
+// Sequences the decoder does not know still carry their bytes, wherever a
+// read splits them: the local echo forwards every byte it is given.
+func TestKeyDecoderKeepsEveryByte(t *testing.T) {
+	for _, in := range []string{
+		"\x1b[15~",                         // F5
+		"\x1bOP",                           // F1
+		"\x1b[2~",                          // Insert
+		"\x1b[<0;10;5M\x1b[<0;10;5m",       // SGR mouse press and release
+		"\x1b[M !!",                        // X10 mouse
+		"\x1b[97;1:3u",                     // kitty key release
+		"\x1b[57399u",                      // kitty keypad 0
+		"\x1b[12;5R",                       // cursor position report
+		"\x1b[?62;22c",                     // primary device attributes reply
+		"\x1b[?1u",                         // kitty keyboard flags reply
+		"\x1b[I\x1b[O",                     // focus in and out
+		"\x1b]11;rgb:0000/0000/0000\x1b\\", // OSC reply
+		"\x1b[\x01x",                       // not a CSI sequence after all
+		"\x1b[200~pasted\x1b[201~",
+	} {
+		for split := 0; split <= len(in); split++ {
+			var d keyDecoder
+			var raw []byte
+			for _, chunk := range []string{in[:split], in[split:]} {
+				for _, ev := range d.push([]byte(chunk)) {
+					raw = append(raw, ev.raw...)
+				}
+			}
+			if string(raw) != in {
+				t.Errorf("%q split at %d: forwarded %q", in, split, raw)
+			}
+		}
+	}
+	// Kitty functional keys are not text.
+	var d keyDecoder
+	if evs := d.push([]byte("\x1b[57399u")); len(evs) != 1 || evs[0].code != keyNone {
+		t.Errorf("keypad 0: %+v", evs)
 	}
 }

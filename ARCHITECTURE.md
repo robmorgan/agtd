@@ -1020,9 +1020,14 @@ Right and the Shift-Enter and Alt-Enter newlines (measured: Ctrl-J is a newline 
 and Codex but nothing in pi, and Ctrl-Enter submits in Claude Code, is a newline in Codex and
 nothing in pi, so neither is predicted). Any other key (Enter, Tab, Esc, Ctrl-C, Up, Down, ...)
 goes at once, with the batch before it, and the echo pauses until the field is seen again, so the
-agent's own menus, completions and submit work as they always did, one round trip late. The drawing is a
-prediction; the agent is the authority. The CLI keeps the states it predicted, each with its key,
-and an observed field that equals one of them confirms the keys up to it; the keys after it are
+agent's own menus, completions and submit work as they always did, one round trip late; a field
+asked for before such a key is stale when it arrives, so it is ignored and asked for again (so is
+one asked for before a resize). Sequences the CLI does not know (function keys, mouse reports,
+the terminal's replies to the agent's queries) go as they came, unpredicted, and kitty key
+releases go with the batch around them: the echo never drops or rewrites a byte. The drawing is
+a prediction; the agent is the authority. The CLI keeps the states it predicted, each with its
+key, and an observed field that equals one of them, text and cursor (Left and Right change only
+the cursor), confirms the keys up to it; the keys after it are
 replayed over the observed field (the agent may have wrapped or placed the cursor differently),
 and a field that equals none means the agent did something unpredicted, so its field is adopted
 and the predictions dropped: one visible correction. At most 512 predictions are kept; past that
@@ -1037,7 +1042,11 @@ visible compromise: while keys are in flight the screen behind the drawing is st
 a round trip after each pause in typing. Nothing is buffered for it: dropped output is gone, and
 the snapshot is the recovery, as for a lagging client. After a lost connection the CLI reattaches
 as before, then asks for the field: the keys it proves missing are sent again, and keys it does
-not account for are dropped, never resent on a guess.
+not account for are dropped, never resent on a guess. Keys still batched when the connection
+went, and keys typed before the field answers, wait for it and follow the resent ones, so each
+goes once and in order. The field is the only evidence (the worker does not acknowledge input):
+a key that reached the PTY before the cut but that the agent had not drawn when the field was
+read (the worker waits for output to settle, at most 200 ms) is sent twice.
 
 **Growth.** When the drawing needs more rows than the agent has, the rows the box pushes move
 with it (the rule above it on the alternate screen, the rule and status rows below it on the

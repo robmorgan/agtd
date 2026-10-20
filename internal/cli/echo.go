@@ -34,12 +34,26 @@ import (
 // so the agent's own rendering, identical in the field, appears in one step.
 //
 // The echo keeps the states it predicted, oldest first, each with the key
-// that produced it. An observed field that equals one of them confirms the
-// keys up to it; the rest are replayed over the observed field, since the
-// agent may have placed the cursor or wrapped a word differently. A field
-// that equals none means the agent did something unpredicted (a popup took
-// a key, a different wrap), so the observed field is adopted and the
-// predictions dropped: one visible correction, as mosh makes.
+// that produced it. An observed field that equals one of them, text and
+// cursor, confirms the keys up to it; the rest are replayed over the
+// observed field, since the agent may have placed the cursor or wrapped a
+// word differently. A field that equals none means the agent did something
+// unpredicted (a popup took a key, a different wrap), so the observed field
+// is adopted and the predictions dropped: one visible correction, as mosh
+// makes. A field asked for before an unpredicted key or a resize describes
+// a field that may be gone, so it is ignored and the field asked for again.
+//
+// Keys the echo does not know (function keys, mouse reports, the terminal's
+// replies to the agent's queries) are sent as they came, unpredicted; key
+// releases change nothing in the field and go with the keys around them.
+//
+// After a reattach, keys sent on the lost connection may not have reached
+// the agent. The next field says which of them it drew; the rest are sent
+// again, before the keys that were still batched and any typed meanwhile,
+// which wait for that answer. A key that reached the agent but that it had
+// not drawn by then (it waits fieldSettle for output to settle) is sent
+// twice: the worker does not acknowledge input, so the field is the only
+// evidence.
 
 const (
 	// echoFlushAfter is the default for [composer] flush_after: how long
@@ -353,6 +367,18 @@ type echoState struct {
 	rows       []string
 	cRow, cCol int
 	key        keyEvent
+	// sent: the key has gone to the agent, not just into the batch.
+	sent bool
+}
+
+// at reports whether the field shows this state: its text and its cursor.
+func (st echoState) at(f *protocol.Field) bool {
+	return equalRows(st.rows, f.Rows) && st.cRow == int(f.Row)-int(f.Top) && st.cCol == int(f.Col)-int(f.TextCol)
+}
+
+// sameField reports whether two fields show the same text and cursor.
+func sameField(a, b *protocol.Field) bool {
+	return equalRows(a.Rows, b.Rows) && int(a.Row)-int(a.Top) == int(b.Row)-int(b.Top) && int(a.Col)-int(a.TextCol) == int(b.Col)-int(b.TextCol)
 }
 
 type echoConfig struct {
@@ -383,6 +409,9 @@ type echo struct {
 	// is outstanding. quietDue is the ask after output goes quiet.
 	probeDue, quietDue time.Time
 	probing            bool
+	// epoch counts the unpredicted keys and resizes, after which a field
+	// asked for earlier is stale; probeEpoch is the epoch of the last ask.
+	epoch, probeEpoch int
 	// snapshotDue: an AttachSnapshot was asked for along with the field,
 	// to repaint once the field confirms the keys.
 	snapshotDue bool
@@ -396,15 +425,14 @@ type echo struct {
 	painted bool
 	offset  int
 	// resend: after a reattach, the keys the next field proves missing
-	// are sent again.
+	// are sent again; until it answers, every key waits in pending
+	// unpredicted (held), so that none overtakes them.
 	resend bool
+	held   bool
 	timer  *time.Timer
 }
 
 func newEcho(cfg echoConfig) *echo {
-	if cfg.flushAfter <= 0 {
-		cfg.flushAfter = echoFlushAfter
-	}
 	e := &echo{cfg: cfg, now: time.Now, timer: time.NewTimer(time.Hour)}
 	e.timer.Stop()
 	// The field is asked for once the attach's output has been quiet for
@@ -444,9 +472,20 @@ func (e *echo) output(n int) {
 // send now and what to draw.
 func (e *echo) input(data []byte) (send, paint []byte) {
 	for _, ev := range e.keys.push(data) {
+		if e.resend {
+			e.pending = append(e.pending, ev.raw...)
+			e.held = true
+			continue
+		}
 		if !e.active() || len(e.states) >= echoMaxStates {
 			e.pending = append(e.pending, ev.raw...)
 			send = append(send, e.flush()...)
+			continue
+		}
+		if ev.release {
+			// It changes nothing in the field: it goes with the keys
+			// around it.
+			send = append(send, e.queue(ev.raw)...)
 			continue
 		}
 		if !e.predict(ev) {
@@ -459,10 +498,7 @@ func (e *echo) input(data []byte) (send, paint []byte) {
 		}
 		lay := layout(e.text, e.field)
 		e.states = append(e.states, echoState{rows: lay.texts(), cRow: lay.cRow, cCol: lay.cCol, key: ev})
-		e.pending = append(e.pending, ev.raw...)
-		if e.flushDue.IsZero() {
-			e.flushDue = e.now().Add(e.cfg.flushAfter)
-		}
+		send = append(send, e.queue(ev.raw)...)
 		paint = e.paint(lay)
 	}
 	e.schedule()
@@ -500,6 +536,7 @@ func (e *echo) predict(ev keyEvent) bool {
 // flows, and its own rendering takes over from the drawing.
 func (e *echo) pause() {
 	e.paused = true
+	e.epoch++
 	e.states = nil
 	if e.painted {
 		e.dirty = true
@@ -507,13 +544,33 @@ func (e *echo) pause() {
 	e.probeDue = e.now().Add(echoProbeAfter)
 }
 
+// queue adds a predicted key to the batch, which goes after flushAfter, or
+// at once when there is no batching.
+func (e *echo) queue(raw []byte) (send []byte) {
+	e.pending = append(e.pending, raw...)
+	if e.cfg.flushAfter <= 0 {
+		return e.flush()
+	}
+	if e.flushDue.IsZero() {
+		e.flushDue = e.now().Add(e.cfg.flushAfter)
+	}
+	return nil
+}
+
 // flush returns the pending keys, clearing them, and arranges for the
-// field to be asked for after them.
+// field to be asked for after them. While a resend is owed it returns
+// nothing: the keys wait for the field that settles it.
 func (e *echo) flush() []byte {
+	e.flushDue = time.Time{}
+	if e.resend {
+		return nil
+	}
 	out := e.pending
 	e.pending = nil
-	e.flushDue = time.Time{}
 	if len(out) > 0 {
+		for i := range e.states {
+			e.states[i].sent = true
+		}
 		e.probeDue = e.now().Add(echoProbeAfter)
 	}
 	return out
@@ -539,6 +596,7 @@ func (e *echo) tick(now time.Time) (send []byte, reqs []*protocol.Request) {
 // once the field confirms the keys.
 func (e *echo) probe() []*protocol.Request {
 	e.probing = true
+	e.probeEpoch = e.epoch
 	e.probeDue, e.quietDue = time.Time{}, time.Time{}
 	reqs := []*protocol.Request{{AttachField: protocol.Empty}}
 	if e.dropped > 0 || e.dirty || e.painted {
@@ -574,6 +632,13 @@ func (e *echo) schedule() {
 // a reattach, the ones the field proves missing) and what to draw.
 func (e *echo) fieldAnswer(f *protocol.Field) (send, paint []byte) {
 	e.probing = false
+	if e.probeEpoch != e.epoch {
+		// Asked for before an unpredicted key or a resize: the field it
+		// describes may be gone. pause and resized asked for another.
+		e.probeEpoch = e.epoch
+		e.schedule()
+		return nil, nil
+	}
 	e.paused = false
 	e.offset = 0
 	resend := e.resend
@@ -581,15 +646,19 @@ func (e *echo) fieldAnswer(f *protocol.Field) (send, paint []byte) {
 	if !f.Found {
 		e.field = nil
 		e.states = nil
+		if resend {
+			send = e.resumeHeld()
+		}
 		e.schedule()
-		return nil, nil
+		return send, nil
 	}
 	// Which prediction has the agent reached? The states were replayed
-	// from the previous field, so that field's rows are the state before
-	// the oldest of them.
+	// from the previous field, so that field is the state before the
+	// oldest of them. Text alone is not enough: Left and Right change
+	// only the cursor.
 	matched := -1
 	for i := len(e.states) - 1; i >= 0; i-- {
-		if equalRows(e.states[i].rows, f.Rows) {
+		if e.states[i].at(f) {
 			matched = i
 			break
 		}
@@ -598,7 +667,7 @@ func (e *echo) fieldAnswer(f *protocol.Field) (send, paint []byte) {
 	switch {
 	case matched >= 0:
 		remaining = e.states[matched+1:]
-	case len(e.states) > 0 && e.field != nil && equalRows(e.field.Rows, f.Rows):
+	case len(e.states) > 0 && e.field != nil && sameField(e.field, f):
 		remaining = e.states
 	default:
 		// Nothing predicted matches what the agent drew: take the
@@ -618,10 +687,15 @@ func (e *echo) fieldAnswer(f *protocol.Field) (send, paint []byte) {
 			break
 		}
 		lay := layout(e.text, e.field)
-		e.states = append(e.states, echoState{rows: lay.texts(), cRow: lay.cRow, cCol: lay.cCol, key: st.key})
-		if resend {
+		e.states = append(e.states, echoState{rows: lay.texts(), cRow: lay.cRow, cCol: lay.cCol, key: st.key, sent: st.sent})
+		if resend && st.sent {
+			// Sent on the lost connection, and not drawn: it never
+			// arrived. Those still batched go below, after it.
 			send = append(send, st.key.raw...)
 		}
+	}
+	if resend {
+		send = append(send, e.resumeHeld()...)
 	}
 	if len(e.states) > 0 {
 		paint = e.paint(layout(e.text, e.field))
@@ -629,6 +703,19 @@ func (e *echo) fieldAnswer(f *protocol.Field) (send, paint []byte) {
 	}
 	e.schedule()
 	return send, paint
+}
+
+// resumeHeld sends the keys held for a resend, which were not predicted:
+// if any were typed while it was owed, the drawing no longer shows the
+// field, so it pauses until the field is seen again.
+func (e *echo) resumeHeld() []byte {
+	held := e.held
+	e.held = false
+	send := e.flush()
+	if held {
+		e.pause()
+	}
+	return send
 }
 
 func equalRows(a, b []string) bool {
@@ -661,6 +748,9 @@ func (e *echo) snapshotAnswer(data []byte) (paint []byte) {
 // suspend ends the echo for now (the overlay opens, the attachment ends):
 // pending keys go, predictions are dropped.
 func (e *echo) suspend() (send []byte) {
+	// Keys a reattach left unconfirmed are not sent again: the field
+	// that would say which never arrived.
+	e.resend, e.held = false, false
 	send = e.flush()
 	e.states = nil
 	e.paused = false
@@ -672,6 +762,7 @@ func (e *echo) suspend() (send []byte) {
 
 // resized: the field moved; ask again once the agent has redrawn.
 func (e *echo) resized() {
+	e.epoch++
 	e.field = nil
 	e.states = nil
 	e.painted = false
@@ -682,12 +773,15 @@ func (e *echo) resized() {
 
 // reattached: the screen was repainted from the new attachment's snapshot;
 // the field is asked for at once, and the keys it proves missing are sent
-// again.
+// again. Whatever was asked of the lost attachment will not be answered.
 func (e *echo) reattached() {
 	e.resend = len(e.states) > 0
+	if e.resend {
+		e.flushDue = time.Time{}
+	}
 	e.painted, e.dropped, e.dirty, e.offset = false, 0, false, 0
 	e.probeDue = e.now()
-	e.probing = false
+	e.probing, e.snapshotDue = false, false
 	e.schedule()
 }
 
