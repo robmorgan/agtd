@@ -122,6 +122,17 @@ func (c *client) remoteConnection(ctx context.Context) (*transport.QUICClient, e
 	return conn, nil
 }
 
+// latency is the remote connection's smoothed round-trip time, or 0 for the
+// local daemon or before a remote connection exists.
+func (c *client) latency() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.quic == nil {
+		return 0
+	}
+	return c.quic.RTT()
+}
+
 // hostKeyChangedError explains a changed host key to the user, and still
 // unwraps to the *transport.KeyChangedError.
 type hostKeyChangedError struct {
