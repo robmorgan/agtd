@@ -3,3 +3,4 @@
 .gstack/
 /.build/
 /bin/
+dist/

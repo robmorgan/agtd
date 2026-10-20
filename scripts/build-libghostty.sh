@@ -8,6 +8,13 @@
 # fix (ghostty #14588), program status revision 0.4 (#14630) and the
 # formatter's pending wrap over a blank cell (#14670). Requires Zig 0.16+.
 #
+# GHOSTTY_TARGET (a Zig target triple, e.g. x86_64-linux-gnu.2.28 or
+# x86_64-macos) builds for that target into its own directory,
+# .build/ghostty-out-TARGET, for release builds (scripts/release-build.sh). It
+# also means the baseline CPU of that architecture: without a target, Zig
+# builds for the CPU it runs on, which is fine on the machine that runs agtd
+# but not for a binary shipped to others.
+#
 # Usage: scripts/build-libghostty.sh            # builds into .build
 #        eval "$(scripts/build-libghostty.sh --env)"   # only print exports
 set -euo pipefail
@@ -16,12 +23,13 @@ GHOSTTY_COMMIT="81598385d608dda4946093d6d6a234d204a2f225"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD="${HERE}/../.build"
 SRC="${BUILD}/ghostty"
-OUT="${BUILD}/ghostty-out"
+TARGET="${GHOSTTY_TARGET:-}"
+OUT="${BUILD}/ghostty-out${TARGET:+-${TARGET}}"
 ZIG="${ZIG:-zig}"
 # zig build defaults to Debug, which makes the shadow terminal parse PTY
 # output roughly two orders of magnitude slower. Override for debugging.
 OPTIMIZE="${GHOSTTY_OPTIMIZE:-ReleaseFast}"
-STAMP="${GHOSTTY_COMMIT} ${OPTIMIZE}"
+STAMP="${GHOSTTY_COMMIT} ${OPTIMIZE}${TARGET:+ ${TARGET}}"
 
 if [[ "${1:-}" == "--env" ]]; then
   echo "export PKG_CONFIG_PATH=\"${OUT}/share/pkgconfig\""
@@ -60,7 +68,7 @@ rm -rf "${OUT}"
 # Only the static library is linked, never ghostty's xcframework. Its build
 # defaults to on whenever an xcodebuild is on PATH, which on a machine with
 # only the Command Line Tools is a stub that fails without Xcode.
-(cd "${SRC}" && "${ZIG}" build -Demit-lib-vt -Demit-xcframework=false -Doptimize="${OPTIMIZE}" --prefix "${OUT}")
+(cd "${SRC}" && "${ZIG}" build -Demit-lib-vt -Demit-xcframework=false -Doptimize="${OPTIMIZE}" ${TARGET:+"-Dtarget=${TARGET}"} --prefix "${OUT}")
 echo "${STAMP}" > "${OUT}/.commit"
 
 echo "libghostty-vt ready: ${OUT}" >&2
