@@ -8,7 +8,7 @@ import (
 
 	"github.com/rivo/uniseg"
 
-	"github.com/robmorgan/agtd/internal/protocol"
+	"agtd.sh/internal/protocol"
 )
 
 // Local echo.

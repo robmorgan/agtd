@@ -10,8 +10,8 @@ import (
 
 	"go.mitchellh.com/libghostty"
 
-	"github.com/robmorgan/agtd/internal/protocol"
-	"github.com/robmorgan/agtd/internal/session"
+	"agtd.sh/internal/protocol"
+	"agtd.sh/internal/session"
 )
 
 // Screens drawn the way the agents draw theirs (see the measurements in
