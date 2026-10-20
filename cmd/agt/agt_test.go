@@ -1047,3 +1047,91 @@ func TestTerminalColorsAnswered(t *testing.T) {
 	tm.write("\x1c")
 	tm.wait()
 }
+
+// relayEnv is an environment whose daemon listens on QUIC, reached through
+// a relay as host "dev", with session name started and detached (the
+// daemon must be up for the host to be added).
+func relayEnv(t *testing.T, name string) (*env, *transporttest.Relay) {
+	t.Helper()
+	probe, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := probe.LocalAddr().String()
+	probe.Close()
+	e := newEnv(t, "\n[remote]\nlisten = \""+addr+"\"\n")
+	e.startAndDetach(name)
+	relay := transporttest.NewRelay(t, addr)
+	e.mustRun("agt", "host", "add", "dev", relay.Addr(), "--fingerprint", strings.TrimSpace(e.mustRun("agtd", "remote", "id")))
+	e.mustRun("agtd", "remote", "authorize", strings.TrimSpace(e.mustRun("agt", "remote", "id")), "test")
+	return e, relay
+}
+
+// Over a link with a 150 ms one-way delay the echo draws typed keys at
+// once, long before the shell's own echo arrives, and the screen settles on
+// what the shell drew.
+func TestLocalEchoOverDelayedRelay(t *testing.T) {
+	e, relay := relayEnv(t, "demo")
+	relay.Delay(150 * time.Millisecond)
+	tm := e.start("attach", "dev/demo")
+	m := tm.expect(0, "$ ")
+	// The field is asked for once output is quiet, a round trip away.
+	time.Sleep(time.Second)
+	start := time.Now()
+	tm.write("echo far-$((2+3))")
+	m = tm.expect(m, "\x1b[?2026h")
+	m = tm.expect(m, "echo far-$((2+3))")
+	if drawn := time.Since(start); drawn > 150*time.Millisecond {
+		t.Fatalf("the echo took %v to draw; a round trip is 300 ms", drawn)
+	}
+	// The shell's echo confirms the keys and the screen is repainted.
+	m = tm.expect(m, "\x1b[?2026h\x1b[2J\x1b[H")
+	tm.write("\r")
+	tm.expect(m, "far-5")
+	tm.write("\x1c")
+	tm.wait()
+}
+
+// agt bench echo measures a session: markers typed and echoed, confirmed
+// by the field, a burst, and a watch.
+func TestBenchEcho(t *testing.T) {
+	e := newEnv(t, "")
+	e.startAndDetach("demo")
+	out := e.mustRun("agt", "bench", "echo", "demo", "--count", "3", "--interval", "50ms", "--field", "--burst", "20000", "--watch", "200ms")
+	for _, want := range []string{"session demo on local", "echo        n=3", "confirmed   n=3", "output/key", "burst       20000 B in", "watch "} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("no %q in:\n%s", want, out)
+		}
+	}
+}
+
+// Measures how long a remote attachment takes to be usable again after the
+// network is gone for 20 s. Run with AGTD_MEASURE=1 and -v; the numbers go
+// in BENCHMARKS.md ("Remote interaction").
+func TestMeasureResumeAfterBlackHole(t *testing.T) {
+	if os.Getenv("AGTD_MEASURE") == "" {
+		t.Skip("set AGTD_MEASURE=1 to run this measurement")
+	}
+	e, relay := relayEnv(t, "demo")
+	tm := e.start("attach", "dev/demo")
+	m := tm.expect(0, "$ ")
+	tm.write("echo before-$((1+1))\r")
+	m = tm.expect(m, "before-2")
+
+	relay.Drop(true)
+	dropped := time.Now()
+	m = tm.expectWithin(m, "reconnecting", 60*time.Second)
+	t.Logf("the loss was noticed %v after the network went", time.Since(dropped).Round(100*time.Millisecond))
+	time.Sleep(20*time.Second - time.Since(dropped))
+	relay.Drop(false)
+	back := time.Now()
+	// The reattach repaints the screen from a snapshot; keys typed before
+	// that are not kept.
+	m = tm.expectWithin(m, "before-2", 60*time.Second)
+	t.Logf("screen repainted %v after the network came back (20 s black hole)", time.Since(back).Round(100*time.Millisecond))
+	tm.write("echo after-$((2+2))\r")
+	m = tm.expectWithin(m, "after-4", 30*time.Second)
+	t.Logf("input answered %v after the network came back", time.Since(back).Round(100*time.Millisecond))
+	tm.write("\x1c")
+	tm.wait()
+}

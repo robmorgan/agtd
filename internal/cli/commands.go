@@ -45,7 +45,7 @@ func (a *app) commands() []*cobra.Command {
 		return a.runRuntime(id)
 	})
 	runtime.Hidden = true
-	cmds = append(cmds, runtime)
+	cmds = append(cmds, runtime, a.benchCommands())
 
 	var cwd, agent, workspace string
 	newCmd := a.command("new [NAME]", "Start and attach to a new session", optionalArg, func(args []string) error {

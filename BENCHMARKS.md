@@ -324,6 +324,70 @@ costs.
 6. **ListSessions dials every running worker** to check it is alive: 11 ms at 500 sessions, against
    1.5 ms for state.db.
 
+## Remote interaction
+
+Typing over a link, measured on 2026-10-20 from the Mac (Ghostty) to three daemons: local over the
+Unix socket; `omarchy` over Tailscale (8 ms round trip by `agt hosts`, a desktop with an agent
+session working at the time); and `sfo`, a DigitalOcean droplet in San Francisco (332 ms round
+trip). The numbers set the baseline for the smooth remote attach design
+(`docs/designs/smooth-remote-attach.md`), whose Phase 3 must beat them.
+
+`agt bench echo`, a hidden developer command, attaches like `agt attach` and types markers:
+
+```sh
+agt bench echo [HOST/]SESSION --count 20 --field   # a shell or an agent; --field needs attach-field
+agt bench echo HOST/SESSION --burst 200000         # a shell session: a burst of output
+agt bench echo HOST/SESSION --count 0 --watch 50s  # while the agent streams an answer
+AGTD_MEASURE=1 go test ./cmd/agt -run TestMeasureResumeAfterBlackHole -v
+```
+
+"echo" is the time until the session's own echo of a marker comes back through the daemon (a
+shell's line discipline echoes at once; an agent redraws its box). "confirmed" is the time until
+the worker's input field shows the marker, which is what the local echo waits for: one more round
+trip for the `AttachField` request, plus the worker's 40 ms wait for output to settle. "output per
+key" is what the program writes for one typed character. mosh was measured with
+`mosh --predict=never` to the same droplet, typing the same markers under a pty, so its number is
+its round trip without the prediction that makes it feel instant.
+
+| Link | Program | echo p50 (min / p90) | confirmed p50 | output per key |
+|---|---|---|---|---|
+| local, Unix socket | Claude Code | 15.6 ms (4.3 / 22.4) | 62 ms | 69 B (max 177) |
+| omarchy, Tailscale 8 ms | bash | 7.6 ms (4.8 / 147) | 55 ms | 10 B |
+| sfo, QUIC 332 ms | bash | 264 ms (207 / 279) | 547 ms | 10 B |
+| sfo, QUIC 332 ms | Claude Code | 269 ms (228 / 277) | 552 ms | 172 B |
+| sfo, mosh `--predict=never` | bash | 206 ms (204 / 269) | | |
+
+Bursts, streams and outages:
+
+* A 200 KB burst from bash (`head -c 200000 /dev/zero | tr '\0' x | fold -w 100`): sfo 845 ms,
+  204 KB received in 42 frames, 0 resyncs, 236 KB/s; omarchy 83 ms, 365 frames, 2.4 MB/s, 0
+  resyncs. A client that reads promptly is never resynced at this size; resyncs need a client that
+  lags behind the worker's per-attachment buffer.
+* Claude Code streaming a 500-word answer on sfo: 210 KB in 78 frames over 50 s, 4.1 KB/s, 0
+  resyncs. That is the streaming baseline frames must stay under.
+* A 20 s black hole on the loopback relay (`TestMeasureResumeAfterBlackHole`): the loss is
+  noticed 15.2 s after the network goes (the liveness check's 15 s), the screen is repainted 0.7 s
+  after it comes back, and input typed then is answered within the same 0.7 s. Keys typed before
+  the repaint are not kept.
+
+What follows from them:
+
+* `[composer] flush_after` stays at 50 ms. A key costs Claude Code 172 B of redraw on sfo (69 B
+  locally), so batching is about round trips, not bytes (design doc, open question 2).
+* Phase 3's target is a confirmation within one round trip of the echo: today it is two plus the
+  settle, 547 ms against a 264 ms echo on sfo, because the field is asked for separately. With the
+  field in every frame the probe goes away.
+* agt's echo round trip on sfo is about 60 ms longer than mosh's on the same link (264 against
+  206 ms p50). Where it goes (QUIC's acknowledgement delay and pacing, the worker's output pump,
+  the CLI's frame queue) is worth finding before Phase 3 measures again.
+* omarchy's p90 outliers (147 ms against a 7.6 ms median, on the shell's echo and the field alike)
+  came with a Claude Code session working on that box at the time; the transport is the same one
+  that answers in 5 ms.
+
+The relay in `internal/transport/transporttest` has a one-way delay knob (`Delay`) beside its
+black-hole and rebind ones, so the end-to-end tests run the echo at a distant host's round trip on
+loopback (`TestLocalEchoOverDelayedRelay`: 150 ms each way, and the keys are drawn within 150 ms).
+
 ## Terminal and worker
 
 In-process measurements of a session worker: the libghostty boundary, the reattach snapshot, PTY

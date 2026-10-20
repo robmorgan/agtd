@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // Relay forwards UDP datagrams between clients and one server, like a NAT:
@@ -22,21 +23,38 @@ import (
 //   - Rebind gives every client a new upstream socket, so the server sees
 //     each client arrive from a new address mid-connection, as after NAT
 //     rebinding or a switch from Wi-Fi to cellular behind the same NAT.
+//   - Delay holds every datagram for a one-way delay in each direction,
+//     so a test runs at a distant host's round trip on loopback.
 //
 // Each upstream socket has one goroutine copying the server's datagrams
-// back; it ends when its socket is closed by Rebind or Close.
+// back; it ends when its socket is closed by Rebind or Close. One more
+// delivers delayed datagrams in order; it ends at Close.
 type Relay struct {
 	front  *net.UDPConn
 	server *net.UDPAddr
 
 	drop     atomic.Bool
 	blockNew atomic.Bool
+	delay    atomic.Int64 // nanoseconds
+	queue    chan delayed
+	quit     chan struct{}
 
 	mu      sync.Mutex
 	clients map[string]*relayClient
 	closed  bool
 	wg      sync.WaitGroup
 }
+
+// delayed is a datagram waiting for its delivery time.
+type delayed struct {
+	due   time.Time
+	data  []byte
+	write func([]byte)
+}
+
+// delayQueue bounds the datagrams in flight through the delay; past it they
+// are lost, as a full queue loses them.
+const delayQueue = 8192
 
 type relayClient struct {
 	addr *net.UDPAddr
@@ -55,9 +73,10 @@ func NewRelay(t testing.TB, serverAddr string) *Relay {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := &Relay{front: front, server: server, clients: make(map[string]*relayClient)}
-	r.wg.Add(1)
+	r := &Relay{front: front, server: server, clients: make(map[string]*relayClient), queue: make(chan delayed, delayQueue), quit: make(chan struct{})}
+	r.wg.Add(2)
 	go r.forward()
+	go r.deliver()
 	t.Cleanup(r.Close)
 	return r
 }
@@ -71,6 +90,43 @@ func (r *Relay) Drop(drop bool) { r.drop.Store(drop) }
 // BlockNew starts (true) or stops (false) dropping datagrams from client
 // addresses the relay has not forwarded for before.
 func (r *Relay) BlockNew(block bool) { r.blockNew.Store(block) }
+
+// Delay sets the one-way delay in each direction (0 for none). Datagrams
+// keep their order through it.
+func (r *Relay) Delay(d time.Duration) { r.delay.Store(int64(d)) }
+
+// later writes data now, or after the delay through the queue.
+func (r *Relay) later(data []byte, write func([]byte)) {
+	d := time.Duration(r.delay.Load())
+	if d <= 0 {
+		write(data)
+		return
+	}
+	select {
+	case r.queue <- delayed{due: time.Now().Add(d), data: append([]byte(nil), data...), write: write}:
+	default:
+	}
+}
+
+// deliver writes delayed datagrams once their time comes, in order.
+func (r *Relay) deliver() {
+	defer r.wg.Done()
+	for {
+		select {
+		case d := <-r.queue:
+			if wait := time.Until(d.due); wait > 0 {
+				select {
+				case <-time.After(wait):
+				case <-r.quit:
+					return
+				}
+			}
+			d.write(d.data)
+		case <-r.quit:
+			return
+		}
+	}
+}
 
 // Rebind moves every client to a new upstream socket (a new source port as
 // the server sees it). Datagrams in flight to the old sockets are lost.
@@ -99,6 +155,7 @@ func (r *Relay) Close() {
 		return
 	}
 	r.closed = true
+	close(r.quit)
 	r.front.Close()
 	for _, c := range r.clients {
 		c.back.Close()
@@ -126,7 +183,7 @@ func (r *Relay) forward() {
 		r.mu.Lock()
 		back := c.back
 		r.mu.Unlock()
-		back.Write(buf[:n])
+		r.later(buf[:n], func(data []byte) { back.Write(data) })
 	}
 }
 
@@ -168,7 +225,7 @@ func (r *Relay) backward(c *relayClient, back *net.UDPConn) {
 			continue
 		}
 		if !r.drop.Load() {
-			r.front.WriteToUDP(buf[:n], c.addr)
+			r.later(buf[:n], func(data []byte) { r.front.WriteToUDP(data, c.addr) })
 		}
 	}
 }
