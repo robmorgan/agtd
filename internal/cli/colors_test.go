@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/creack/pty"
 	"agtd.sh/internal/protocol"
+	"github.com/creack/pty"
 )
 
 func TestParseColorReplies(t *testing.T) {

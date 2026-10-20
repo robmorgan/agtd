@@ -51,6 +51,9 @@ type ownerState struct {
 	// colorFlushArmed is whether a timer will publish a held query start
 	// that never completed.
 	colorFlushArmed bool
+	// lastOutputAt is when the PTY last produced output, for frames that
+	// carry the field only once it has settled.
+	lastOutputAt time.Time
 	// owner is the goroutine this state belongs to, for timers that need
 	// to get back onto it.
 	owner *owner
@@ -82,9 +85,12 @@ type ownerAttachment struct {
 	// was cut, and its reattach is waited for (size.go).
 	announcesLeave bool
 	left           bool
-	sub            *subscriber
-	detach         chan struct{}
-	detachOnce     sync.Once
+	// sub is the raw output queue; nil for a frame client, which has
+	// frames instead (frames.go).
+	sub        *subscriber
+	frames     *frameState
+	detach     chan struct{}
+	detachOnce sync.Once
 }
 
 func (a *ownerAttachment) signalDetach() {
@@ -251,6 +257,8 @@ func (s *ownerState) resize(g protocol.Geometry) error {
 	if changed {
 		s.notifySize()
 	}
+	// Frame clients repaint at the new size.
+	s.noteFrameOutput()
 	return nil
 }
 
@@ -300,6 +308,8 @@ func (s *ownerState) publishOutput(data []byte) error {
 func (s *ownerState) publishScanned(data []byte) error {
 	s.outputBytes += uint64(len(data))
 	s.outputChunks++
+	s.lastOutputAt = time.Now()
+	defer s.noteFrameOutput()
 	if len(s.groundWaiters) > 0 {
 		n, writes, effects := s.terminal.feedUntilGround(data)
 		s.afterFeed(writes, effects)
@@ -346,6 +356,7 @@ func (s *ownerState) afterFeed(writes [][]byte, effects terminalEffects) {
 			}
 		}
 	}
+	s.frameEffects(effects)
 	if s.activity != nil {
 		title := ""
 		if effects.titleChanged {
@@ -444,7 +455,10 @@ type attachResult struct {
 	detach   chan struct{}
 	restart  chan struct{}
 	sizeNote chan struct{}
-	sub      *subscriber
+	// sub is the raw output queue, nil for a frame client, whose frames
+	// are its state instead.
+	sub    *subscriber
+	frames *frameState
 }
 
 // attach registers a new attachment under attachID, which the caller
@@ -452,7 +466,7 @@ type attachResult struct {
 // scrollback rows of scrollback (allScrollback for all). If replaces names
 // a live attachment, that one is dropped at once: the client says it was
 // its own, on a connection it has lost.
-func (s *ownerState) attach(attachID string, kind session.AttachmentKind, g protocol.Geometry, replaces string, scrollback int, takeSize, announcesLeave bool) (*attachResult, error) {
+func (s *ownerState) attach(attachID string, kind session.AttachmentKind, g protocol.Geometry, replaces string, scrollback int, takeSize, announcesLeave, frames bool) (*attachResult, error) {
 	connectedAt := time.Now().UTC()
 	if old, ok := s.attachments[replaces]; ok && replaces != "" {
 		// Its handler may be blocked writing to the dead connection; it
@@ -460,6 +474,9 @@ func (s *ownerState) attach(attachID string, kind session.AttachmentKind, g prot
 		// attachment stops receiving output and leaves the list now.
 		old.signalDetach()
 		s.output.unsubscribe(old.sub)
+		if old.frames != nil {
+			old.frames.close()
+		}
 		delete(s.attachments, replaces)
 	}
 
@@ -486,7 +503,21 @@ func (s *ownerState) attach(attachID string, kind session.AttachmentKind, g prot
 		// The owner came back without a size: the next one takes over.
 		s.promote()
 	}
-	snapshot, err := s.snapshot(scrollback)
+	// A frame client gets the scrollback only; its first frame paints the
+	// screen (frames.go).
+	var snapshot []byte
+	var err error
+	if frames {
+		snapshot, err = s.terminal.historySnapshot(scrollback)
+	} else {
+		snapshot, err = s.snapshot(scrollback)
+	}
+	if err == nil && frames {
+		if a.frames, err = newFrameState(); err == nil {
+			// What the snapshot covered; the first frame scrolls nothing.
+			a.frames.history, err = s.terminal.term.ScrollbackRows()
+		}
+	}
 	if err != nil {
 		if owns {
 			s.sizeOwner = ""
@@ -495,7 +526,9 @@ func (s *ownerState) attach(attachID string, kind session.AttachmentKind, g prot
 		return nil, err
 	}
 
-	a.sub = s.output.subscribe()
+	if !frames {
+		a.sub = s.output.subscribe()
+	}
 	s.attachments[attachID] = a
 	// An interactive attach shows the user the screen: done and error
 	// records have been seen (the same moment the daemon acknowledges
@@ -513,6 +546,7 @@ func (s *ownerState) attach(attachID string, kind session.AttachmentKind, g prot
 		restart:  s.restart,
 		sizeNote: a.sizeNote,
 		sub:      a.sub,
+		frames:   a.frames,
 	}, nil
 }
 
@@ -524,6 +558,9 @@ func (s *ownerState) removeAttachment(attachID string) {
 		return
 	}
 	delete(s.attachments, attachID)
+	if a.frames != nil {
+		a.frames.close()
+	}
 	if attachID == s.sizeOwner {
 		s.ownerLeft(a.announcesLeave && !a.left)
 	}

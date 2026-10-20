@@ -395,6 +395,12 @@ type echo struct {
 	// scrolled the screen by (a box growing past the bottom).
 	painted bool
 	offset  int
+	// frames: the screen arrives as frames (attach-frames), and the
+	// field inside them. Output is never held, since the frame's rows
+	// show through once the keys are confirmed; while they are not, the
+	// predicted rows are painted over each frame (overlay), and a probe
+	// asks for the field only, never a snapshot.
+	frames bool
 	// resend: after a reattach, the keys the next field proves missing
 	// are sent again.
 	resend bool
@@ -541,11 +547,20 @@ func (e *echo) probe() []*protocol.Request {
 	e.probing = true
 	e.probeDue, e.quietDue = time.Time{}, time.Time{}
 	reqs := []*protocol.Request{{AttachField: protocol.Empty}}
-	if e.dropped > 0 || e.dirty || e.painted {
+	if !e.frames && (e.dropped > 0 || e.dirty || e.painted) {
 		e.snapshotDue = true
 		reqs = append(reqs, &protocol.Request{AttachSnapshot: protocol.Empty})
 	}
 	return reqs
+}
+
+// overlay is the drawing to put over a frame: the predicted rows while
+// keys are in flight, nothing once the frame shows them itself.
+func (e *echo) overlay() []byte {
+	if e == nil || !e.frames || !e.holding() || !e.active() {
+		return nil
+	}
+	return e.paintRows(layout(e.text, e.field))
 }
 
 // schedule arms the timer for the earliest due time.
@@ -712,10 +727,16 @@ func cup(row, col int) string { return fmt.Sprintf("\x1b[%d;%dH", row+1, col+1) 
 
 // paint draws the predicted field.
 func (e *echo) paint(lay echoLayout) []byte {
+	out := append([]byte(syncBegin), e.paintRows(lay)...)
+	return append(out, syncEnd...)
+}
+
+// paintRows is paint without the synchronized-output wrapper, for
+// composing over a frame.
+func (e *echo) paintRows(lay echoLayout) []byte {
 	f := e.field
 	lines := int(f.Lines)
 	var b bytes.Buffer
-	b.WriteString(syncBegin)
 	// Put the chrome back as it was.
 	chrome := map[int][]byte{}
 	first, last := int(f.BoxTop), int(f.BoxBottom)
@@ -810,7 +831,6 @@ func (e *echo) paint(lay echoLayout) []byte {
 		b.WriteString(ansiReset)
 	}
 	b.WriteString(cup(top+lay.cRow-e.offset, textCol+lay.cCol))
-	b.WriteString(syncEnd)
 	e.painted = true
 	return b.Bytes()
 }

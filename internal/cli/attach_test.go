@@ -204,11 +204,11 @@ func TestSizeOwnerFrames(t *testing.T) {
 	note := protocol.SizeOwnership{Owner: true, OwnerID: "attach-2", Geometry: protocol.Geometry{Cols: 90, Rows: 20}}
 	for _, overlay := range []bool{false, true} {
 		*size = protocol.SizeOwnership{}
-		if _, done, err := handleFrame(frame{resp: &protocol.Response{AttachSizeOwner: &note}}, overlay, size, nil, nil); done || err != nil || *size != note {
+		if _, done, err := handleFrame(frame{resp: &protocol.Response{AttachSizeOwner: &note}}, overlay, size, nil, nil, nil); done || err != nil || *size != note {
 			t.Fatalf("size note (overlay %v): done %v err %v size %+v", overlay, done, err, size)
 		}
 	}
-	if _, done, err := handleFrame(frame{resp: &protocol.Response{AttachSizeOwner: &note}}, false, nil, nil, nil); done || err != nil {
+	if _, done, err := handleFrame(frame{resp: &protocol.Response{AttachSizeOwner: &note}}, false, nil, nil, nil, nil); done || err != nil {
 		t.Fatalf("size note without tracking: done %v err %v", done, err)
 	}
 }

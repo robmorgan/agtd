@@ -54,7 +54,7 @@ func (h *harness) owner() string {
 
 func TestSizeOwnerAttachRecordsShowSizes(t *testing.T) {
 	h := startWorker(t)
-	all := protocol.AttachCapabilities()
+	all := rawAttachCapabilities()
 	a, attached := h.attachWith(protocol.AttachSession{Features: all, Geometry: protocol.Geometry{Cols: 100, Rows: 30}})
 	if !attached.SizeOwner.Owner || attached.SizeOwner.OwnerID != a.attachID || attached.SizeOwner.Geometry.Cols != 100 {
 		t.Fatalf("first attach ownership = %+v", attached.SizeOwner)
@@ -85,7 +85,7 @@ func TestSizeOwnerAttachRecordsShowSizes(t *testing.T) {
 // over: its last input, else its attach.
 func TestOwnerLeavingPromotesMostRecentlyUsed(t *testing.T) {
 	h := startWorker(t)
-	all := protocol.AttachCapabilities()
+	all := rawAttachCapabilities()
 	a := h.attach(protocol.Geometry{Cols: 100, Rows: 30})
 	b, _ := h.attachWith(protocol.AttachSession{Features: all, Geometry: protocol.Geometry{Cols: 90, Rows: 20}})
 	c, _ := h.attachWith(protocol.AttachSession{Features: all, Geometry: protocol.Geometry{Cols: 80, Rows: 24}})
@@ -118,7 +118,7 @@ func TestOwnerLeavingPromotesMostRecentlyUsed(t *testing.T) {
 
 func TestTakeSize(t *testing.T) {
 	h := startWorker(t)
-	all := protocol.AttachCapabilities()
+	all := rawAttachCapabilities()
 	a, _ := h.attachWith(protocol.AttachSession{Features: all, Geometry: protocol.Geometry{Cols: 100, Rows: 30}})
 
 	// At attach.
@@ -154,7 +154,7 @@ func TestTakeSize(t *testing.T) {
 // a pending attachment.
 func TestReattachKeepsSizeOwnership(t *testing.T) {
 	h := startWorker(t)
-	all := protocol.AttachCapabilities()
+	all := rawAttachCapabilities()
 	old, attached := h.attachWith(protocol.AttachSession{Features: all, Geometry: protocol.Geometry{Cols: 100, Rows: 30}})
 	pending, _ := h.attachWith(protocol.AttachSession{Features: all, Geometry: protocol.Geometry{Cols: 90, Rows: 20}})
 
@@ -179,7 +179,7 @@ func TestReattachKeepsSizeOwnership(t *testing.T) {
 // connection) keeps the size for its reattach, until sizeOwnerGrace.
 func TestCutOwnerKeepsTheSizeForItsReattach(t *testing.T) {
 	h := startWorker(t)
-	all := protocol.AttachCapabilities()
+	all := rawAttachCapabilities()
 	a, attached := h.attachWith(protocol.AttachSession{Features: all, Geometry: protocol.Geometry{Cols: 100, Rows: 30}})
 	b, _ := h.attachWith(protocol.AttachSession{Features: all, Geometry: protocol.Geometry{Cols: 90, Rows: 20}})
 	b.input("typed last\n")
@@ -209,7 +209,7 @@ func TestCutOwnerIsReplacedAfterTheGrace(t *testing.T) {
 	defer func(g time.Duration) { sizeOwnerGrace = g }(sizeOwnerGrace)
 	sizeOwnerGrace = 50 * time.Millisecond
 	h := startWorker(t)
-	all := protocol.AttachCapabilities()
+	all := rawAttachCapabilities()
 	a, _ := h.attachWith(protocol.AttachSession{Features: all, Geometry: protocol.Geometry{Cols: 100, Rows: 30}})
 	b, _ := h.attachWith(protocol.AttachSession{Features: all, Geometry: protocol.Geometry{Cols: 90, Rows: 20}})
 	a.conn.Close()
@@ -263,7 +263,7 @@ func TestHandoffReservesTheSizeOwner(t *testing.T) {
 	s.owner = o
 	attach := func(id string, g protocol.Geometry, replaces string) {
 		t.Helper()
-		if _, err := s.attach(id, session.AttachmentAttach, g, replaces, 0, false, true); err != nil {
+		if _, err := s.attach(id, session.AttachmentAttach, g, replaces, 0, false, true, false); err != nil {
 			t.Fatal(err)
 		}
 	}

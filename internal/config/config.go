@@ -38,6 +38,18 @@ type AttachConfig struct {
 	// 0 only the screen. Unset means DefaultAttachScrollbackRows. `agent
 	// history` has the rest.
 	ScrollbackRows *int `toml:"scrollback_rows"`
+	// Mode is how the screen reaches the terminal: "auto" (screen frames
+	// from a remote daemon, the raw output from the local one), "frames"
+	// or "raw". Unset means auto. See ARCHITECTURE.md, "Screen frames".
+	Mode string `toml:"mode"`
+}
+
+// AttachMode is Mode with its default applied.
+func (a AttachConfig) AttachMode() string {
+	if a.Mode == "" {
+		return "auto"
+	}
+	return a.Mode
 }
 
 // DefaultAttachScrollbackRows bounds what an attach sends: a session's full
@@ -122,6 +134,9 @@ model_flag = "--model"
 # "agt history" has the rest.
 [attach]
 scrollback_rows = 1000
+# How the screen reaches the terminal: "auto" (screen frames from a remote
+# daemon, the raw output from the local one), "frames" or "raw".
+mode = "auto"
 
 # Typing in "agt attach" is drawn in the agent's own input field at once
 # and sent as typed, batched for at most flush_after ("0" sends every key
@@ -168,6 +183,11 @@ func Load(path string) (*Config, error) {
 		if _, ok := cfg.Agents[preferredDefaultAgent]; !ok && len(cfg.agentOrder) > 0 {
 			cfg.DefaultAgent = cfg.agentOrder[0]
 		}
+	}
+	switch cfg.Attach.Mode {
+	case "", "auto", "frames", "raw":
+	default:
+		return nil, fmt.Errorf("[attach] mode must be \"auto\", \"frames\" or \"raw\" in %s", path)
 	}
 	if n := cfg.Attach.ScrollbackRows; n != nil && *n < -1 {
 		return nil, fmt.Errorf("[attach] scrollback_rows must be -1 (all), 0 or more in %s", path)
