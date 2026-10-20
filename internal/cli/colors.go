@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/robmorgan/agtd/internal/protocol"
+	"agtd.sh/internal/protocol"
 	"golang.org/x/sys/unix"
 )
 
