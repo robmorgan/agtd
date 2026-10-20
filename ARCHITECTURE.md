@@ -1022,19 +1022,22 @@ nothing in pi, so neither is predicted). Any other key (Enter, Tab, Esc, Ctrl-C,
 goes at once, with the batch before it, and the echo pauses until the field is seen again, so the
 agent's own menus, completions and submit work as they always did, one round trip late; a field
 asked for before such a key is stale when it arrives, so it is ignored and asked for again (so is
-one asked for before a resize). Sequences the CLI does not know (function keys, mouse reports,
-the terminal's replies to the agent's queries) go as they came, unpredicted, and kitty key
-releases go with the batch around them: the echo never drops or rewrites a byte. What the
-decoder holds is bounded: an incomplete sequence goes as it is after 256 bytes or 50 ms with
-nothing following (Alt-[ in a legacy terminal is a lone ESC [), and a bracketed paste over
-64 KiB, or whose end is late, is forwarded as it arrives, unpredicted. The drawing is
-a prediction; the agent is the authority. The CLI keeps the states it predicted, each with its
-key, and an observed field that equals one of them, text and cursor (Left and Right change only
-the cursor), confirms the keys up to it; the keys after it are
-replayed over the observed field (the agent may have wrapped or placed the cursor differently),
-and a field that equals none means the agent did something unpredicted, so its field is adopted
-and the predictions dropped: one visible correction. At most 512 predictions are kept; past that
-the echo lets keys through raw.
+one asked for before a resize, whether from SIGWINCH or a new session size in a size ownership
+note). Sequences the CLI does not know (function keys, mouse reports, the terminal's replies to the
+agent's queries) go as they came, unpredicted, and kitty key releases go with the batch around
+them: the echo never drops or rewrites a byte. What the decoder holds is bounded: an incomplete
+sequence goes as it is after 256 bytes or 50 ms with nothing following (Alt-[ in a legacy terminal
+is a lone ESC [), a bracketed paste over 64 KiB, or whose end is late, is forwarded as it arrives,
+unpredicted, and given up for good after another 50 ms without its end, and opening the overlay
+sends whatever the decoder holds. The overlay and the picker ignore a paste over 64 KiB. The
+drawing is a prediction; the agent is the authority. The CLI keeps the states it predicted, each
+with its key, and an observed field that equals one of them, text and cursor (Left and Right change
+only the cursor), confirms the keys up to it, provided that key had been sent when the field was
+asked for (the worker reads the field before any input sent after the request, so a later state can
+only match by coincidence); the keys after it are replayed over the observed field (the agent may
+have wrapped or placed the cursor differently), and a field that equals none means the agent did
+something unpredicted, so its field is adopted and the predictions dropped: one visible correction.
+At most 512 predictions are kept; past that the echo lets keys through raw.
 
 **Holding and repainting.** While keys are unconfirmed the attachment's output is dropped by the
 CLI (the agent's own redraw of the field would fight the drawing), and counted. The field is then
@@ -1047,7 +1050,11 @@ the snapshot is the recovery, as for a lagging client. After a lost connection t
 as before, then asks for the field: the keys it proves missing are sent again, and keys it does
 not account for are dropped, never resent on a guess. Keys still batched when the connection
 went, and keys typed before the field answers, wait for it and follow the resent ones, so each
-goes once and in order. The field is the only evidence (the worker does not acknowledge input):
+goes once and in order; a second reattach before the answer keeps the resend owed, and past 64 KiB
+of held keys the resend is given up and they go at once. A resize before the answer drops the
+predictions it would be checked against, so keys lost with the connection are then not resent;
+nor are they when the overlay opens first, or when the new worker does not report the field
+(the keys still batched go at once then). The field is the only evidence (the worker does not acknowledge input):
 a key that reached the PTY before the cut but that the agent had not drawn when the field was
 read (the worker waits for output to settle, at most 200 ms) is sent twice.
 

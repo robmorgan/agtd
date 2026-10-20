@@ -291,8 +291,11 @@ type keyEvent struct {
 // keySequenceMax is not a key, and goes as it is. A bracketed paste is held
 // until its end marker, up to pasteMax; a longer one is forwarded as it
 // arrives, in keyNone events, holding back only what may be the start of
-// its end marker. The end marker is looked for once in each byte. The local echo also calls
-// expire when nothing completes what is held.
+// its end marker, and the end marker is looked for once in each byte. The
+// overlay and the picker skip keyNone events, so they ignore a paste longer
+// than pasteMax (a session name or a query never is). The local echo calls
+// expire when nothing completes what is held, and reset when the attachment
+// or the overlay takes over.
 type keyDecoder struct {
 	pending []byte
 	// paste is the bracketed paste being read, from its start marker (or,
@@ -394,28 +397,38 @@ func (d *keyDecoder) streamPaste() (ev keyEvent, ok bool, rest []byte) {
 	return ev, true, nil
 }
 
-// held reports whether the decoder holds bytes that expire would give up.
+// held reports whether the decoder holds bytes, or is inside a paste, so
+// that expire has something to give up.
 func (d *keyDecoder) held() bool {
-	return len(d.pending) > 0 || (d.paste != nil && (!d.streaming || len(d.paste) > len(pasteEnd)-1))
+	return len(d.pending) > 0 || d.paste != nil
 }
 
 // expire gives up on what is held because nothing followed it: an
 // incomplete sequence goes as it is (Alt-[ in a legacy terminal is ESC [,
 // which waits for a final byte that never comes), and a paste whose end has
-// not come is forwarded as it arrives from then on.
+// not come is forwarded as it arrives from then on. A paste already
+// forwarded that way is given up for good: what may have been the start of
+// its end marker goes too, and what follows is decoded as keys.
 func (d *keyDecoder) expire() []keyEvent {
-	if d.paste != nil {
+	if d.paste != nil && !d.streaming {
 		if ev, ok, _ := d.streamPaste(); ok {
 			return []keyEvent{ev}
 		}
 		return nil
 	}
-	if len(d.pending) == 0 {
-		return nil
+	if raw := d.reset(); len(raw) > 0 {
+		return []keyEvent{{raw: raw}}
 	}
-	ev := keyEvent{raw: d.pending}
-	d.pending = nil
-	return []keyEvent{ev}
+	return nil
+}
+
+// reset gives up everything held, an incomplete sequence or a paste (its
+// start marker included, if none of it has gone), returning its bytes, and
+// leaves the decoder as new.
+func (d *keyDecoder) reset() []byte {
+	raw := append(d.pending, d.paste...)
+	d.pending, d.paste, d.scanned, d.streaming = nil, nil, 0, false
+	return raw
 }
 
 // decodeKey decodes the key at the start of b, returning how many bytes it

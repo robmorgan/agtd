@@ -350,6 +350,13 @@ func (c *client) attachOnce(id, uid string, titled *bool) (res attachResult, err
 		case attached.HasFeature(protocol.CapAttachField):
 			ech.reattached()
 		default:
+			// The new worker does not report the field (a handoff to
+			// an older one): the keys the echo still holds were never
+			// sent, and go now, unpredicted. If this stream has failed
+			// too, they are lost with it, as keys sent on it would be.
+			if held := ech.suspend(); len(held) > 0 {
+				_ = stream.send(&protocol.Request{AttachInput: &protocol.Bytes{Data: held}})
+			}
 			ech = nil
 		}
 	}
@@ -705,9 +712,7 @@ func handleFrame(f frame, overlayOpen bool, size *protocol.SizeOwnership, ech *e
 		}
 		return attachResult{}, false, nil
 	case f.resp.AttachSizeOwner != nil:
-		if size != nil {
-			*size = *f.resp.AttachSizeOwner
-		}
+		noteSizeOwner(size, *f.resp.AttachSizeOwner, ech)
 		return attachResult{}, false, nil
 	case f.resp.Field != nil:
 		if ech == nil {
@@ -737,6 +742,20 @@ func handleFrame(f frame, overlayOpen bool, size *protocol.SizeOwnership, ech *e
 		return attachResult{}, true, errors.New(f.resp.Error.Message)
 	}
 	return attachResult{}, true, fmt.Errorf("unexpected response: %s", describeResponse(f.resp))
+}
+
+// noteSizeOwner records a size ownership note (size is nil when it is not
+// tracked). A new session size (another attachment took it, or this one
+// did from the overlay) moves the agent's field as a SIGWINCH does, so the
+// echo hears of it.
+func noteSizeOwner(size *protocol.SizeOwnership, note protocol.SizeOwnership, ech *echo) {
+	if size == nil {
+		return
+	}
+	if ech != nil && (size.Geometry.Cols != note.Geometry.Cols || size.Geometry.Rows != note.Geometry.Rows) {
+		ech.resized()
+	}
+	*size = note
 }
 
 // overlayInput feeds input to the open overlay. closed reports that it
@@ -806,9 +825,7 @@ func restoreSnapshot(stream *attachStream, size *protocol.SizeOwnership, ech *ec
 		case f.resp.PtyOutput != nil, f.resp.AttachResync != nil:
 			// Superseded by the snapshot asked for.
 		case f.resp.AttachSizeOwner != nil:
-			if size != nil {
-				*size = *f.resp.AttachSizeOwner
-			}
+			noteSizeOwner(size, *f.resp.AttachSizeOwner, ech)
 		case f.resp.SessionEnded != nil:
 			return nil, f.resp.SessionEnded, nil
 		case f.resp.EndOfStream != nil:

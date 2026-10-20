@@ -35,7 +35,9 @@ import (
 //
 // The echo keeps the states it predicted, oldest first, each with the key
 // that produced it. An observed field that equals one of them, text and
-// cursor, confirms the keys up to it; the rest are replayed over the
+// cursor, confirms the keys up to it, provided the key had been sent when
+// the field was asked for (the worker reads the field before any input
+// sent after the ask, so a later state can only match by coincidence); the rest are replayed over the
 // observed field, since the agent may have placed the cursor or wrapped a
 // word differently. A field that equals none means the agent did something
 // unpredicted (a popup took a key, a different wrap), so the observed field
@@ -56,15 +58,16 @@ import (
 // evidence.
 
 const (
-	// echoFlushAfter is the default for [composer] flush_after: how long
-	// predicted keys wait for company before they go to the agent.
-	echoFlushAfter = 50 * time.Millisecond
 	// echoProbeAfter is how long after the last flush (or the last
 	// output, when idle) the field is asked for.
 	echoProbeAfter = 150 * time.Millisecond
 	// echoIncompleteAfter is how long an incomplete escape sequence or
 	// paste waits for the rest before it goes as it is.
 	echoIncompleteAfter = 50 * time.Millisecond
+	// echoHeldMax bounds the keys held while a resend is owed; past it
+	// the echo gives up the resend and sends them, as when the overlay
+	// opens.
+	echoHeldMax = pasteMax
 	// echoMaxStates bounds the unconfirmed predictions; past it the echo
 	// drops them and lets keys through raw, so an agent that stopped
 	// reading never pins a stale drawing.
@@ -371,7 +374,9 @@ type echoState struct {
 	cRow, cCol int
 	key        keyEvent
 	// sent: the key has gone to the agent, not just into the batch.
-	sent bool
+	// asked: it had gone when the field was last asked for, so the field
+	// can show it.
+	sent, asked bool
 }
 
 // at reports whether the field shows this state: its text and its cursor.
@@ -498,6 +503,12 @@ func (e *echo) key(ev keyEvent) (send []byte, drawn bool) {
 	if e.resend {
 		e.pending = append(e.pending, ev.raw...)
 		e.held = true
+		if len(e.pending) > echoHeldMax {
+			// Too much to hold for an answer that is not coming soon:
+			// the resend is given up, and everything goes in order.
+			e.resend = false
+			return e.resumeHeld(), false
+		}
 		return nil, false
 	}
 	if !e.active() || len(e.states) >= echoMaxStates {
@@ -633,6 +644,9 @@ func (e *echo) tick(now time.Time) (send []byte, reqs []*protocol.Request) {
 func (e *echo) probe() []*protocol.Request {
 	e.probing = true
 	e.probeEpoch = e.epoch
+	for i := range e.states {
+		e.states[i].asked = e.states[i].sent
+	}
 	e.probeDue, e.quietDue = time.Time{}, time.Time{}
 	reqs := []*protocol.Request{{AttachField: protocol.Empty}}
 	if e.dropped > 0 || e.dirty || e.painted {
@@ -698,7 +712,7 @@ func (e *echo) fieldAnswer(f *protocol.Field) (send, paint []byte) {
 	// only the cursor.
 	matched := -1
 	for i := len(e.states) - 1; i >= 0; i-- {
-		if e.states[i].at(f) {
+		if e.states[i].asked && e.states[i].at(f) {
 			matched = i
 			break
 		}
@@ -793,10 +807,8 @@ func (e *echo) suspend() (send []byte) {
 	// that would say which never arrived.
 	e.resend, e.held = false, false
 	// What the decoder holds goes too, rather than in front of the next
-	// key typed after the overlay.
-	for _, ev := range e.keys.expire() {
-		e.pending = append(e.pending, ev.raw...)
-	}
+	// key typed after the overlay, which has a decoder of its own.
+	e.pending = append(e.pending, e.keys.reset()...)
 	e.noteHeld()
 	send = e.flush()
 	e.states = nil
@@ -820,9 +832,11 @@ func (e *echo) resized() {
 
 // reattached: the screen was repainted from the new attachment's snapshot;
 // the field is asked for at once, and the keys it proves missing are sent
-// again. Whatever was asked of the lost attachment will not be answered.
+// again. Whatever was asked of the lost attachment will not be answered. A
+// resend still owed from an earlier reattach stays owed, with the keys held
+// for it.
 func (e *echo) reattached() {
-	e.resend = len(e.states) > 0
+	e.resend = e.resend || len(e.states) > 0
 	if e.resend {
 		e.flushDue = time.Time{}
 	}

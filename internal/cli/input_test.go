@@ -205,20 +205,46 @@ func TestKeyDecoderBoundsIncompleteSequences(t *testing.T) {
 	// A paste whose end is late is forwarded from then on.
 	d = keyDecoder{}
 	var raw []byte
-	for _, ev := range d.push([]byte("\x1b[200~abc")) {
-		raw = append(raw, ev.raw...)
+	collect := func(evs []keyEvent) []keyEvent {
+		for _, ev := range evs {
+			raw = append(raw, ev.raw...)
+		}
+		return evs
 	}
+	collect(d.push([]byte("\x1b[200~abc")))
+	collect(d.expire())
+	if !d.held() {
+		t.Fatal("no longer in the paste after the first expiry")
+	}
+	evs := collect(d.push([]byte("def\x1b[201~x")))
+	if string(raw) != "\x1b[200~abcdef\x1b[201~x" || evs[len(evs)-1].r != 'x' {
+		t.Fatalf("forwarded %q", raw)
+	}
+
+	// A paste whose end never comes is given up at the next expiry, and
+	// what follows is keys again.
+	d, raw = keyDecoder{}, nil
+	collect(d.push([]byte("\x1b[200~abc")))
+	collect(d.expire())
+	collect(d.expire())
+	if d.held() || string(raw) != "\x1b[200~abc" {
+		t.Fatalf("forwarded %q, holding %v", raw, d.held())
+	}
+	if evs := d.push([]byte("x")); len(evs) != 1 || evs[0].r != 'x' {
+		t.Fatalf("after the paste: %+v", evs)
+	}
+}
+
+// A long paste whose end never comes is released in full by expire, the
+// bytes that might have begun its end marker included.
+func TestKeyDecoderReleasesAnUnendedPaste(t *testing.T) {
+	in := string(pasteStart) + strings.Repeat("x", pasteMax+10)
+	var d keyDecoder
+	raw, _ := pushAll(t, &d, chunked(in, 4096))
 	for _, ev := range d.expire() {
 		raw = append(raw, ev.raw...)
 	}
-	if d.held() {
-		t.Fatal("still held after expiring")
-	}
-	evs := d.push([]byte("def\x1b[201~x"))
-	for _, ev := range evs {
-		raw = append(raw, ev.raw...)
-	}
-	if string(raw) != "\x1b[200~abcdef\x1b[201~x" || evs[len(evs)-1].r != 'x' {
-		t.Fatalf("forwarded %q", raw)
+	if string(raw) != in || d.held() {
+		t.Fatalf("forwarded %d of %d bytes, holding %v", len(raw), len(in), d.held())
 	}
 }

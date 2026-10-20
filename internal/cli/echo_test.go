@@ -7,9 +7,14 @@ import (
 	"testing"
 	"time"
 
+	"agtd.sh/internal/config"
 	"agtd.sh/internal/protocol"
 	"agtd.sh/internal/transport"
 )
+
+// echoFlushAfter is the batching window the tests type with: the configured
+// default.
+const echoFlushAfter = config.DefaultFlushAfter
 
 // The wrap rules against what the agents drew (the probe measurements in
 // docs/designs/smooth-remote-attach.md and the field fixtures in
@@ -255,6 +260,8 @@ func TestEchoAdoptsWhatTheAgentDrew(t *testing.T) {
 	// Keys owed are replayed over what the agent shows: here the agent
 	// put the cursor elsewhere.
 	typeKeys(e, "yz")
+	e.flush()
+	e.probe()
 	e.fieldAnswer(claudeField([]string{"hexy"}))
 	if e.unconfirmed() != 1 || e.states[0].rows[0] != "hexyz" {
 		t.Fatalf("replay: unconfirmed %d, states %+v", e.unconfirmed(), e.states)
@@ -702,5 +709,222 @@ func TestEchoReattachReleasesHeldKeysWithoutAField(t *testing.T) {
 	e.input([]byte("e"))
 	if send, _ := e.tick(e.now().Add(time.Second)); string(send) != "e" {
 		t.Fatalf("after the overlay: send %q", send)
+	}
+}
+
+// A field can only show keys that had been sent when it was asked for. A
+// batched key that happens to recreate what the field shows (an A, B, A
+// edit) must not count as drawn, or the lost keys before it are not sent
+// again and the batched one doubles.
+func TestEchoResendNeverMatchesUnsentState(t *testing.T) {
+	e, now := fixedClockEcho(echoFlushAfter)
+	e.fieldAnswer(claudeField([]string{""}))
+	typeKeys(e, "ab")
+	e.input([]byte{0x7f})
+	e.tick(now.Add(time.Second)) // "ab", Backspace sent; the Backspace is lost
+	typeKeys(e, "b")             // batched
+	e.reattached()
+	e.tick(now.Add(2 * time.Second))
+	if send, _ := e.fieldAnswer(claudeField([]string{"ab"})); string(send) != "\x7fb" {
+		t.Fatalf("resend %q, want %q", send, "\x7fb")
+	}
+}
+
+// A second reattach while a resend is owed keeps it owed, so keys held for
+// it are not stranded when a resize has dropped the predictions.
+func TestEchoSecondReattachKeepsTheResend(t *testing.T) {
+	e, now := fixedClockEcho(echoFlushAfter)
+	e.fieldAnswer(claudeField([]string{""}))
+	typeKeys(e, "ab")
+	e.tick(now.Add(time.Second))
+	e.reattached()
+	e.resized()
+	e.input([]byte("c\r"))
+	e.reattached()
+	var sent []byte
+	s, _ := e.tick(now.Add(time.Second))
+	sent = append(sent, s...)
+	s, _ = e.fieldAnswer(claudeField([]string{""}))
+	sent = append(sent, s...)
+	// "ab" went on the lost connection and the resize took the evidence
+	// of which landed: they are not sent again on a guess.
+	if string(sent) != "c\r" {
+		t.Fatalf("sent %q, pending %q", sent, e.pending)
+	}
+
+	// Typed keys held across two reattaches go after the missing ones.
+	e, now = fixedClockEcho(echoFlushAfter)
+	e.fieldAnswer(claudeField([]string{""}))
+	typeKeys(e, "ab")
+	e.tick(now.Add(time.Second))
+	e.reattached()
+	e.input([]byte("d"))
+	e.reattached()
+	e.probe()
+	if send, _ := e.fieldAnswer(claudeField([]string{"a"})); string(send) != "bd" {
+		t.Fatalf("sent %q", send)
+	}
+}
+
+// Keys held for a resend are bounded: past echoHeldMax the resend is given
+// up and everything goes, in order.
+func TestEchoHeldKeysAreBounded(t *testing.T) {
+	e, now := fixedClockEcho(echoFlushAfter)
+	e.fieldAnswer(claudeField([]string{""}))
+	typeKeys(e, "a")
+	e.tick(now.Add(time.Second))
+	e.reattached()
+	in := string(pasteStart) + strings.Repeat("x", 4*echoHeldMax) + string(pasteEnd)
+	var sent []byte
+	for _, chunk := range chunked(in, 4096) {
+		s, _ := e.input([]byte(chunk))
+		sent = append(sent, s...)
+		if len(e.pending) > echoHeldMax+4096 {
+			t.Fatalf("holding %d bytes", len(e.pending))
+		}
+	}
+	s, _ := e.tick(now.Add(2 * time.Second))
+	sent = append(sent, s...)
+	if string(sent) != in || e.resend {
+		t.Fatalf("sent %d of %d bytes, resend owed %v", len(sent), len(in), e.resend)
+	}
+}
+
+// The overlay opening in a paste (a hotkey byte in pasted text) takes the
+// paste the decoder holds with it and leaves the decoder empty, so keys
+// typed after it are keys.
+func TestEchoSuspendInAPasteResetsTheDecoder(t *testing.T) {
+	e, _ := fixedClockEcho(echoFlushAfter)
+	e.fieldAnswer(claudeField([]string{""}))
+	e.input([]byte("\x1b[200~abc"))
+	if send := e.suspend(); string(send) != "\x1b[200~abc" || e.keys.held() {
+		t.Fatalf("suspend sent %q, decoder holding %v", send, e.keys.held())
+	}
+	e.probe()
+	e.fieldAnswer(claudeField([]string{""}))
+	if send, _ := e.input([]byte("\r")); string(send) != "\r" {
+		t.Fatalf("Enter after the overlay: sent %q", send)
+	}
+}
+
+// A new session size from a size ownership note (another attachment took
+// the size, or the overlay's Take over size) makes a field asked for before
+// it stale, as SIGWINCH does; a note that keeps the size does not.
+func TestEchoSizeOwnerResizes(t *testing.T) {
+	note := func(cols, rows uint16) frame {
+		return frame{resp: &protocol.Response{AttachSizeOwner: &protocol.SizeOwnership{Geometry: protocol.Geometry{Cols: cols, Rows: rows}}}}
+	}
+	e := newEcho(echoConfig{flushAfter: echoFlushAfter})
+	size := &protocol.SizeOwnership{Geometry: protocol.Geometry{Cols: 120, Rows: 40}}
+	e.probe()
+	handleFrame(note(120, 40), false, size, e, nil)
+	e.fieldAnswer(claudeField([]string{""}))
+	if e.field == nil {
+		t.Fatal("a note that kept the size made the field stale")
+	}
+	e.probe()
+	handleFrame(note(100, 30), false, size, e, nil)
+	e.fieldAnswer(claudeField([]string{""}))
+	if e.field != nil || size.Geometry.Cols != 100 {
+		t.Fatalf("a new size: field %v, size %+v", e.field != nil, size.Geometry)
+	}
+}
+
+// The echo's other transitions: predictions batched or sent, meeting a
+// field that matches none, the overlay, a resize; a resend meeting a stale
+// field; a long paste cut short.
+func TestEchoStateCells(t *testing.T) {
+	typed := func(sent bool) (*echo, time.Time) {
+		e, now := fixedClockEcho(echoFlushAfter)
+		e.fieldAnswer(claudeField([]string{""}))
+		typeKeys(e, "hel")
+		if sent {
+			e.tick(now.Add(time.Second)) // flushed, and the field asked for
+		}
+		return e, now
+	}
+	t.Run("batched, field matches none", func(t *testing.T) {
+		e, now := typed(false)
+		e.fieldAnswer(claudeField([]string{"hex"}))
+		if send, _ := e.tick(now.Add(time.Second)); string(send) != "hel" {
+			t.Fatalf("sent %q", send)
+		}
+	})
+	t.Run("batched, overlay", func(t *testing.T) {
+		e, _ := typed(false)
+		if send := e.suspend(); string(send) != "hel" || e.holding() || e.painted {
+			t.Fatalf("suspend sent %q", send)
+		}
+	})
+	t.Run("batched, resize", func(t *testing.T) {
+		e, now := typed(false)
+		e.resized()
+		send, reqs := e.tick(now.Add(time.Second))
+		if string(send) != "hel" || len(reqs) == 0 || reqs[0].AttachField == nil {
+			t.Fatalf("send %q reqs %v", send, reqs)
+		}
+	})
+	t.Run("sent, field matches none", func(t *testing.T) {
+		e, _ := typed(true)
+		if send, _ := e.fieldAnswer(claudeField([]string{"hex"})); send != nil || !e.dirty || e.holding() {
+			t.Fatalf("send %q dirty %v", send, e.dirty)
+		}
+	})
+	t.Run("sent, overlay", func(t *testing.T) {
+		e, _ := typed(true)
+		if send := e.suspend(); send != nil || e.holding() {
+			t.Fatalf("suspend sent %q", send)
+		}
+	})
+	t.Run("sent, resize", func(t *testing.T) {
+		e, now := typed(true)
+		e.resized()
+		e.fieldAnswer(claudeField([]string{"hel"})) // asked before the resize
+		send, reqs := e.tick(now.Add(2 * time.Second))
+		if send != nil || len(reqs) == 0 || reqs[0].AttachField == nil {
+			t.Fatalf("send %q reqs %v", send, reqs)
+		}
+	})
+	t.Run("resend owed, stale field", func(t *testing.T) {
+		e, _ := typed(true)
+		e.reattached()
+		e.probe()
+		e.input([]byte("d"))
+		e.resized()
+		if send, _ := e.fieldAnswer(claudeField([]string{""})); send != nil || !e.resend {
+			t.Fatalf("stale answer sent %q, resend owed %v", send, e.resend)
+		}
+	})
+	t.Run("long paste cut short by the overlay", func(t *testing.T) {
+		e, _ := fixedClockEcho(echoFlushAfter)
+		in := string(pasteStart) + strings.Repeat("x", pasteMax+10)
+		var sent []byte
+		for _, chunk := range chunked(in, 4096) {
+			s, _ := e.input([]byte(chunk))
+			sent = append(sent, s...)
+		}
+		sent = append(sent, e.suspend()...)
+		if string(sent) != in || e.keys.held() {
+			t.Fatalf("sent %d of %d, decoder holding %v", len(sent), len(in), e.keys.held())
+		}
+	})
+}
+
+// A long paste whose end never comes goes in full once typing stops: the
+// echo's expiry is armed while the decoder is still in the paste.
+func TestEchoReleasesAnUnendedPaste(t *testing.T) {
+	e, now := fixedClockEcho(echoFlushAfter)
+	in := string(pasteStart) + strings.Repeat("x", pasteMax+10)
+	var sent []byte
+	for _, chunk := range chunked(in, 4096) {
+		s, _ := e.input([]byte(chunk))
+		sent = append(sent, s...)
+	}
+	for i := 1; i <= 2; i++ {
+		s, _ := e.tick(now.Add(time.Duration(i) * echoIncompleteAfter))
+		sent = append(sent, s...)
+	}
+	if string(sent) != in {
+		t.Fatalf("sent %d of %d bytes", len(sent), len(in))
 	}
 }
