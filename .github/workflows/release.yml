@@ -211,9 +211,15 @@ jobs:
             --wait --timeout 30m --output-format json | tee "${RUNNER_TEMP}/notary.json"
           id="$(jq -r .id "${RUNNER_TEMP}/notary.json")"
           status="$(jq -r .status "${RUNNER_TEMP}/notary.json")"
+          if [[ -z "${id}" || "${id}" == null ]]; then
+            # Apple turned the submission down (its error is above): a bad
+            # key, or an agreement to accept at developer.apple.com.
+            echo "::error::notarytool could not submit; see its error above"
+            exit 1
+          fi
           if [[ "${status}" != Accepted ]]; then
             xcrun notarytool log "${id}" --key "${key}" --key-id "${APPLE_API_KEY_ID}" --issuer "${APPLE_API_ISSUER_ID}" || true
-            echo "::error::notarization ${status}"
+            echo "::error::notarization ${status}; Apple's log is above"
             exit 1
           fi
           rm -f "${key}"
