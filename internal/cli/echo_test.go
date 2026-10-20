@@ -344,3 +344,16 @@ func TestEchoPaintScrollsWhenTheBoxReachesTheBottom(t *testing.T) {
 		t.Fatalf("scrolled:\n%q (offset %d)", p, e.offset)
 	}
 }
+
+// A new echo asks for the field once output has been quiet for a moment
+// after the attach, even when nothing follows the snapshot: the prompt may
+// already be in it.
+func TestEchoAsksForTheFieldAfterAttach(t *testing.T) {
+	e := newEcho(echoConfig{})
+	if _, reqs := e.tick(time.Now()); reqs != nil {
+		t.Fatalf("asked at once: %v", reqs)
+	}
+	if _, reqs := e.tick(time.Now().Add(echoProbeAfter)); len(reqs) != 1 || reqs[0].AttachField == nil {
+		t.Fatalf("not asked after the quiet moment: %v", reqs)
+	}
+}

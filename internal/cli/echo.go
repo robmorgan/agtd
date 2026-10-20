@@ -407,6 +407,11 @@ func newEcho(cfg echoConfig) *echo {
 	}
 	e := &echo{cfg: cfg, now: time.Now, timer: time.NewTimer(time.Hour)}
 	e.timer.Stop()
+	// The field is asked for once the attach's output has been quiet for
+	// a moment, whether or not any follows the snapshot: the prompt may
+	// already be in it, with nothing more to come until a key is typed.
+	e.quietDue = e.now().Add(echoProbeAfter)
+	e.schedule()
 	return e
 }
 
