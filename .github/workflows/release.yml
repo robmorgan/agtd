@@ -150,9 +150,27 @@ jobs:
           security create-keychain -p "${kcpass}" "${kc}"
           security set-keychain-settings -lut 3600 "${kc}"
           security unlock-keychain -p "${kcpass}" "${kc}"
-          echo "${MACOS_CERT_P12}" | base64 --decode >"${RUNNER_TEMP}/cert.p12"
-          security import "${RUNNER_TEMP}/cert.p12" -k "${kc}" -P "${MACOS_CERT_PASSWORD}" -T /usr/bin/codesign
-          rm -f "${RUNNER_TEMP}/cert.p12"
+          umask 077
+          p12="${RUNNER_TEMP}/cert.p12"
+          echo "${MACOS_CERT_P12}" | base64 --decode >"${p12}"
+          # `security import` reads only the legacy .p12 format (3DES, SHA-1
+          # MAC). One exported by OpenSSL 3 with its defaults (AES, PBKDF2)
+          # fails with "MAC verification failed (wrong password?)", so the
+          # certificate is checked with OpenSSL, which reads either, and
+          # re-packed in the legacy format. That also tells a wrong password
+          # apart from a format security cannot read.
+          openssl="$(brew --prefix openssl@3 2>/dev/null)/bin/openssl"
+          [[ -x "${openssl}" ]] || { brew install openssl@3 >/dev/null; openssl="$(brew --prefix openssl@3)/bin/openssl"; }
+          if ! "${openssl}" pkcs12 -in "${p12}" -noout -legacy -passin env:MACOS_CERT_PASSWORD; then
+            echo "::error::MACOS_CERT_PASSWORD does not open MACOS_CERT_P12 (or MACOS_CERT_P12 is not base64 of a .p12)"
+            exit 1
+          fi
+          "${openssl}" pkcs12 -in "${p12}" -nodes -legacy -passin env:MACOS_CERT_PASSWORD -out "${RUNNER_TEMP}/cert.pem"
+          "${openssl}" pkcs12 -export -in "${RUNNER_TEMP}/cert.pem" -out "${p12}" \
+            -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg sha1 -passout env:MACOS_CERT_PASSWORD
+          rm -f "${RUNNER_TEMP}/cert.pem"
+          security import "${p12}" -k "${kc}" -P "${MACOS_CERT_PASSWORD}" -T /usr/bin/codesign
+          rm -f "${p12}"
           # codesign needs the chain up to Apple's root, and a .p12 may hold
           # only the certificate and key: add the Developer ID intermediate.
           curl -fsSL https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer -o "${RUNNER_TEMP}/DeveloperIDG2CA.cer"
