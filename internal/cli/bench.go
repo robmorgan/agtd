@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/robmorgan/agtd/internal/protocol"
+	"agtd.sh/internal/protocol"
 	"github.com/spf13/cobra"
 )
 

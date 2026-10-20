@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/robmorgan/agtd/internal/protocol"
+	"agtd.sh/internal/protocol"
 )
 
 // The wrap rules against what the agents drew (the probe measurements in

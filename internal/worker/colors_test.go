@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/robmorgan/agtd/internal/protocol"
+	"agtd.sh/internal/protocol"
 )
 
 var testColors = &protocol.TerminalColors{Foreground: protocol.RGB{R: 0xdd, G: 0xdd, B: 0xdd}, Background: protocol.RGB{R: 0x1e, G: 0x1e, B: 0x2e}}

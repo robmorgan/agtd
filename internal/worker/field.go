@@ -7,7 +7,7 @@ import (
 
 	"go.mitchellh.com/libghostty"
 
-	"github.com/robmorgan/agtd/internal/protocol"
+	"agtd.sh/internal/protocol"
 )
 
 // The input field.
