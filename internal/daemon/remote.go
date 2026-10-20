@@ -232,7 +232,7 @@ func SetRemoteListen(path, listen string) error {
 		if listen == "" {
 			return nil
 		}
-		data = []byte(config.DefaultText)
+		data = []byte(config.DefaultText())
 	} else if err != nil {
 		return fmt.Errorf("failed to read %s: %w", path, err)
 	}

@@ -8,7 +8,20 @@ import (
 	"testing"
 )
 
+// agentsOnPath leaves only the named commands on PATH.
+func agentsOnPath(t *testing.T, names ...string) {
+	t.Helper()
+	dir := t.TempDir()
+	for _, name := range names {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", dir)
+}
+
 func TestLoad(t *testing.T) {
+	agentsOnPath(t)
 	dir := t.TempDir()
 	cfg, err := Load(filepath.Join(dir, "missing.toml"))
 	if err != nil || cfg.DefaultAgent != "claude" || cfg.Agents["codex"].Command != "codex" {
@@ -52,6 +65,7 @@ func TestRequireAgentNamesTheConfigFile(t *testing.T) {
 // The written default parses to the built-in defaults, is private, and is
 // never overwritten.
 func TestWriteDefault(t *testing.T) {
+	agentsOnPath(t, "pi")
 	path := filepath.Join(t.TempDir(), "config.toml")
 	if err := WriteDefault(path); err != nil {
 		t.Fatal(err)
@@ -85,8 +99,36 @@ func TestWriteDefault(t *testing.T) {
 	}
 }
 
+// The default agent is the first of claude, codex and pi on PATH, in the
+// built-in defaults and in the file written from them.
+func TestDefaultAgentIsDetected(t *testing.T) {
+	for _, tc := range []struct {
+		installed []string
+		want      string
+	}{
+		{nil, "claude"},
+		{[]string{"pi"}, "pi"},
+		{[]string{"codex", "pi"}, "codex"},
+		{[]string{"pi", "claude"}, "claude"},
+	} {
+		agentsOnPath(t, tc.installed...)
+		if got := defaultConfig().DefaultAgent; got != tc.want {
+			t.Errorf("%v installed: built-in default %q, want %q", tc.installed, got, tc.want)
+		}
+		path := filepath.Join(t.TempDir(), "config.toml")
+		if err := WriteDefault(path); err != nil {
+			t.Fatal(err)
+		}
+		agentsOnPath(t) // what the file says, not what is on PATH now
+		cfg, err := Load(path)
+		if err != nil || cfg.DefaultAgent != tc.want {
+			t.Errorf("%v installed: written default %+v, %v; want %q", tc.installed, cfg, err, tc.want)
+		}
+	}
+}
+
 func TestAgentNamesKeepFileOrder(t *testing.T) {
-	if got := defaultConfig().AgentNames(); !slices.Equal(got, []string{"claude", "codex"}) {
+	if got := defaultConfig().AgentNames(); !slices.Equal(got, []string{"claude", "codex", "pi"}) {
 		t.Fatalf("defaults: %v", got)
 	}
 	path := filepath.Join(t.TempDir(), "config.toml")
