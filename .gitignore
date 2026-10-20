@@ -3,3 +3,5 @@
 .gstack/
 /.build/
 /bin/
+dist/
+.zig-cache/

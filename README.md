@@ -276,7 +276,8 @@ Debug build parses PTY output at roughly 50 KB/s, which is slow enough to thrott
 `BenchmarkTerminalFeed` shows ~640 MB/s with ReleaseFast.
 
 Only libghostty needs cgo; `modernc.org/sqlite` is pure Go, so cross compiling `agtd` is `zig cc`
-plus `CGO_ENABLED=1` as described in the go-libghostty README.
+plus `CGO_ENABLED=1` as described in the go-libghostty README. `scripts/release-build.sh` does
+that for the release binaries; see [Releases](#releases).
 
 To measure what sessions cost on this machine, `agtd bench sessions` starts a private daemon in a
 temporary root (never `~/.agtd`), creates the sessions, prints a report, and stops everything it
@@ -301,23 +302,30 @@ make dev-run ARGS="list"
 
 ## Install
 
-On macOS, Debian/Ubuntu or Arch (Omarchy included):
+On macOS 13+ or Linux (glibc 2.28+: Debian 10, Ubuntu 20.04, RHEL 8 or newer, Arch):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/robmorgan/agtd/main/install.sh | bash
 ```
 
-or `./install.sh` from a checkout, which builds that checkout. The script installs `agt` and
+This downloads the latest [release](https://github.com/robmorgan/agtd/releases)'s binaries and
+checks them against its `SHA256SUMS`; it needs nothing but `curl` and `tar`. `AGTD_VERSION=0.2.0`
+picks a release. The macOS binaries are universal (Apple silicon and Intel), signed with a
+Developer ID and notarized.
+
+It builds from source instead when run as `./install.sh` from a checkout (it builds that
+checkout), when `AGTD_REF` (a branch, tag or commit) or `AGTD_FROM_SOURCE=1` is set, or when no
+release fits the machine (a musl Linux, or no release yet). Either way it installs `agt` and
 `agtd` side by side in `~/.local/bin` (`AGTD_PREFIX` changes the prefix) and can be run again
 at any time:
 
-- Missing base packages (git, make, a C compiler, pkg-config, curl, xz) come from apt or pacman,
-  through `sudo` when you are not root. On macOS it asks for the Xcode command line tools.
-- Go and Zig are used from `PATH` when new enough. Otherwise pinned releases are downloaded into
+- A source build needs macOS, Debian/Ubuntu or Arch. Missing base packages (git, make, a C
+  compiler, pkg-config, curl, xz) come from apt or pacman, through `sudo` when you are not root. On macOS it asks for the Xcode command line tools.
+  Go and Zig are used from `PATH` when new enough. Otherwise pinned releases are downloaded into
   `~/.local/share/agtd/toolchain` and used for the build only.
-- Without a checkout it clones `AGTD_REF` (default `main`) into `~/.local/share/agtd/src`; a
+  Without a checkout it clones `AGTD_REF` (default `main`) into `~/.local/share/agtd/src`; a
   rerun fetches and rebuilds only what changed.
-- Binaries are only replaced when the build differs. If a daemon is running and `agtd` changed
+- Binaries are only replaced when they differ from the installed ones. If a daemon is running and `agtd` changed
   (or the daemon still runs a binary replaced earlier), it runs `agtd upgrade`, so sessions are
   handed over to the new binary without stopping (`AGTD_NO_UPGRADE=1` leaves the daemon alone).
 - On Linux with systemd it installs and enables a user unit (`~/.config/systemd/user/agtd.service`)
@@ -332,6 +340,24 @@ It never turns on remote access; see `agtd remote enable` below.
 
 For development, `make install` installs the binaries from the current tree into `$GOBIN` (or
 `$(go env GOPATH)/bin`); set `BINDIR` to choose another directory.
+
+### Releases
+
+Pushing a tag `vX.Y.Z` runs `.github/workflows/release.yml`, which publishes a GitHub release with
+`agtd-linux-amd64.tar.gz`, `agtd-linux-arm64.tar.gz`, `agtd-darwin-universal.tar.gz` (each holding
+`agt`, `agtd` and `LICENSE`) and `SHA256SUMS`:
+
+- `scripts/release-build.sh PLATFORM VERSION` builds each platform, the same way locally as in CI.
+  Linux binaries are linked by `zig cc` against glibc 2.28 and libghostty-vt is built for the
+  architecture's baseline CPU, never the build machine's. macOS binaries are universal, for macOS 13+.
+- Each build is smoke tested by running `agtd bench sessions` (a private daemon with real PTY
+  sessions) from the built binary, and the Linux ones again in a Debian 10 container (glibc 2.28).
+- The macOS binaries are signed (hardened runtime, Developer ID Application) and notarized. The
+  secrets this needs are listed at the top of the workflow. A tag fails without them; run by hand
+  (`workflow_dispatch`), the workflow is a dry run that skips signing when they are missing and
+  leaves the tarballs as the run's artifacts instead of publishing.
+- Releases are never marked as prereleases, even for an alpha tag, because `install.sh` installs
+  `releases/latest`, which skips prereleases.
 
 ## Working Directories And Worktrees
 
