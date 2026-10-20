@@ -72,13 +72,13 @@ func (a *app) commands() []*cobra.Command {
 		}
 		return c.attachSessionUID(resp.CreateSession.SessionID, resp.CreateSession.UID)
 	})
-	newCmd.Flags().StringVar(&cwd, "cwd", "", "Directory the agent runs in (default: the current directory, or the workspace root with --workspace, where DIR is relative to it)")
+	newCmd.Flags().StringVarP(&cwd, "cwd", "C", "", "Directory the agent runs in (default: the current directory, or the workspace root with --workspace, where DIR is relative to it)")
 	newCmd.Flags().StringVar(&agent, "agent", "", "")
-	newCmd.Flags().StringVar(&workspace, "workspace", "", "Run in a workspace (see `agt workspace`)")
+	newCmd.Flags().StringVarP(&workspace, "workspace", "w", "", "Run in a workspace (see `agt workspace`)")
 	withValue(newCmd, "cwd", "DIR")
 	withValue(newCmd, "agent", "AGENT")
 	withValue(newCmd, "workspace", "NAME")
-	cmds = append(cmds, annotate(newCmd, "[OPTIONS] [NAME]", "[NAME]"))
+	cmds = append(cmds, annotate(newCmd, "[OPTIONS] [[HOST/]NAME]", "[[HOST/]NAME]  The session's name (default: chosen by the daemon); a HOST/ prefix starts it on that host"))
 
 	var killRm bool
 	kill := a.command("kill SESSION", "Stop a running session or remove its record", oneArg, func(args []string) error {
@@ -472,7 +472,7 @@ _TIME. Following reconnects by itself and resumes after the last event shown.`}
 	cmds = append(cmds, hosts)
 	cmds = append(cmds, group("host", "Manage remote hosts this machine can reach",
 		"Remote hosts running agtd with `[remote] listen` set.",
-		"Examples:\n  agt host add devbox 100.64.0.5:7433 --code 123-456-789\n  agt host add devbox 100.64.0.5\n  agt host ls\n  agt --host devbox ls\n  agt attach devbox/auth-refactor\n  agt --host auto new --workspace mono fix-tests",
+		"Examples:\n  agt host add devbox 100.64.0.5:7433 --code 123-456-789\n  agt host add devbox 100.64.0.5\n  agt host ls\n  agt --host devbox ls\n  agt attach devbox/auth-refactor\n  agt new -w mono devbox/fix-tests\n  agt -H auto new -w mono fix-tests",
 		annotate(hostAdd, "[OPTIONS] <NAME> <ADDRESS>", "<NAME>     \n<ADDRESS>  HOST[:PORT] of the remote agtd's QUIC listener (port "+transport.DefaultPort+" unless given)"),
 		hostList,
 		annotate(a.command("info NAME", "Show a host's machine, daemon, and capabilities", oneArg, func(args []string) error {
@@ -810,7 +810,7 @@ func normalizeRequestedName(name string) (string, error) {
 func remoteCwd(host, cwd string) (string, error) {
 	switch {
 	case cwd == "":
-		return "", fmt.Errorf("`agt new` on `%s` needs --workspace NAME or --cwd DIR (a directory on that machine)", host)
+		return "", fmt.Errorf("`agt new` on `%s` needs -w/--workspace NAME or -C/--cwd DIR (a directory on that machine)", host)
 	case !(strings.HasPrefix(cwd, "/") || cwd == "~" || strings.HasPrefix(cwd, "~/")):
 		return "", fmt.Errorf("--cwd `%s` must be absolute or start with `~/` on `%s`", cwd, host)
 	}
@@ -904,7 +904,7 @@ func parseSendInput(args []string) (sendInputArgs, error) {
 			return "", false, nil
 		}
 		if *i+1 >= len(args) {
-			return "", true, usageError{fmt.Errorf("a value is required for '%s <%s>' but none was supplied", flag, strings.ToUpper(strings.TrimPrefix(flag, "--")))}
+			return "", true, usageError{fmt.Errorf("a value is required for '%s <%s>' but none was supplied", flag, strings.ToUpper(strings.TrimLeft(flag, "-")))}
 		}
 		*i++
 		return args[*i], true, nil
@@ -937,6 +937,13 @@ func parseSendInput(args []string) (sendInputArgs, error) {
 			continue
 		}
 		if v, ok, err := value(&i, arg, "--host"); ok || err != nil {
+			in.host = v
+			if err != nil {
+				return in, err
+			}
+			continue
+		}
+		if v, ok, err := value(&i, arg, "-H"); ok || err != nil {
 			in.host = v
 			if err != nil {
 				return in, err

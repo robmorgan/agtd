@@ -9,6 +9,9 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	"agtd.sh/internal/protocol"
+	"agtd.sh/internal/transport"
 )
 
 // parse finds the command args name and parses its flags, as Execute
@@ -38,6 +41,7 @@ func TestCommandsParse(t *testing.T) {
 	}{
 		{[]string{"new", "fix-failing-tests"}, "agt new", []string{"fix-failing-tests"}, nil},
 		{[]string{"new", "--cwd", "/tmp", "--agent", "codex", "--workspace", "mono", "x"}, "agt new", []string{"x"}, map[string]string{"cwd": "/tmp", "agent": "codex", "workspace": "mono"}},
+		{[]string{"new", "-w", "mono", "-C", "svc", "dev/x"}, "agt new", []string{"dev/x"}, map[string]string{"cwd": "svc", "workspace": "mono"}},
 		{[]string{"rm", "demo"}, "agt rm", []string{"demo"}, nil},
 		{[]string{"kill", "--rm", "demo"}, "agt kill", []string{"demo"}, map[string]string{"rm": "true"}},
 		{[]string{"detach"}, "agt detach", nil, nil},
@@ -54,6 +58,7 @@ func TestCommandsParse(t *testing.T) {
 		{[]string{"daemon", "upgrade"}, "agt daemon upgrade", nil, nil},
 		{[]string{"host", "add", "dev", "10.0.0.1:7433", "--fingerprint", "SHA256:x"}, "agt host add", []string{"dev", "10.0.0.1:7433"}, map[string]string{"fingerprint": "SHA256:x"}},
 		{[]string{"--host", "dev", "ls"}, "agt list", nil, map[string]string{"host": "dev"}},
+		{[]string{"-H", "dev", "ls"}, "agt list", nil, map[string]string{"host": "dev"}},
 		{[]string{"runtime", "demo"}, "agt runtime", []string{"demo"}, nil},
 		{[]string{"diff", "demo"}, "agt diff", []string{"demo"}, nil},
 		{[]string{"diff", "--stat", "dev/demo"}, "agt diff", []string{"dev/demo"}, map[string]string{"stat": "true"}},
@@ -80,15 +85,18 @@ func TestSendInputArguments(t *testing.T) {
 	for _, tc := range []struct {
 		args          []string
 		session, data string
-		source        string
+		source, host  string
 	}{
-		{[]string{"demo", "hello", "world"}, "demo", "hello world", ""},
-		{[]string{"demo", "-n", "--flag", "x"}, "demo", "-n --flag x", ""},
-		{[]string{"--source-session-id", "other", "demo", "hi"}, "demo", "hi", "other"},
-		{[]string{"--source-session-id=other", "demo", "--", "-x"}, "demo", "-x", "other"},
+		{[]string{"demo", "hello", "world"}, "demo", "hello world", "", ""},
+		{[]string{"demo", "-n", "--flag", "x"}, "demo", "-n --flag x", "", ""},
+		{[]string{"--source-session-id", "other", "demo", "hi"}, "demo", "hi", "other", ""},
+		{[]string{"--source-session-id=other", "demo", "--", "-x"}, "demo", "-x", "other", ""},
+		{[]string{"--host", "dev", "demo", "hi"}, "demo", "hi", "", "dev"},
+		{[]string{"-H", "dev", "demo", "-H", "x"}, "demo", "-H x", "", "dev"},
+		{[]string{"-H=dev", "demo", "hi"}, "demo", "hi", "", "dev"},
 	} {
 		in, err := parseSendInput(tc.args)
-		if err != nil || in.session != tc.session || strings.Join(in.data, " ") != tc.data || in.source != tc.source {
+		if err != nil || in.session != tc.session || strings.Join(in.data, " ") != tc.data || in.source != tc.source || in.host != tc.host {
 			t.Errorf("%v: %+v %v", tc.args, in, err)
 		}
 	}
@@ -152,6 +160,45 @@ func TestSessionAddressesSelectAHost(t *testing.T) {
 	x, y := "one/a", "two/b"
 	if _, err := takeSessionHost([]*string{&x, &y}); err == nil || !strings.Contains(err.Error(), "different hosts") {
 		t.Fatalf("conflict: %v", err)
+	}
+}
+
+// `agt new HOST/NAME` starts NAME on HOST: the address picks the host
+// before the request is built, so the name is sent without its prefix and
+// the cwd is checked as a path on that host.
+func TestNewSessionAddressSelectsHost(t *testing.T) {
+	a := &app{paths: testClient(t).paths}
+	if err := os.MkdirAll(filepath.Dir(a.paths.HostsPath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const fp = "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU"
+	if err := transport.AddHost(a.paths.HostsPath(), transport.Host{Name: "dev", Address: "10.0.0.1:7433", Fingerprint: fp}); err != nil {
+		t.Fatal(err)
+	}
+	stop := errors.New("stop before dialing")
+	build := func(addr, cwd, workspace string) (*client, *protocol.CreateSession, error) {
+		name := addr
+		var req *protocol.CreateSession
+		c, err := a.connect([]*string{&name}, "", func(c *client) (err error) {
+			if req, err = c.newSessionRequest(name, cwd, "", workspace); err != nil {
+				return err
+			}
+			return stop
+		})
+		if c == nil {
+			c = a.client
+		}
+		return c, req, err
+	}
+	c, req, err := build("dev/x", "", "mono")
+	if !errors.Is(err, stop) || c.host == nil || c.host.Name != "dev" || req.Name == nil || *req.Name != "x" || *req.Workspace != "mono" {
+		t.Fatalf("dev/x: %v %+v %+v", err, c.host, req)
+	}
+	if _, _, err := build("dev/x", "", ""); err == nil || !strings.Contains(err.Error(), "needs -w/--workspace") {
+		t.Fatalf("no directory: %v", err)
+	}
+	if _, _, err := build("nosuch/x", "", "mono"); err == nil || !strings.Contains(err.Error(), "unknown host `nosuch`") {
+		t.Fatalf("unknown host: %v", err)
 	}
 }
 
