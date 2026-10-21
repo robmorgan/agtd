@@ -84,6 +84,18 @@ func TestFieldFixtures(t *testing.T) {
 				"longword": {rows: []string{strings.Repeat("k", 119), strings.Repeat("k", 11)}, col: 11, rowBelow: 1},
 			},
 		},
+		{
+			// pi --tui-mode fullscreen: the same box on the alternate screen.
+			name: "pi-fullscreen", profile: fieldProfileFor("", "pi", ""), textCol: 0, width: 119, growsUp: true, inverseCursor: true,
+			marks: map[string]fieldExpectation{
+				"idle":     {rows: []string{""}, col: 0},
+				"typed":    {rows: piTypedRows, col: 57, rowBelow: 1},
+				"newline":  {rows: append(append([]string(nil), piRows...), "second line"), col: 11, rowBelow: 2},
+				"cleared":  {rows: []string{""}, col: 0},
+				"pasted":   {rows: pasted, col: 10, rowBelow: 2},
+				"longword": {rows: []string{strings.Repeat("k", 119), strings.Repeat("k", 11)}, col: 11, rowBelow: 1},
+			},
+		},
 	} {
 		t.Run(agent.name, func(t *testing.T) {
 			data, marks := loadFieldFixture(t, agent.name)
