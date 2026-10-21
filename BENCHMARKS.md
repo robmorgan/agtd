@@ -388,6 +388,40 @@ The relay in `internal/transport/transporttest` has a one-way delay knob (`Delay
 black-hole and rebind ones, so the end-to-end tests run the echo at a distant host's round trip on
 loopback (`TestLocalEchoOverDelayedRelay`: 150 ms each way, and the keys are drawn within 150 ms).
 
+### Screen frames against raw output
+
+The same measurements with the screen sent as frames (`attach-frames`, ARCHITECTURE.md "Screen
+frames"; `agt bench echo --mode frames|raw`), on 2026-10-20 with the frames build on both ends:
+
+| Link | Program | Mode | echo p50 | confirmed p50 | output per key |
+|---|---|---|---|---|---|
+| local, Unix socket | Claude Code | raw | 4.2 ms | 45.8 ms | 69 B |
+| local, Unix socket | Claude Code | frames | 3.8 ms | 8.8 ms | 15 B |
+| sfo, QUIC 332 ms | bash | raw | 271 ms | 550 ms | 50 B |
+| sfo, QUIC 332 ms | bash | frames | 273 ms | 597 ms | 122 B |
+| sfo, QUIC 332 ms | Claude Code | raw | 258 ms | 512 ms | 124 B |
+| sfo, QUIC 332 ms | Claude Code | frames | 274 ms | 553 ms | 15 B |
+
+* The echo costs the same round trip either way. Locally the field's confirmation drops from 46 ms
+  to 9 ms, since the field rides on the frame built for the request instead of waiting for output
+  to settle; remotely it is a round trip in both modes.
+* Claude Code streaming a 500-word answer on sfo: 48 KB in 71 frames over 50 s, 0.9 KB/s, against
+  210 KB at 4.1 KB/s raw. A key costs 15 B of frame against 124 B of redraw. A shell's one-line
+  echo costs more as a frame (the whole prompt row) than as raw bytes.
+* With one frame in flight a shell's echo often took two round trips: its line editor writes a
+  typed word in several pieces, the first made a frame and the rest waited for the
+  acknowledgement (shell echo p50 462 ms, confirmation 792 ms). Two frames in flight brought it
+  back to one round trip; that is `frameWindow`.
+* A 200 KB burst from bash reached a frame client as 51 KB in 3 frames (0 resyncs): rows that
+  scroll past a screen between frames are carried with their contents up to `frameMaxHistory`
+  (1000) per frame, and at the session's scrollback cap the scroll can only be inferred from the
+  rows, so a burst of identical rows loses most of its scrollback on the client. `agt history`
+  has it.
+* Replaying the recorded streams (`TestFramesReplayStreams`), bytes of rows per byte of output:
+  Codex 0.07, Claude Code 0.18, pi 0.14, a shell 0.77, Vim 0.77, Neovim 1.5 (it restyles whole
+  rows), clang's scrolling output 1.1. One frame per 2 KB chunk; fewer, larger frames over a slow
+  link lower the ratio further.
+
 ## Terminal and worker
 
 In-process measurements of a session worker: the libghostty boundary, the reattach snapshot, PTY

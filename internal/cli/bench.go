@@ -40,6 +40,8 @@ type echoBenchOptions struct {
 	field    bool
 	burst    int
 	watch    time.Duration
+	// mode forces frames or raw output ("" leaves it to [attach] mode).
+	mode string
 }
 
 func (a *app) benchCommands() *cobra.Command {
@@ -50,8 +52,15 @@ func (a *app) benchCommands() *cobra.Command {
 		if err != nil {
 			return err
 		}
+		switch opts.mode {
+		case "", "frames", "raw":
+			c.attachMode = opts.mode
+		default:
+			return fmt.Errorf("--mode must be frames or raw")
+		}
 		return c.benchEcho(id, opts, os.Stdout)
 	})
+	echo.Flags().StringVar(&opts.mode, "mode", "", "how the screen arrives: frames or raw (default: [attach] mode)")
 	echo.Flags().IntVar(&opts.count, "count", 20, "markers to type")
 	echo.Flags().DurationVar(&opts.interval, "interval", 250*time.Millisecond, "pause between markers")
 	echo.Flags().BoolVar(&opts.field, "field", false, "also time each marker's confirmation by the input field")
@@ -89,7 +98,11 @@ func (c *client) benchEcho(id string, opts echoBenchOptions, out io.Writer) erro
 	if c.host != nil {
 		where = c.host.Name
 	}
-	fmt.Fprintf(out, "session %s on %s (%s)\n", id, where, attached.AttachID)
+	how := "raw output"
+	if attached.HasFeature(protocol.CapAttachFrames) {
+		how = "frames"
+	}
+	fmt.Fprintf(out, "session %s on %s (%s), %s\n", id, where, attached.AttachID, how)
 	b := &echoBench{stream: stream}
 	// Let the attach's output settle.
 	if err := b.drain(300 * time.Millisecond); err != nil {
@@ -117,7 +130,13 @@ func (c *client) benchEcho(id string, opts echoBenchOptions, out io.Writer) erro
 					return err
 				}
 				var f *protocol.Field
-				if err := b.await(func(r *protocol.Response) bool { f = r.Field; return f != nil }, benchTimeout); err != nil {
+				if err := b.await(func(r *protocol.Response) bool {
+					f = r.Field
+					if f == nil && r.AttachFrame != nil {
+						f = r.AttachFrame.Field
+					}
+					return f != nil
+				}, benchTimeout); err != nil {
 					return fmt.Errorf("the field was not answered: %w", err)
 				}
 				if f.Found && slices.ContainsFunc(f.Rows, func(row string) bool { return strings.Contains(row, m) }) {
@@ -195,6 +214,11 @@ func (b *echoBench) marker(text string) func(*protocol.Response) bool {
 			data = r.PtyOutput.Data
 		case r.AttachResync != nil:
 			data = r.AttachResync.Data
+		case r.AttachFrame != nil:
+			for _, row := range r.AttachFrame.Rows {
+				data = append(data, row.VT...)
+				data = append(data, '\n')
+			}
 		default:
 			return false
 		}
@@ -243,8 +267,22 @@ func (b *echoBench) await(done func(*protocol.Response) bool, timeout time.Durat
 				b.bytes += len(f.resp.AttachResync.Data)
 				b.frames++
 				b.resyncs++
+			case f.resp.AttachFrame != nil:
+				for _, row := range f.resp.AttachFrame.Rows {
+					b.bytes += len(row.VT)
+				}
+				for _, row := range f.resp.AttachFrame.History {
+					b.bytes += len(row)
+				}
+				b.frames++
 			}
-			if done(f.resp) {
+			finished := done(f.resp)
+			if f.resp.AttachFrame != nil {
+				if err := b.stream.send(&protocol.Request{AttachFrameAck: &protocol.FrameAck{Seq: f.resp.AttachFrame.Seq}}); err != nil {
+					return err
+				}
+			}
+			if finished {
 				return nil
 			}
 		}

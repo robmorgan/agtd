@@ -1084,12 +1084,63 @@ func TestLocalEchoOverDelayedRelay(t *testing.T) {
 	if drawn := time.Since(start); drawn > 150*time.Millisecond {
 		t.Fatalf("the echo took %v to draw; a round trip is 300 ms", drawn)
 	}
-	// The shell's echo confirms the keys and the screen is repainted.
-	m = tm.expect(m, "\x1b[?2026h\x1b[2J\x1b[H")
+	// A remote attachment gets the screen as frames: the shell's echo
+	// arrives as the prompt row painted in place, a round trip later,
+	// confirming the keys.
+	m = tm.expect(m, "\x1b[0m\x1b[K$ echo far-$((2+3))")
 	tm.write("\r")
 	tm.expect(m, "far-5")
 	tm.write("\x1c")
 	tm.wait()
+}
+
+// The screen arrives as frames when [attach] mode asks for them: rows are
+// painted in place, rows that scroll off go into the terminal's own
+// scrollback, a resize repaints at the new size, the alternate screen is
+// mirrored, and a reattach after a daemon restart repaints from a full
+// frame.
+func TestFramesEndToEnd(t *testing.T) {
+	e := newEnv(t, "\n[attach]\nmode = \"frames\"\n")
+	tm := e.start("new", "demo")
+	m := tm.expect(0, "attached to demo")
+	m = tm.expect(m, "\x1b[1;1H\x1b[0m\x1b[K$ ")
+	tm.write("echo frame-$((1+1))\r")
+	m = tm.expect(m, "frame-2")
+	// More lines than the screen holds (30 rows): the rows leaving are
+	// pushed into the scrollback with line feeds at the bottom row.
+	tm.write("seq 1 40\r")
+	m = tm.expect(m, "\x1b[30;1H\n")
+	m = tm.expect(m, "\x1b[0m\x1b[K40")
+	// A resize is a full frame at the new size, after a clear.
+	if err := pty.Setsize(tm.pty, &pty.Winsize{Rows: 24, Cols: 80}); err != nil {
+		t.Fatal(err)
+	}
+	m = tm.expect(m, "\x1b[2J")
+	m = tm.expect(m, "\x1b[24;1H")
+	// The alternate screen is entered and left as the program does.
+	tm.write("printf '\\033[?1049hTOP'; sleep 0.3; printf '\\033[?1049l'\r")
+	m = tm.expect(m, "\x1b[?1049h")
+	m = tm.expect(m, "TOP")
+	m = tm.expect(m, "\x1b[?1049l")
+	// A daemon restart cuts the attachment; the reattach repaints from a
+	// full frame and typing goes on. So does a live handoff.
+	e.mustRun("agt", "daemon", "restart")
+	m = tm.expect(m, "reconnecting")
+	m = tm.expect(m, "\x1b[1;1H\x1b[0m\x1b[K")
+	tm.write("echo after-$((2+2))\r")
+	m = tm.expect(m, "after-4")
+	if out := e.mustRun("agt", "daemon", "upgrade"); !strings.Contains(out, "Session demo now runs") {
+		t.Fatalf("upgrade did not hand the session off:\n%s", out)
+	}
+	m = tm.expect(m, "reconnecting")
+	m = tm.expect(m, "\x1b[1;1H\x1b[0m\x1b[K")
+	tm.write("echo handed-$((3+3))\r")
+	m = tm.expect(m, "handed-6")
+	tm.write("\x1c")
+	tm.wait()
+	if out := e.mustRun("agt", "history", "demo"); !strings.Contains(out, "frame-2") || !strings.Contains(out, "after-4") {
+		t.Fatalf("history:\n%s", out)
+	}
 }
 
 // agt bench echo measures a session: markers typed and echoed, confirmed
@@ -1097,10 +1148,16 @@ func TestLocalEchoOverDelayedRelay(t *testing.T) {
 func TestBenchEcho(t *testing.T) {
 	e := newEnv(t, "")
 	e.startAndDetach("demo")
-	out := e.mustRun("agt", "bench", "echo", "demo", "--count", "3", "--interval", "50ms", "--field", "--burst", "20000", "--watch", "200ms")
-	for _, want := range []string{"session demo on local", "echo        n=3", "confirmed   n=3", "output/key", "burst       20000 B in", "watch "} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("no %q in:\n%s", want, out)
+	for _, mode := range []string{"raw", "frames"} {
+		out := e.mustRun("agt", "bench", "echo", "demo", "--mode", mode, "--count", "3", "--interval", "50ms", "--field", "--burst", "20000", "--watch", "200ms")
+		how := "raw output"
+		if mode == "frames" {
+			how = "frames"
+		}
+		for _, want := range []string{"session demo on local (attach-", "), " + how, "echo        n=3", "confirmed   n=3", "output/key", "burst       20000 B in", "watch "} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("%s: no %q in:\n%s", mode, want, out)
+			}
 		}
 	}
 }
