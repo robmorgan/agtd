@@ -638,7 +638,11 @@ wins (`blocked` > `error` > `working` > `done` > `idle`), so one blocked shard o
 program blocks the session and one still working keeps it working however many are done.
 Transitions record the events above (repeats within 10 seconds are dropped; a blocked program
 asking something new re-raises). Typing into the session counts a blocked record as answered —
-silently — until the program reports again. There is no inferred state: a session whose program
+silently — until the program reports again. Input made only of reports the client terminal sends
+for a gesture or by itself (a wheel scroll, mouse motion, a focus change, a key release, a CSI
+reply to a query) reaches the program but is not typing: it answers nothing and is not activity
+(`isPassiveInput`), though it does count as the user having seen a done or error record; a click
+or any key is typing. There is no inferred state: a session whose program
 never reports shows as plainly `working` while it runs, with no judgment attached. Bells and
 desktop notifications are recorded as info-level events for observability only (facts about what
 the terminal emitted, useful when a reporter misbehaves), and never raise attention; the bell/
@@ -1018,15 +1022,25 @@ the agent after at most `[composer] flush_after` (50 ms; `0` sends each key on i
 keys every editor handles the same way are predicted: printable text, Backspace, Delete, Left,
 Right and the Shift-Enter and Alt-Enter newlines (measured: Ctrl-J is a newline in Claude Code
 and Codex but nothing in pi, and Ctrl-Enter submits in Claude Code, is a newline in Codex and
-nothing in pi, so neither is predicted). Any other key (Enter, Tab, Esc, Ctrl-C, Up, Down, ...)
-goes at once, with the batch before it, and the echo pauses until the field is seen again, so the
-agent's own menus, completions and submit work as they always did, one round trip late. The drawing is a
-prediction; the agent is the authority. The CLI keeps the states it predicted, each with its key,
-and an observed field that equals one of them confirms the keys up to it; the keys after it are
-replayed over the observed field (the agent may have wrapped or placed the cursor differently),
-and a field that equals none means the agent did something unpredicted, so its field is adopted
-and the predictions dropped: one visible correction. At most 512 predictions are kept; past that
-the echo lets keys through raw.
+nothing in pi, so neither is predicted). Any other key (Enter, Tab, Esc, Ctrl-C, Up, Down, a
+mouse click, ...) goes at once, with the batch before it, and the echo pauses until the field is
+seen again, so the agent's own menus, completions and submit work as they always did, one round
+trip late. Input that edits no text (a wheel scroll, mouse motion, a focus change, a key
+release, the terminal's CSI reply to a query the agent sent) goes on in order behind the batch,
+or at once with none, without pausing: Claude Code, Codex and pi's fullscreen mode turn on SGR
+mouse reporting on the alternate screen and scroll their transcript on the wheel while the input
+box stays where it is, and the worker leaves query replies to an attached client terminal (OSC
+and DCS replies still decode as keys and pause the echo, though their bytes reach the agent). A
+focus report that repeats the last one sent within half a second of a repaint is held back: a
+repaint turns focus reporting back on (twice for a fullscreen agent), and Ghostty answers that
+with the focus even when it did not change; a change always goes, and so does a repeat at any
+other time. A scroll made while typed keys are unconfirmed shows with the repaint once they are
+(output is held until then, below). The drawing is a prediction; the agent is the authority. The
+CLI keeps the states it predicted, each with its key, and an observed field that equals one of
+them confirms the keys up to it; the keys after it are replayed over the observed field (the
+agent may have wrapped or placed the cursor differently), and a field that equals none means the
+agent did something unpredicted, so its field is adopted and the predictions dropped: one
+visible correction. At most 512 predictions are kept; past that the echo lets keys through raw.
 
 **Holding and repainting.** While keys are unconfirmed the attachment's output is dropped by the
 CLI (the agent's own redraw of the field would fight the drawing), and counted. The field is then
@@ -1279,7 +1293,11 @@ formatter's):
 * **The window title and working directory** (OSC 0/2 and 7), deliberately: the CLI sets its own
   title, and the directory is a path on the session's host.
 * **The client's own state.** The snapshot assumes a terminal in its default state: modes are
-  emitted only where they differ from the defaults, and a block cursor is not emitted. The CLI
-  clears the screen first and resets the common modes when it detaches.
+  emitted only where they differ from the defaults, and a block cursor is not emitted. Before
+  every paint (attach, reattach, resync, the overlay closing, the local echo's repaint) the CLI
+  turns mouse reporting off and clears the screen, so a mouse mode the agent turned off while
+  its output was held or missed does not stay on; focus reporting is left alone, since Ghostty
+  reports the focus whenever it is turned on (`attachRepaintSequence`). It resets the common
+  modes when it detaches.
 * **Other clients' sizes.** The snapshot fits the session's size, which the size owner set; a
   pending client at another size gets output laid out for that size (see "Size ownership").

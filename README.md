@@ -220,7 +220,7 @@ printf '\e]7501;state=blocked:kind=permission:msg=%s\e\\' "$(printf 'Deploy?' | 
 ```
 
 Status reports are the only attention signal. Typing into the session counts a `blocked` report
-as answered until the program reports again. Bells and desktop notifications (OSC 9, OSC 777)
+as answered until the program reports again; scrolling or moving the mouse over it does not. Bells and desktop notifications (OSC 9, OSC 777)
 are recorded as info-level events — visible in `agt events` as facts about what the terminal
 emitted — but raise no attention and trigger no `--notify`: `agtd` stopped inferring "needs
 you" from them when the agent harnesses began reporting status themselves.
@@ -505,7 +505,9 @@ a shell prompt alike, and never draws where it cannot be sure: in a menu, a perm
 an editor, keys go raw as before. Text, Backspace, Delete, Left, Right and the Shift-Enter or
 Alt-Enter newline are drawn locally; Enter, Tab, Esc, Ctrl-C, Ctrl-J, Ctrl-Enter and the other
 keys are never predicted, so the agent's own menus, completions and history work as they always
-did, one round trip late. The agent's rendering replaces the drawing as soon as it arrives; the one thing you may
+did, one round trip late. Mouse input reaches the agent as it is, so in a fullscreen agent
+(Claude Code, Codex, `pi --tui-mode fullscreen`) the wheel scrolls its transcript while you type;
+a scroll made in the middle of typing shows once the agent has drawn your keys. The agent's rendering replaces the drawing as soon as it arrives; the one thing you may
 notice is that the screen behind the box stands still for about a round trip after you pause
 typing. ARCHITECTURE.md, "The Input Field And Local Echo", has the details.
 
