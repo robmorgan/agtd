@@ -85,7 +85,7 @@ func TestAttachFeaturesAndSessionUID(t *testing.T) {
 // without waiting for its dead connection to fail.
 func TestReplacingAnAttachmentDropsItAtOnce(t *testing.T) {
 	h := startWorker(t)
-	all := protocol.AttachCapabilities()
+	all := rawAttachCapabilities()
 	old, attached := h.attachWith(protocol.AttachSession{Features: all})
 
 	// Without the UID, a replace is ignored: ids are only unique within
@@ -214,7 +214,7 @@ func TestRepeatedReattachLeaksNothing(t *testing.T) {
 	h.eventually("warm-up attachment to go", func() bool { return len(h.attachments()) == 0 })
 	baseGoroutines, baseFDs := settle()
 
-	all := protocol.AttachCapabilities()
+	all := rawAttachCapabilities()
 	var prev *client
 	for i := range 50 {
 		req := protocol.AttachSession{Features: all, ExpectUID: h.uid}

@@ -400,7 +400,7 @@ request token the daemon recognises (see "Duplicate And Replayed Requests"). Oth
 
 The daemon's tests run full sessions over QUIC, and over a TCP stand-in, to keep the seam honest.
 The QUIC ones also run through a UDP relay standing in for the network
-(`internal/transport/transporttest`), which can black-hole traffic, block new connections, or move
+(`internal/transport/transporttest`), which can black-hole traffic, delay it by a chosen one-way time, block new connections, or move
 a client to a new address: they cover an address change mid-attachment, a hard network switch, an
 outage longer than the dead-peer timeout, a client that stops reading while its session writes
 about 67 MB (checking the daemon's heap and the worker's RSS stay flat), and fifty abrupt reconnects in a row, counting goroutines, file descriptors, streams and attachments
@@ -501,6 +501,7 @@ features both listed. Today there is one protocol version (1), and these capabil
 | `attach-size-owner` | attach stream: `AttachSession.TakeSize`, `Attached.SizeOwner`, `AttachTakeSize`, `AttachLeave` and `AttachSizeOwner`; attachment records carry their sizes after the list (see "Size ownership") |
 | `attach-field` | attach stream: `AttachField` asks where the program's input field is, answered with `Field` (see "The input field and local echo") |
 | `terminal-colors` | `CreateSession.Colors` and, on an attach stream, `AttachSession.Colors` carry the client terminal's default colours; the worker answers the program's OSC 10 and 11 queries with the most recent ones itself (see "Terminal queries") |
+| `attach-frames` | attach stream: the screen arrives as `AttachFrame`s instead of `PtyOutput`, each acknowledged with `AttachFrameAck`; `Attached.Snapshot` holds the scrollback rows only and `AttachSnapshot` is answered with a full frame (see "Screen frames") |
 
 The protocol grows without breaking older peers this way: a new message kind, or a field appended
 to the end of an existing message or struct (a session record, even inside a list), comes with a
@@ -558,13 +559,14 @@ tokened request after a lost remote connection (see "Duplicate And Replayed Requ
 | `GetDaemonStats` | `DaemonStats` (`runtime-stats`) | request |
 | `SubscribeEvents` | `Event`, repeated | events |
 | `AttachSession` | `Attached` (or `SessionEnded` for a finished session), then `PtyOutput`, `AttachSnapshot`, `AttachResync`, `AttachSizeOwner`, `Field`, and finally `SessionEnded`, `EndOfStream`, `SessionRestarting` or `Error` | attach |
-| `AttachField` | `Field` (`attach-field`), on an attach stream | attach |
+| `AttachField` | `Field` (`attach-field`), on an attach stream; under `attach-frames` the next `AttachFrame` carries the field instead | attach |
+| `AttachFrameAck` | nothing; the next `AttachFrame` once the screen changes (`attach-frames`), on an attach stream | attach |
 | `HandoffSession` | `HandedOff` (from the new image) | request, agtd to a worker only |
 
 Any request may instead be answered with `Error`. Kinds are numbered by area so that parallel work
 does not collide: 1-19 and 101-118 are the base protocol, 30-39 and 130-139 git state and
 artifacts, 50-59 and 150-159 attach streams (`AttachTakeSize` is 50, `AttachLeave` 51, `AttachField` 52,
-`AttachResync` 150, `AttachSizeOwner` 151, `Field` 152), 60-69 and 160-169 worker handoff.
+`AttachResync` 150, `AttachSizeOwner` 151, `Field` 152, `AttachFrameAck` 53, `AttachFrame` 153), 60-69 and 160-169 worker handoff.
 
 `attach` is the bidirectional case. After the initial `AttachSession` request and `Attached`
 response (which carries a snapshot of the current screen), the worker streams `PtyOutput` frames
@@ -1065,6 +1067,48 @@ that moves its box while the user types is corrected at the next field. Keys typ
 reconnect are still dropped. Frames (the next phase of the design) remove the hold and the
 repaint by composing the drawing over the agent's live screen.
 
+## Screen Frames
+
+A remote attachment is a round trip away from the program, and the raw output stream serves it
+poorly: every byte the program writes crosses the link, a client that cannot keep up is dropped
+and resynced with a visible clear, and the local echo (above) has to hold the output back while
+its keys are unconfirmed. Under `attach-frames` the worker sends the screen as frames instead
+(`internal/worker/frames.go`): the rows that changed since the last frame, as the VT bytes
+libghostty's formatter writes for each row, with the cursor, the terminal state the client must
+mirror (modes and tab stops, keyboard state, changed colours, the cursor's shape), bells and
+notifications, and, when asked, the input field. The client paints each row by absolute position
+(`internal/screen`, pure Go) inside synchronized output and acknowledges the frame; the worker
+builds the next one when the acknowledgement has arrived and the screen has changed since, at
+least 4 ms after the last, on the owner goroutine at a sequence boundary. At most two frames are
+in flight per attachment (one would make a change landing just after a frame wait a whole round
+trip, and a shell echoes a typed word in several writes): a slow link gets fewer, fresher frames,
+never a queue of stale output and never a drop, and the worker keeps one screen's worth of row
+cache per attachment and nothing else. `agt
+attach` asks for frames from a remote daemon and takes the raw output from the local one (`[attach]
+mode`, "auto"; "frames" or "raw" force it), and `agt bench echo --mode` measures either.
+
+A frame is one formatter run over the visible screen (19 µs for 200x50), split at the CRLFs the
+formatter puts between rows; the formatter resets the pen at each row, so a row paints alone.
+Rows the primary screen scrolled into history since the last frame are counted from the
+scrollback's growth (or, at the scrollback's cap, found by matching the rows shifted) and sent
+with their final contents (`Scrolled`, `History`): the client paints them over its top rows and
+scrolls with line feeds at the bottom row, so they land in its own scrollback as the program last
+wrote them. Modes travel as the formatter's prefix and the client writes only the changes (a
+repeated switch to the alternate screen would clear it); a full frame follows an attach, a resize,
+a switch of screens or an `AttachSnapshot`. `Attached.Snapshot` carries the scrollback rows only,
+ended by line feeds that push them off a cleared screen, so the terminal's native scrollback
+starts full before the first full frame. The field is read for a frame when the client asked for
+it outright (`AttachField`), or when it asked in its acknowledgements (`FrameAck.Field`, while it
+has an echo) and either the program has settled (`fieldSettle`) or the client typed within the last
+500 ms, so keys typed during a streaming answer are still confirmed. The echo composes over frames:
+while keys are unconfirmed its predicted rows are painted after each frame's rows, and the frame's
+field reconciles the queue, so output is never held and the screen behind the typing keeps moving.
+A frame client's state is not handed over: after a worker handoff or a daemon restart the client
+reattaches and starts from a full frame. The recorded streams in `internal/worker/testdata` are
+replayed frame by frame through the painter into a second libghostty terminal and compared cell
+for cell (`TestFramesReplayStreams`); what differs is what the formatter cannot express (see "The
+reattach snapshot").
+
 ## Duplicate And Replayed Requests
 
 A client whose connection dies after it sent a request cannot know whether the daemon acted on it.
@@ -1117,7 +1161,10 @@ a fresh snapshot taken on the owner goroutine, discarding what was queued, which
 boundary like any other snapshot. The CLI clears the screen and paints it, so the screen is correct
 again however much was dropped; with the overlay open it ignores it, since closing the overlay
 repaints from a snapshot anyway. If output keeps arriving faster than the client takes it, it gets
-a resync each time it drains, which keeps it as current as its link allows. A client that stalls
+a resync each time it drains, which keeps it as current as its link allows. A frame client
+(`attach-frames`, see "Screen frames") has no queue to overflow: it is sent one frame at a time
+and the next is built from the screen as it is once all but the newest are acknowledged, so it
+falls behind by at most two frames and is never dropped or resynced. A client that stalls
 outright may do so with a resync already in its blocked write; when it reads again it gets that
 stale one first and, since it lagged meanwhile, a fresh one right after. A client that did not
 ask for resyncs (an older CLI) keeps the old behaviour: its screen is wrong until the program
@@ -1282,6 +1329,10 @@ formatter's):
 * **Soft wraps and hyperlinks of text already on screen.** Every row is written with a line
   break after it, so a wrapped line comes back as separate lines that a later resize does not
   reflow; hyperlinks (OSC 8) are only emitted for the pen, not for text.
+* **Blank cells' styles.** The formatter writes a gap before later text as spaces with the pen of
+  the cell before the gap, and writes nothing for a row of cells erased with a background colour,
+  so a gap can carry a colour or an inverse it did not have, and such a row comes back with the
+  default background. Frames ("Screen frames") have the same traits, being the same formatting.
 * **Text printed before grapheme clustering (mode 2027) was switched.** The mode decides how
   codepoints join into cells, cells do not record which mode made them, and the snapshot sets
   the current mode before the contents, so text printed under the other mode can split or join

@@ -777,6 +777,9 @@ func (rt *runtime) serveAttach(conn transport.Stream, reader *bufio.Reader, req 
 	// field is (field.go).
 	hasField := slices.Contains(features, protocol.CapAttachField)
 	takeSize := sizeOwner && req.TakeSize
+	// A client that asked for CapAttachFrames gets the screen as frames
+	// instead of the raw output (frames.go).
+	frames := slices.Contains(features, protocol.CapAttachFrames)
 	// A client that asked for CapTerminalColors may report its terminal's
 	// default colours, which answer the program's colour queries from now
 	// on (colors.go).
@@ -795,7 +798,7 @@ func (rt *runtime) serveAttach(conn transport.Stream, reader *bufio.Reader, req 
 	var ownership protocol.SizeOwnership
 	if err := rt.owner.doAtGround(func(s *ownerState) error {
 		var err error
-		att, err = s.attach(fmt.Sprintf("%s-%d", req.Kind, seq), req.Kind, req.Geometry, replaces, initial, takeSize, sizeOwner)
+		att, err = s.attach(fmt.Sprintf("%s-%d", req.Kind, seq), req.Kind, req.Geometry, replaces, initial, takeSize, sizeOwner, frames)
 		if err == nil {
 			ownership = s.ownership(att.attachID)
 			if colors != nil {
@@ -861,11 +864,65 @@ func (rt *runtime) serveAttach(conn transport.Stream, reader *bufio.Reader, req 
 		}
 	}()
 
+	// Frames: at most frameWindow unacknowledged, the next once the screen
+	// changed, at least frameFloor after the last (frames.go).
+	var outputCh <-chan []byte
+	var frameWake <-chan struct{}
+	var frameTimer <-chan time.Time
+	sentSeq, ackedSeq, lastFrame := uint32(0), uint32(0), time.Time{}
+	if att.sub != nil {
+		outputCh = att.sub.ch
+	}
+	sendFrame := func() error {
+		var f *protocol.Frame
+		if err := rt.owner.doAtGround(func(s *ownerState) error {
+			a := s.attachments[att.attachID]
+			if a == nil || a.frames != att.frames {
+				return errors.New("the attachment has ended")
+			}
+			var err error
+			f, err = s.buildFrame(a, time.Now())
+			return err
+		}); err != nil {
+			return err
+		}
+		sentSeq, lastFrame = f.Seq, time.Now()
+		return protocol.WriteResponse(conn, &protocol.Response{AttachFrame: f})
+	}
+	maybeFrame := func() error {
+		if !frames || sentSeq-ackedSeq >= frameWindow || !att.frames.dirty.Load() {
+			return nil
+		}
+		if wait := frameFloor - time.Since(lastFrame); wait > 0 {
+			if frameTimer == nil {
+				frameTimer = time.After(wait)
+			}
+			return nil
+		}
+		return sendFrame()
+	}
+	if frames {
+		frameWake = att.frames.wake
+		att.frames.changed()
+		if err := maybeFrame(); err != nil {
+			return err
+		}
+	}
+
 	final := protocol.EndOfStreamResponse()
 loop:
 	for {
 		select {
-		case data := <-att.sub.ch:
+		case <-frameWake:
+			if err := maybeFrame(); err != nil {
+				return err
+			}
+		case <-frameTimer:
+			frameTimer = nil
+			if err := maybeFrame(); err != nil {
+				return err
+			}
+		case data := <-outputCh:
 			att.sub.took(data)
 			// Output was dropped while this client lagged, so what is
 			// queued no longer continues its screen. Getting here means
@@ -900,8 +957,10 @@ loop:
 		case <-att.restart:
 			// The client repaints from a fresh snapshot when it attaches
 			// again, but flush what it was sent so far anyway.
-			if err := drainOutput(conn, att.sub); err != nil {
-				return err
+			if att.sub != nil {
+				if err := drainOutput(conn, att.sub); err != nil {
+					return err
+				}
 			}
 			if canRestart {
 				final = &protocol.Response{SessionRestarting: &protocol.SessionRestarting{
@@ -913,12 +972,23 @@ loop:
 			// Flush output already queued for this client so the tail of
 			// the session is not lost behind SessionEnded; a client that
 			// lagged gets the final screen instead.
-			if resync && att.sub.lagged.Load() {
+			switch {
+			case frames:
+				// The final screen, whether or not the last frame was
+				// acknowledged: the stream ends after it.
+				if att.frames.dirty.Load() {
+					if err := sendFrame(); err != nil {
+						return err
+					}
+				}
+			case resync && att.sub.lagged.Load():
 				if err := rt.sendSnapshot(conn, att.sub, true, repaint); err != nil {
 					return err
 				}
-			} else if err := drainOutput(conn, att.sub); err != nil {
-				return err
+			default:
+				if err := drainOutput(conn, att.sub); err != nil {
+					return err
+				}
 			}
 			final = rt.endedResponse()
 			break loop
@@ -964,8 +1034,32 @@ loop:
 					final = protocol.ErrorResponsef("%v", err)
 					break loop
 				}
+			case in.req.AttachFrameAck != nil && frames:
+				if seq := in.req.AttachFrameAck.Seq; seq > ackedSeq && seq <= sentSeq {
+					ackedSeq = seq
+				}
+				att.frames.wantField.Store(in.req.AttachFrameAck.Field)
+				if err := maybeFrame(); err != nil {
+					return err
+				}
+			case in.req.AttachSnapshot != nil && frames:
+				// A full frame stands in for the snapshot.
+				if err := rt.owner.do(func(s *ownerState) error { att.frames.full = true; att.frames.changed(); return nil }); err != nil {
+					return err
+				}
+				if err := maybeFrame(); err != nil {
+					return err
+				}
 			case in.req.AttachSnapshot != nil:
 				if err := rt.sendSnapshot(conn, att.sub, false, repaint); err != nil {
+					return err
+				}
+			case in.req.AttachField != nil && frames:
+				// The next frame carries the field.
+				if err := rt.owner.do(func(s *ownerState) error { att.frames.askField = true; att.frames.changed(); return nil }); err != nil {
+					return err
+				}
+				if err := maybeFrame(); err != nil {
 					return err
 				}
 			case in.req.AttachField != nil && hasField:

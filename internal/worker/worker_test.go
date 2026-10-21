@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -99,6 +100,12 @@ func newRoot(t testing.TB) (string, *harness) {
 func startWorkerWith(t testing.TB, script string) *harness {
 	t.Helper()
 	return startWorkerArgs(t, script, nil)
+}
+
+// rawAttachCapabilities are the attach capabilities short of frames: the
+// tests of the raw output stream ask for these.
+func rawAttachCapabilities() []string {
+	return slices.DeleteFunc(protocol.AttachCapabilities(), func(c string) bool { return c == protocol.CapAttachFrames })
 }
 
 // startWorkerArgs is startWorkerWith with the creating terminal's colours.
