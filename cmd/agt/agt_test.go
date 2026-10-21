@@ -1001,8 +1001,9 @@ func TestLocalEchoEndToEnd(t *testing.T) {
 	m = tm.expect(m, "\x1b[?2026h")
 	m = tm.expect(m, "echo hi-$((1+2))")
 	// The echo holds the shell's own echo until the field confirms the
-	// keys, then repaints the screen from a snapshot, in one step.
-	m = tm.expect(m, "\x1b[?2026h\x1b[2J\x1b[H")
+	// keys, then repaints the screen from a snapshot, in one step, mouse
+	// reporting off first so the snapshot alone decides it.
+	m = tm.expect(m, "\x1b[?2026h\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[2J\x1b[H")
 	m = tm.expect(m, "\x1b[?2026l")
 	tm.write("\r")
 	m = tm.expect(m, "hi-3")

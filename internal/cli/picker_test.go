@@ -134,8 +134,9 @@ func TestPickerCreateAgentMenu(t *testing.T) {
 }
 
 func TestPickerDefaultAgents(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // no agent installed: claude is the default
 	p := testPicker(t)
-	if strings.Join(p.createAgents, ",") != "claude,codex" || p.defaultAgent != "claude" {
+	if strings.Join(p.createAgents, ",") != "claude,codex,pi" || p.defaultAgent != "claude" {
 		t.Fatalf("defaults: %v %q", p.createAgents, p.defaultAgent)
 	}
 	if got := orderedCreateAgents([]string{"codex", "claude", "zed"}, "claude"); strings.Join(got, ",") != "claude,codex,zed" {

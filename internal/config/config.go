@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"slices"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -115,9 +117,32 @@ const DefaultModelFlag = "--model"
 // configured agent is the default.
 const preferredDefaultAgent = "claude"
 
+// builtinAgents are the agents configured when there is no config.toml, in
+// picker order. Each runs the command of the same name.
+var builtinAgents = []string{"claude", "codex", "pi"}
+
+// detectDefaultAgent is the first built-in agent whose command is on PATH,
+// so a machine with only one of them installed starts it without
+// configuration. With none installed it is preferredDefaultAgent.
+func detectDefaultAgent() string {
+	for _, name := range builtinAgents {
+		if _, err := exec.LookPath(name); err == nil {
+			return name
+		}
+	}
+	return preferredDefaultAgent
+}
+
 // DefaultText is the config.toml written when none exists. It says the same
-// as the built-in defaults, so creating the file changes nothing.
-const DefaultText = `default_agent = "claude"
+// as the built-in defaults, so creating the file changes nothing, and it
+// fixes the default agent detected when it was written.
+func DefaultText() string {
+	return fmt.Sprintf(defaultTextFormat, detectDefaultAgent())
+}
+
+const defaultTextFormat = `# The agent "agt new" starts without --agent: the first of claude, codex
+# and pi that was installed when this file was written.
+default_agent = %q
 
 [agents.claude]
 command = "claude"
@@ -126,6 +151,11 @@ model_flag = "--model"
 
 [agents.codex]
 command = "codex"
+args = []
+model_flag = "--model"
+
+[agents.pi]
+command = "pi"
 args = []
 model_flag = "--model"
 
@@ -148,14 +178,15 @@ flush_after = "50ms"
 `
 
 func defaultConfig() *Config {
-	return &Config{
-		DefaultAgent: preferredDefaultAgent,
-		Agents: map[string]AgentConfig{
-			"claude": {Command: "claude"},
-			"codex":  {Command: "codex"},
-		},
-		agentOrder: []string{"claude", "codex"},
+	cfg := &Config{
+		DefaultAgent: detectDefaultAgent(),
+		Agents:       map[string]AgentConfig{},
+		agentOrder:   slices.Clone(builtinAgents),
 	}
+	for _, name := range builtinAgents {
+		cfg.Agents[name] = AgentConfig{Command: name}
+	}
+	return cfg
 }
 
 // Load reads path, falling back to the built-in defaults when the file does
@@ -216,7 +247,7 @@ func WriteDefault(path string) error {
 	if err != nil {
 		return fmt.Errorf("failed to write %s: %w", path, err)
 	}
-	if _, err := f.WriteString(DefaultText); err != nil {
+	if _, err := f.WriteString(DefaultText()); err != nil {
 		f.Close()
 		os.Remove(path)
 		return fmt.Errorf("failed to write %s: %w", path, err)

@@ -220,7 +220,7 @@ printf '\e]7501;state=blocked:kind=permission:msg=%s\e\\' "$(printf 'Deploy?' | 
 ```
 
 Status reports are the only attention signal. Typing into the session counts a `blocked` report
-as answered until the program reports again. Bells and desktop notifications (OSC 9, OSC 777)
+as answered until the program reports again; scrolling or moving the mouse over it does not. Bells and desktop notifications (OSC 9, OSC 777)
 are recorded as info-level events — visible in `agt events` as facts about what the terminal
 emitted — but raise no attention and trigger no `--notify`: `agtd` stopped inferring "needs
 you" from them when the agent harnesses began reporting status themselves.
@@ -276,7 +276,8 @@ Debug build parses PTY output at roughly 50 KB/s, which is slow enough to thrott
 `BenchmarkTerminalFeed` shows ~640 MB/s with ReleaseFast.
 
 Only libghostty needs cgo; `modernc.org/sqlite` is pure Go, so cross compiling `agtd` is `zig cc`
-plus `CGO_ENABLED=1` as described in the go-libghostty README.
+plus `CGO_ENABLED=1` as described in the go-libghostty README. `scripts/release-build.sh` does
+that for the release binaries; see [Releases](#releases).
 
 To measure what sessions cost on this machine, `agtd bench sessions` starts a private daemon in a
 temporary root (never `~/.agtd`), creates the sessions, prints a report, and stops everything it
@@ -301,23 +302,30 @@ make dev-run ARGS="list"
 
 ## Install
 
-On macOS, Debian/Ubuntu or Arch (Omarchy included):
+On macOS 13+ or Linux (glibc 2.28+: Debian 10, Ubuntu 20.04, RHEL 8 or newer, Arch):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/robmorgan/agtd/main/install.sh | bash
+curl -fsSL https://agtd.sh/install.sh | bash
 ```
 
-or `./install.sh` from a checkout, which builds that checkout. The script installs `agt` and
+This downloads the latest [release](https://github.com/robmorgan/agtd/releases)'s binaries and
+checks them against its `SHA256SUMS`; it needs nothing but `curl` and `tar`. `AGTD_VERSION=0.2.0`
+picks a release. The macOS binaries are universal (Apple silicon and Intel), signed with a
+Developer ID and notarized.
+
+It builds from source instead when run as `./install.sh` from a checkout (it builds that
+checkout), when `AGTD_REF` (a branch, tag or commit) or `AGTD_FROM_SOURCE=1` is set, or when no
+release fits the machine (a musl Linux, or no release yet). Either way it installs `agt` and
 `agtd` side by side in `~/.local/bin` (`AGTD_PREFIX` changes the prefix) and can be run again
 at any time:
 
-- Missing base packages (git, make, a C compiler, pkg-config, curl, xz) come from apt or pacman,
-  through `sudo` when you are not root. On macOS it asks for the Xcode command line tools.
-- Go and Zig are used from `PATH` when new enough. Otherwise pinned releases are downloaded into
+- A source build needs macOS, Debian/Ubuntu or Arch. Missing base packages (git, make, a C
+  compiler, pkg-config, curl, xz) come from apt or pacman, through `sudo` when you are not root. On macOS it asks for the Xcode command line tools.
+  Go and Zig are used from `PATH` when new enough. Otherwise pinned releases are downloaded into
   `~/.local/share/agtd/toolchain` and used for the build only.
-- Without a checkout it clones `AGTD_REF` (default `main`) into `~/.local/share/agtd/src`; a
+  Without a checkout it clones `AGTD_REF` (default `main`) into `~/.local/share/agtd/src`; a
   rerun fetches and rebuilds only what changed.
-- Binaries are only replaced when the build differs. If a daemon is running and `agtd` changed
+- Binaries are only replaced when they differ from the installed ones. If a daemon is running and `agtd` changed
   (or the daemon still runs a binary replaced earlier), it runs `agtd upgrade`, so sessions are
   handed over to the new binary without stopping (`AGTD_NO_UPGRADE=1` leaves the daemon alone).
 - On Linux with systemd it installs and enables a user unit (`~/.config/systemd/user/agtd.service`)
@@ -332,6 +340,24 @@ It never turns on remote access; see `agtd remote enable` below.
 
 For development, `make install` installs the binaries from the current tree into `$GOBIN` (or
 `$(go env GOPATH)/bin`); set `BINDIR` to choose another directory.
+
+### Releases
+
+Pushing a tag `vX.Y.Z` runs `.github/workflows/release.yml`, which publishes a GitHub release with
+`agtd-linux-amd64.tar.gz`, `agtd-linux-arm64.tar.gz`, `agtd-darwin-universal.tar.gz` (each holding
+`agt`, `agtd` and `LICENSE`) and `SHA256SUMS`:
+
+- `scripts/release-build.sh PLATFORM VERSION` builds each platform, the same way locally as in CI.
+  Linux binaries are linked by `zig cc` against glibc 2.28 and libghostty-vt is built for the
+  architecture's baseline CPU, never the build machine's. macOS binaries are universal, for macOS 13+.
+- Each build is smoke tested by running `agtd bench sessions` (a private daemon with real PTY
+  sessions) from the built binary, and the Linux ones again in a Debian 10 container (glibc 2.28).
+- The macOS binaries are signed (hardened runtime, Developer ID Application) and notarized. The
+  secrets this needs are listed at the top of the workflow. A tag fails without them; run by hand
+  (`workflow_dispatch`), the workflow is a dry run that skips signing when they are missing and
+  leaves the tarballs as the run's artifacts instead of publishing.
+- Releases are never marked as prereleases, even for an alpha tag, because `install.sh` installs
+  `releases/latest`, which skips prereleases.
 
 ## Working Directories And Worktrees
 
@@ -382,6 +408,7 @@ agt workspace add mono '~/src/mono'                         # or: agt workspace 
 agt workspace ls
 agt new --workspace mono auth-refactor                      # runs in ~/src/mono
 agt new --workspace mono --cwd services/api api-fix         # runs in ~/src/mono/services/api
+agt new -w mono -C services/api api-fix                     # the same, with short flags
 agt workspace rm mono
 ```
 
@@ -399,7 +426,11 @@ a session in a devbox's checkout without knowing the devbox's paths.
 
 ## Configure Agents
 
-Create `<runtime-root>/config.toml`:
+The first `agt` command on a machine writes `<runtime-root>/config.toml` with Claude Code
+(`claude`), Codex (`codex`) and pi (`pi`) configured. The default agent, the one `agt new` starts
+without `--agent`, is the first of those three found on `PATH` at that moment (`claude` when
+none is), so a machine with just one of them installed needs no configuration. Edit the file to
+change it; it is never rewritten. For example:
 
 ```toml
 default_agent = "claude"
@@ -423,8 +454,8 @@ scrollback_rows = 1000
 
 Agent picker order follows the order of the `[agents.*]` tables in this file. `default_agent`
 must name one of those configured agents. Without it, the default is `claude` if configured,
-otherwise the first agent listed. With no `config.toml` at all, `claude` and `codex` are
-configured and `claude` is the default.
+otherwise the first agent listed. With no `config.toml` at all, the built-in defaults are the
+ones written above.
 
 The daemon injects:
 
@@ -480,7 +511,9 @@ a shell prompt alike, and never draws where it cannot be sure: in a menu, a perm
 an editor, keys go raw as before. Text, Backspace, Delete, Left, Right and the Shift-Enter or
 Alt-Enter newline are drawn locally; Enter, Tab, Esc, Ctrl-C, Ctrl-J, Ctrl-Enter and the other
 keys are never predicted, so the agent's own menus, completions and history work as they always
-did, one round trip late. The agent's rendering replaces the drawing as soon as it arrives; the one thing you may
+did, one round trip late. Mouse input reaches the agent as it is, so in a fullscreen agent
+(Claude Code, Codex, `pi --tui-mode fullscreen`) the wheel scrolls its transcript while you type;
+a scroll made in the middle of typing shows once the agent has drawn your keys. The agent's rendering replaces the drawing as soon as it arrives; the one thing you may
 notice is that the screen behind the box stands still for about a round trip after you pause
 typing. ARCHITECTURE.md, "The Input Field And Local Echo", has the details.
 
@@ -586,12 +619,12 @@ Back on the devbox, run that command:
 agtd remote authorize SHA256:... my-laptop
 ```
 
-Now any command can run on the devbox, with `--host` or a `host/session` address:
+Now any command can run on the devbox, with `--host` (or `-H`) or a `host/session` address:
 
 ```sh
-agt --host devbox new --cwd ~/repo auth-refactor      # a path on the devbox (absolute or ~/...)
+agt new --cwd ~/repo devbox/auth-refactor             # a path on the devbox (absolute or ~/...)
 agt --host devbox workspace add mono ~/src/mono       # name a directory on the devbox
-agt --host devbox new --workspace mono auth-tests      # and start sessions in it
+agt new -w mono devbox/auth-tests                     # and start sessions in it
 agt --host devbox ls
 agt attach devbox/auth-refactor
 agt send-input devbox/auth-refactor -- "run the tests"

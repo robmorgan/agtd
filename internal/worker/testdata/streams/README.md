@@ -18,6 +18,7 @@ benchmarks.
 | `claude-field.vt.gz` | Claude Code 2.1 | The input field (`field.go`): idle with its placeholder, 176 characters typed past a wrap, an Alt-Enter newline, cleared, three pasted lines, a word longer than a row. Nothing is sent to the model. |
 | `codex-field.vt.gz` | Codex 0.160 | The same. |
 | `pi-field.vt.gz` | pi 0.72 | The same; pi draws on the primary screen and paints its own cursor. |
+| `pi-fullscreen-field.vt.gz` | pi 0.99, `--tui-mode fullscreen` | The same, on the alternate screen with SGR mouse reporting and focus events. pi runs offline with an empty config directory (`PI_CODING_AGENT_DIR`) and no extensions, skills or context files, so no login, setup or changelog shows. |
 
 The `*-field` streams come with `NAME.marks.json`: the byte offset in the stream at which
 each scripted state (`idle`, `typed`, `newline`, `cleared`, `pasted`, `longword`) was on screen.

@@ -1,0 +1,261 @@
+name: release
+
+# A tag v* builds agt and agtd for Linux (amd64, arm64) and macOS (one
+# universal binary), signs and notarizes the macOS binaries, and publishes a
+# GitHub release with a tarball per platform and SHA256SUMS. install.sh
+# downloads from the latest release.
+#
+# Run by hand (workflow_dispatch), or on a pull request that changes the
+# release build, it is a dry run: everything but the release, with the
+# tarballs left as the run's artifacts. It signs and notarizes when the
+# secrets are there (not on a fork's pull request); a tag fails without them.
+#
+# Secrets (repository settings, Secrets and variables, Actions):
+#   MACOS_CERT_P12        base64 of a "Developer ID Application" certificate
+#                         and its private key, exported from Keychain as .p12
+#   MACOS_CERT_PASSWORD   the .p12's password
+#   APPLE_API_KEY         an App Store Connect API key (the AuthKey_*.p8
+#                         file's contents), for notarytool
+#   APPLE_API_KEY_ID      that key's ID
+#   APPLE_API_ISSUER_ID   its issuer ID
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - scripts/release-build.sh
+      - scripts/build-libghostty.sh
+      - install.sh
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+
+env:
+  GO_VERSION: "1.26.x"
+  ZIG_VERSION: "0.16.0"
+
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - id: version
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == tag ]]; then
+            v="${GITHUB_REF_NAME#v}"
+          else
+            v="0.0.0-dev.${GITHUB_SHA::7}"
+          fi
+          echo "version=${v}" >>"${GITHUB_OUTPUT}"
+          echo "Version ${v}"
+
+  linux:
+    needs: meta
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - uses: actions/cache@v4
+        with:
+          path: .build
+          key: libghostty-linux-${{ matrix.arch }}-${{ env.ZIG_VERSION }}-${{ hashFiles('scripts/build-libghostty.sh') }}
+      - name: Build
+        run: scripts/release-build.sh linux-${{ matrix.arch }} "${{ needs.meta.outputs.version }}"
+      # Real sessions from the built binary: a private daemon, workers, PTYs
+      # and libghostty, all stopped again when it is done.
+      - name: Smoke test
+        working-directory: dist/linux-${{ matrix.arch }}/out
+        run: |
+          ./agt --version
+          ./agtd bench sessions --count 2 --output-heavy 1 --attach 1 --duration 2s
+      # The oldest glibc the binaries promise (scripts/release-build.sh).
+      - name: Smoke test on glibc 2.28 (Debian 10)
+        run: |
+          docker run --rm -v "${PWD}/dist/linux-${{ matrix.arch }}/out:/x:ro" debian:buster-slim \
+            sh -c 'ldd --version | head -n 1 && /x/agt --version && /x/agtd bench sessions --count 2 --duration 1s'
+      - name: Package
+        run: tar -C dist/linux-${{ matrix.arch }}/out -czf dist/agtd-linux-${{ matrix.arch }}.tar.gz agt agtd LICENSE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agtd-linux-${{ matrix.arch }}
+          path: dist/agtd-linux-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+
+  macos:
+    needs: meta
+    runs-on: macos-15
+    env:
+      HAVE_SIGNING: ${{ secrets.MACOS_CERT_P12 != '' && secrets.APPLE_API_KEY != '' }}
+      OUT: dist/darwin-universal/out
+    steps:
+      - name: Require signing for a release
+        if: github.ref_type == 'tag' && env.HAVE_SIGNING != 'true'
+        run: |
+          echo "::error::a release needs the macOS signing and notarization secrets (see the top of release.yml)"
+          exit 1
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - uses: actions/cache@v4
+        with:
+          path: .build
+          key: libghostty-macos-${{ env.ZIG_VERSION }}-${{ hashFiles('scripts/build-libghostty.sh') }}
+      - name: Build
+        run: scripts/release-build.sh darwin-universal "${{ needs.meta.outputs.version }}"
+      - name: Check architectures
+        run: |
+          for f in agt agtd; do
+            archs="$(lipo -archs "${OUT}/${f}")"
+            echo "${f}: ${archs}"
+            [[ "${archs}" == "x86_64 arm64" ]]
+          done
+      - name: Smoke test
+        working-directory: ${{ env.OUT }}
+        run: |
+          ./agt --version
+          ./agtd bench sessions --count 2 --output-heavy 1 --attach 1 --duration 2s
+
+      # A keychain of its own, deleted at the end, holds the certificate.
+      - name: Import the signing certificate
+        if: env.HAVE_SIGNING == 'true'
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          kc="${RUNNER_TEMP}/signing.keychain-db"
+          kcpass="$(openssl rand -hex 24)"
+          security create-keychain -p "${kcpass}" "${kc}"
+          security set-keychain-settings -lut 3600 "${kc}"
+          security unlock-keychain -p "${kcpass}" "${kc}"
+          umask 077
+          p12="${RUNNER_TEMP}/cert.p12"
+          echo "${MACOS_CERT_P12}" | base64 --decode >"${p12}"
+          # `security import` reads only the legacy .p12 format (3DES, SHA-1
+          # MAC). One exported by OpenSSL 3 with its defaults (AES, PBKDF2)
+          # fails with "MAC verification failed (wrong password?)", so the
+          # certificate is checked with OpenSSL, which reads either, and
+          # re-packed in the legacy format. That also tells a wrong password
+          # apart from a format security cannot read.
+          openssl="$(brew --prefix openssl@3 2>/dev/null)/bin/openssl"
+          [[ -x "${openssl}" ]] || { brew install openssl@3 >/dev/null; openssl="$(brew --prefix openssl@3)/bin/openssl"; }
+          if ! "${openssl}" pkcs12 -in "${p12}" -noout -legacy -passin env:MACOS_CERT_PASSWORD; then
+            echo "::error::MACOS_CERT_PASSWORD does not open MACOS_CERT_P12 (or MACOS_CERT_P12 is not base64 of a .p12)"
+            exit 1
+          fi
+          "${openssl}" pkcs12 -in "${p12}" -nodes -legacy -passin env:MACOS_CERT_PASSWORD -out "${RUNNER_TEMP}/cert.pem"
+          "${openssl}" pkcs12 -export -in "${RUNNER_TEMP}/cert.pem" -out "${p12}" \
+            -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg sha1 -passout env:MACOS_CERT_PASSWORD
+          rm -f "${RUNNER_TEMP}/cert.pem"
+          security import "${p12}" -k "${kc}" -P "${MACOS_CERT_PASSWORD}" -T /usr/bin/codesign
+          rm -f "${p12}"
+          # codesign needs the chain up to Apple's root, and a .p12 may hold
+          # only the certificate and key: add the Developer ID intermediate.
+          curl -fsSL https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer -o "${RUNNER_TEMP}/DeveloperIDG2CA.cer"
+          security import "${RUNNER_TEMP}/DeveloperIDG2CA.cer" -k "${kc}" || true
+          security set-key-partition-list -S apple-tool:,apple: -k "${kcpass}" "${kc}" >/dev/null
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s "${kc}" $(security list-keychains -d user | tr -d '"')
+          identity="$(security find-identity -v -p codesigning "${kc}" | sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -n 1)"
+          [[ -n "${identity}" ]] || { echo "::error::no Developer ID Application identity in MACOS_CERT_P12"; exit 1; }
+          echo "SIGN_IDENTITY=${identity}" >>"${GITHUB_ENV}"
+          echo "KEYCHAIN=${kc}" >>"${GITHUB_ENV}"
+
+      # The hardened runtime and a secure timestamp are what notarization
+      # asks for. agtd needs no entitlements: no JIT, no unsigned memory.
+      - name: Sign
+        if: env.HAVE_SIGNING == 'true'
+        run: |
+          for f in agt agtd; do
+            codesign --force --options runtime --timestamp --keychain "${KEYCHAIN}" \
+              --sign "${SIGN_IDENTITY}" --identifier "sh.agtd.${f}" "${OUT}/${f}"
+            codesign --verify --strict --verbose=2 "${OUT}/${f}"
+          done
+
+      # A bare executable cannot have a ticket stapled to it, so Gatekeeper
+      # looks the notarization up online the first time it checks a binary.
+      - name: Notarize
+        if: env.HAVE_SIGNING == 'true'
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          key="${RUNNER_TEMP}/AuthKey.p8"
+          printf '%s\n' "${APPLE_API_KEY}" >"${key}"
+          ditto -c -k "${OUT}" "${RUNNER_TEMP}/notarize.zip"
+          xcrun notarytool submit "${RUNNER_TEMP}/notarize.zip" \
+            --key "${key}" --key-id "${APPLE_API_KEY_ID}" --issuer "${APPLE_API_ISSUER_ID}" \
+            --wait --timeout 30m --output-format json | tee "${RUNNER_TEMP}/notary.json"
+          id="$(jq -r .id "${RUNNER_TEMP}/notary.json")"
+          status="$(jq -r .status "${RUNNER_TEMP}/notary.json")"
+          if [[ -z "${id}" || "${id}" == null ]]; then
+            # Apple turned the submission down (its error is above): a bad
+            # key, or an agreement to accept at developer.apple.com.
+            echo "::error::notarytool could not submit; see its error above"
+            exit 1
+          fi
+          if [[ "${status}" != Accepted ]]; then
+            xcrun notarytool log "${id}" --key "${key}" --key-id "${APPLE_API_KEY_ID}" --issuer "${APPLE_API_ISSUER_ID}" || true
+            echo "::error::notarization ${status}; Apple's log is above"
+            exit 1
+          fi
+          rm -f "${key}"
+
+      - name: Remove the keychain
+        if: always() && env.KEYCHAIN != ''
+        run: security delete-keychain "${KEYCHAIN}" || true
+      - name: Package
+        run: tar -C "${OUT}" -czf dist/agtd-darwin-universal.tar.gz agt agtd LICENSE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agtd-darwin-universal
+          path: dist/agtd-darwin-universal.tar.gz
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: [meta, linux, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: agtd-*
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum agtd-*.tar.gz | tee SHA256SUMS
+      # Not marked as a prerelease, even for an alpha tag: install.sh takes
+      # releases/latest, which skips prereleases.
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/agtd-*.tar.gz dist/SHA256SUMS \
+            --repo "${GITHUB_REPOSITORY}" --verify-tag --generate-notes \
+            --title "agtd ${{ needs.meta.outputs.version }}"

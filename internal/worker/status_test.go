@@ -848,3 +848,156 @@ func TestStatusTrackerEvictsLeastRecentlyUpdated(t *testing.T) {
 		t.Error("new record missing")
 	}
 }
+
+// Reports a client terminal sends for a scroll, the mouse crossing the
+// window, a focus change, a key release or a query reply are passive;
+// clicks, keys and any mix with them are the user acting.
+func TestIsPassiveInput(t *testing.T) {
+	for _, tc := range []struct {
+		data string
+		want bool
+	}{
+		{"\x1b[<64;10;5M", true},                            // SGR wheel up
+		{"\x1b[<65;10;5M\x1b[<65;10;5M", true},              // two wheel ticks in one read
+		{"\x1b[<35;12;7M", true},                            // SGR motion
+		{"\x1b[M`*%", true},                                 // X10 wheel
+		{"\x1b[96;10;5M", true},                             // urxvt wheel
+		{"\x1b[I", true},                                    // focus in
+		{"\x1b[O", true},                                    // focus out
+		{"\x1b[97;1:3u", true},                              // kitty key release
+		{"\x1b[12;40R", true},                               // cursor position report
+		{"\x1b[?62;22c", true},                              // device attributes
+		{"\x1b[?2026;2$y", true},                            // mode report
+		{"\x1b[?1u", true},                                  // kitty keyboard flags
+		{"\x1b[>1;10;0c", true},                             // secondary device attributes
+		{"\x1b[0n", true},                                   // status report
+		{"\x1b[8;24;80t", true},                             // window size report
+		{"\x1b[<32;10;5M", true},                            // drag
+		{"\x1b[97;5:3u", true},                              // modified key release
+		{"\x1b[<;10;5M", false},                             // SGR report with no button
+		{"\x1b[<99999999999;1;1M", false},                   // SGR button out of range
+		{"\x1b[<0;10;5M", false},                            // SGR click
+		{"\x1b[<0;10;5m", false},                            // SGR button release
+		{"\x1b[M #%", false},                                // X10 click
+		{"\x1b[32;10;5M", false},                            // urxvt click
+		{"y", false},                                        // a key
+		{"\r", false},                                       // Enter
+		{"\x1b[A", false},                                   // an arrow
+		{"\x1b[<64;10;5My", false},                          // a scroll, then a key
+		{"\x1b[<64;10;5", false},                            // cut short
+		{strings.Repeat("\x1b[<64;10;5M", 400), false},      // longer than any read of reports
+		{"\x1b[" + strings.Repeat(";", 1<<20) + "X", false}, // a huge frame is not scanned
+		{"", false},
+	} {
+		if got := isPassiveInput([]byte(tc.data)); got != tc.want {
+			t.Errorf("isPassiveInput(%q) = %v, want %v", tc.data, got, tc.want)
+		}
+	}
+}
+
+// A blocked record stays blocked when the client only scrolls, moves the
+// mouse or reports focus: those reach the program but answer nothing.
+// Typing still answers it.
+func TestPassiveInputLeavesABlockUnanswered(t *testing.T) {
+	ts, err := newTerminalState(80, 24, maxScrollbackBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ts.close()
+	var pty bytes.Buffer
+	s := &ownerState{terminal: ts, output: newBroadcaster(), attachments: map[string]*ownerAttachment{},
+		status: newStatusTracker(), input: newPTYInput(&pty)}
+	s.status.apply(time.Now().Add(-time.Second), report("", libghostty.ProgramStatusStateBlocked))
+	for _, in := range []string{"\x1b[<64;10;5M", "\x1b[<35;12;7M", "\x1b[I", "\x1b[12;40R"} {
+		if err := s.writeInput([]byte(in)); err != nil {
+			t.Fatal(err)
+		}
+		if got := s.status.derive(); got.activity != session.ActivityBlocked {
+			t.Fatalf("after %q: activity = %v, want blocked", in, got.activity)
+		}
+	}
+	if err := s.writeInput([]byte("y")); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.status.derive(); got.activity != session.ActivityWorking {
+		t.Fatalf("after typing: activity = %v, want working", got.activity)
+	}
+	s.input.close()
+	<-s.input.done
+	if pty.String() != "\x1b[<64;10;5M\x1b[<35;12;7M\x1b[I\x1b[12;40Ry" {
+		t.Fatalf("the program received %q", pty.String())
+	}
+}
+
+// A pending attachment that only scrolls, moves the mouse or reports focus
+// has not been used: it does not become the most recently used, and so does
+// not take over the size when the owner leaves. Typing, even with a report
+// in the same read, counts; the detection reply does not.
+func TestNoteInputIgnoresPassiveInput(t *testing.T) {
+	s := &ownerState{attachments: map[string]*ownerAttachment{"c": {}}}
+	t0 := time.Unix(100, 0)
+	for _, in := range []string{"\x1b[<64;1;1M", "\x1b[I", "\x1b]7501;?\x07"} {
+		s.noteInput("c", []byte(in), t0)
+		if !s.attachments["c"].lastUsed.IsZero() {
+			t.Fatalf("%q counted as use", in)
+		}
+	}
+	s.noteInput("c", []byte("\x1b[<64;1;1Ma"), t0)
+	if !s.attachments["c"].lastUsed.Equal(t0) {
+		t.Fatal("typing after a scroll did not count")
+	}
+}
+
+// Passive input is not activity either: the bell and notification dedup
+// starts over on typing only.
+func TestPassiveInputIsNotActivity(t *testing.T) {
+	_, h := newRoot(t)
+	rec := newRecorder(h.store, h.sessionID, 1)
+	defer rec.close()
+	ts, err := newTerminalState(80, 24, maxScrollbackBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ts.close()
+	var pty bytes.Buffer
+	s := &ownerState{terminal: ts, output: newBroadcaster(), attachments: map[string]*ownerAttachment{},
+		activity: newActivityTracker(rec, 0, time.Now()), input: newPTYInput(&pty)}
+	defer s.input.close()
+	s.activity.lastNotice = "Approve?"
+	if err := s.writeInput([]byte("\x1b[<65;1;1M\x1b[O")); err != nil {
+		t.Fatal(err)
+	}
+	if s.activity.lastNotice != "Approve?" {
+		t.Fatal("a scroll and a focus report counted as activity")
+	}
+	if err := s.writeInput([]byte("y")); err != nil {
+		t.Fatal(err)
+	}
+	if s.activity.lastNotice != "" {
+		t.Fatal("typing did not count as activity")
+	}
+}
+
+// A scroll or a focus report shows someone is looking: the done and error
+// records, kept until the user has seen them, go. A block stays.
+func TestPassiveInputCountsAsSeen(t *testing.T) {
+	ts, err := newTerminalState(80, 24, maxScrollbackBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ts.close()
+	var pty bytes.Buffer
+	s := &ownerState{terminal: ts, output: newBroadcaster(), attachments: map[string]*ownerAttachment{},
+		status: newStatusTracker(), input: newPTYInput(&pty)}
+	defer s.input.close()
+	s.status.apply(time.Now(), report("", libghostty.ProgramStatusStateDone))
+	if got := s.status.derive(); got == nil || got.activity != session.ActivityDone {
+		t.Fatalf("before: %+v", got)
+	}
+	if err := s.writeInput([]byte("\x1b[I")); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.status.derive(); got != nil && got.activity == session.ActivityDone {
+		t.Fatalf("a focus-in did not count as seen: %+v", got)
+	}
+}

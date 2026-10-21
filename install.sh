@@ -1,22 +1,35 @@
 #!/usr/bin/env bash
-# Installs (or upgrades) agtd and the agt CLI from source, on macOS,
-# Debian/Ubuntu and Arch (Omarchy included). It is safe to run again: it
-# only installs what is missing, reuses the toolchains and the libghostty
-# build it made before, and if a daemon is running, upgrades it with a live
-# handoff so running sessions keep going.
+# Installs (or upgrades) agtd and the agt CLI on macOS or Linux. It is safe
+# to run again: it only replaces binaries that changed, and if a daemon is
+# running, upgrades it with a live handoff so running sessions keep going.
 #
-#   curl -fsSL https://raw.githubusercontent.com/robmorgan/agtd/main/install.sh | bash
+#   curl -fsSL https://agtd.sh/install.sh | bash
 #   ./install.sh                  # from a checkout: builds that checkout
 #
-# Go and Zig are used from PATH when new enough; otherwise pinned releases are
-# downloaded into ~/.local/share/agtd/toolchain and used for the build only.
-# Only the base packages (git, make, a C compiler, pkg-config, curl, xz) come
-# from the system package manager, through sudo when not root. On Linux with
-# systemd it also installs a user unit that starts the daemon at boot.
+# By default it downloads the latest release's binaries (macOS 13+, or Linux
+# with glibc 2.28+) and checks them against the release's SHA256SUMS; nothing
+# else is needed but curl and tar. It builds from source instead when run
+# from a checkout, when AGTD_REF or AGTD_FROM_SOURCE=1 is set, or when there
+# is no release for this platform.
+#
+# A source build (macOS, Debian/Ubuntu and Arch, Omarchy included) uses Go
+# and Zig from PATH when new enough; otherwise pinned releases are downloaded
+# into ~/.local/share/agtd/toolchain and used for the build only. Only the
+# base packages (git, make, a C compiler, pkg-config, curl, xz) come from the
+# system package manager, through sudo when not root, and it reuses the
+# toolchains and the libghostty build it made before.
+#
+# On Linux with systemd it also installs a user unit that starts the daemon
+# at boot.
 #
 # Environment:
 #   AGTD_PREFIX      install agt and agtd into $AGTD_PREFIX/bin (default ~/.local)
-#   AGTD_REF         branch, tag or commit to build when cloning (default main)
+#   AGTD_VERSION     release to download, such as 0.2.0 (default: the latest)
+#   AGTD_FROM_SOURCE set to 1 to build from source rather than download
+#   AGTD_RELEASES_URL where releases are (default the GitHub repository's), for
+#                    a fork or a test
+#   AGTD_REF         branch, tag or commit to build from source (default main;
+#                    setting it means a source build)
 #   AGTD_SRC         where to clone the source (default ~/.local/share/agtd/src)
 #   AGTD_NO_UPGRADE  set to 1 to leave a running daemon alone
 #   AGTD_NO_SERVICE  set to 1 to skip the systemd unit that starts the daemon at boot (Linux)
@@ -28,6 +41,7 @@
 set -euo pipefail
 
 REPO_URL="https://github.com/robmorgan/agtd.git"
+RELEASES_URL="${AGTD_RELEASES_URL:-https://github.com/robmorgan/agtd/releases}"
 GO_VERSION="1.26.9"   # downloaded when PATH has no Go >= go.mod's
 ZIG_VERSION="0.16.0"  # downloaded when PATH has no Zig >= 0.16
 DATA_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/agtd"
@@ -212,15 +226,24 @@ fetch_tarball() {
   mv "${tmp}" "${dir}"
 }
 
-# source_dir prints the source tree to build: the checkout this script is in,
-# or a clone of AGTD_REF under AGTD_SRC, created or updated.
-source_dir() {
+# checkout_dir prints the agtd checkout this script is in, if it is in one.
+checkout_dir() {
   local here=""
   if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
     here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   fi
   if [[ -n "${here}" && -f "${here}/go.mod" ]] &&
     grep -q '^module agtd.sh$' "${here}/go.mod"; then
+    echo "${here}"
+  fi
+}
+
+# source_dir prints the source tree to build: the checkout this script is in,
+# or a clone of AGTD_REF under AGTD_SRC, created or updated.
+source_dir() {
+  local here
+  here="$(checkout_dir)"
+  if [[ -n "${here}" ]]; then
     step "Source: ${here} (this checkout)"
     echo "${here}"
     return
@@ -237,6 +260,71 @@ source_dir() {
   git -C "${src}" checkout -q --detach FETCH_HEAD
   note "at $(git -C "${src}" log -1 --format='%h %s')"
   echo "${src}"
+}
+
+# release_platform prints the release tarball's platform for this machine,
+# or nothing when no release binary runs here: the Linux build links glibc,
+# so a musl system (Alpine) builds from source.
+release_platform() {
+  case "${OS}" in
+    Darwin) echo darwin-universal ;;
+    Linux) getconf GNU_LIBC_VERSION >/dev/null 2>&1 && echo "linux-${GOARCH}" ;;
+  esac
+}
+
+# sha256_of prints FILE's SHA-256.
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d' ' -f1
+  else
+    shasum -a 256 "$1" | cut -d' ' -f1
+  fi
+}
+
+# download_release unpacks the release tarball for PLATFORM into a new
+# directory under WORK_DIR, checked against the release's SHA256SUMS, and
+# prints that directory. It returns 3, saying nothing, when the release has
+# no such tarball (or there is no release yet); any other failure dies. It
+# runs in a command substitution, so dying only ends that subshell: the
+# caller has to pass its status on.
+download_release() {
+  local platform="$1" version="${AGTD_VERSION:-latest}" base asset dir want have
+  if [[ "${version}" == latest ]]; then
+    base="${RELEASES_URL}/latest/download"
+  else
+    base="${RELEASES_URL}/download/v${version#v}"
+  fi
+  asset="agtd-${platform}.tar.gz"
+  dir="${WORK_DIR}/release"
+  mkdir -p "${dir}/out"
+  step "Release: downloading ${asset} (${version})"
+  # curl -f fails on the 404 of a missing release or asset.
+  curl -fsSL "${base}/${asset}" -o "${dir}/${asset}" 2>/dev/null || return 3
+  curl -fsSL "${base}/SHA256SUMS" -o "${dir}/SHA256SUMS" ||
+    die "could not download ${base}/SHA256SUMS"
+  want="$(awk -v a="${asset}" '$2 == a || $2 == "*" a { print $1 }' "${dir}/SHA256SUMS")"
+  have="$(sha256_of "${dir}/${asset}")"
+  [[ -n "${want}" ]] || die "${asset} is not in the release's SHA256SUMS"
+  [[ "${want}" == "${have}" ]] || die "${asset} does not match the release's SHA256SUMS (got ${have}, want ${want})"
+  tar -xzf "${dir}/${asset}" -C "${dir}/out" || die "could not unpack ${asset}"
+  [[ -x "${dir}/out/agt" && -x "${dir}/out/agtd" ]] || die "${asset} has no agt and agtd"
+  note "checksum ok; $("${dir}/out/agt" --version)"
+  echo "${dir}/out"
+}
+
+# build_from_source builds agt and agtd and prints the directory they are in.
+# Like download_release it runs in a command substitution, where macOS's
+# bash 3.2 does not apply set -e, so failures are checked by hand.
+build_from_source() {
+  ensure_base_packages
+  local src
+  src="$(source_dir)"
+  [[ -n "${src}" ]] || die "no source to build"
+  ensure_go "$(go_wanted "${src}")"
+  ensure_zig
+  step "Building"
+  make -C "${src}" build ZIG="${ZIG}" >&2 || die "the build failed"
+  echo "${src}/bin"
 }
 
 # daemon_pid prints the pid of this user's running daemon, if any.
@@ -367,17 +455,17 @@ EOF
   step "Service: the daemon starts at boot (systemd user unit ${unit})"
 }
 
-# install_binary copies src/bin/NAME into BINDIR unless the installed one is
+# install_binary copies DIR/NAME into BINDIR unless the installed one is
 # identical, and reports whether it changed. Leaving an identical binary in
 # place matters for a running daemon: replacing it, even with the same bytes,
 # would make the daemon look stale (its executable deleted) to the next run.
 install_binary() {
-  local src="$1" bindir="$2" name="$3"
-  if cmp -s "${src}/bin/${name}" "${bindir}/${name}"; then
+  local dir="$1" bindir="$2" name="$3"
+  if cmp -s "${dir}/${name}" "${bindir}/${name}"; then
     note "${name}: unchanged"
     return 1
   fi
-  install -m 0755 "${src}/bin/${name}" "${bindir}/${name}"
+  install -m 0755 "${dir}/${name}" "${bindir}/${name}"
   note "${name}: installed"
 }
 
@@ -429,19 +517,40 @@ main() {
   local bindir="${prefix}/bin"
 
   detect_platform
-  ensure_base_packages
-  local src
-  src="$(source_dir)"
-  ensure_go "$(go_wanted "${src}")"
-  ensure_zig
+  WORK_DIR="$(mktemp -d)"
+  trap 'rm -rf "${WORK_DIR}"' EXIT
 
-  step "Building and installing into ${bindir}"
+  local built="" platform="" tool rc=3
+  if [[ "${AGTD_FROM_SOURCE:-}" == 1 || -n "${AGTD_REF:-}" || -n "$(checkout_dir)" ]]; then
+    built="$(build_from_source)" || exit
+  else
+    platform="$(release_platform)"
+    for tool in curl tar; do
+      command -v "${tool}" >/dev/null 2>&1 || die "${tool} is needed; install it and run this again"
+    done
+    if [[ -n "${platform}" ]]; then
+      rc=0
+      built="$(download_release "${platform}")" || rc=$?
+    fi
+    case "${rc}" in
+      0) ;;
+      3)
+        if [[ -n "${AGTD_VERSION:-}" && "${AGTD_VERSION}" != latest ]]; then
+          die "release ${AGTD_VERSION} has no agtd-${platform:-${OS}-${GOARCH}}.tar.gz (see ${RELEASES_URL})"
+        fi
+        step "Release: none for ${OS} ${GOARCH}; building from source"
+        built="$(build_from_source)" || exit
+        ;;
+      *) exit "${rc}" ;;
+    esac
+  fi
+
+  step "Installing into ${bindir}"
   local needed=0
   daemon_stale && needed=1
-  make -C "${src}" build ZIG="${ZIG}" >&2
   install -d "${bindir}"
-  install_binary "${src}" "${bindir}" agt || true
-  install_binary "${src}" "${bindir}" agtd && needed=1
+  install_binary "${built}" "${bindir}" agt || true
+  install_binary "${built}" "${bindir}" agtd && needed=1
 
   upgrade_daemon "${bindir}" "${needed}"
   install_service "${bindir}"
