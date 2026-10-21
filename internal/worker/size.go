@@ -89,10 +89,10 @@ func (s *ownerState) takeSize(attachID string, g protocol.Geometry) error {
 }
 
 // noteInput records that an attachment was used, for promote. A terminal's
-// echo of the status detection query is its reflex, not the user typing
-// (see writeInput), so it does not count.
+// echo of the status detection query, and reports that are not typing (a
+// scroll, mouse motion, a focus change; see writeInput), do not count.
 func (s *ownerState) noteInput(attachID string, data []byte, now time.Time) {
-	if a, ok := s.attachments[attachID]; ok && !isStatusDetectionReply(data) {
+	if a, ok := s.attachments[attachID]; ok && !isStatusDetectionReply(data) && !isPassiveInput(data) {
 		a.lastUsed = now
 	}
 }

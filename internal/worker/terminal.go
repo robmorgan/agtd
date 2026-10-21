@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"go.mitchellh.com/libghostty"
@@ -117,6 +119,105 @@ func isStatusDetectionReply(data []byte) bool {
 	}
 	// Anything else that ends or starts a sequence means more than one.
 	return !bytes.ContainsAny(body, "\x1b\x07")
+}
+
+// isPassiveInput reports whether data is nothing but reports a client
+// terminal sends on its own or for a gesture that answers nothing: wheel
+// scrolls and mouse motion (X10, urxvt 1015 and SGR 1006 forms), focus
+// changes (1004), key releases (kitty) and CSI replies to the program's
+// queries. writeInput forwards such a chunk but does not count it as the
+// user typing: scrolling a fullscreen agent's transcript, or the mouse
+// crossing its window, must not mark a blocked prompt as answered. A click
+// or any key counts, and so does a chunk mixing reports with typing.
+func isPassiveInput(data []byte) bool {
+	// A read of reports is short; anything longer is not classified at
+	// all, so a client cannot make the worker scan a huge frame before
+	// the input limit refuses it (noteInput runs first).
+	if len(data) == 0 || len(data) > maxPassiveInput {
+		return false
+	}
+	for len(data) > 0 {
+		n := passiveReportLen(data)
+		if n == 0 {
+			return false
+		}
+		data = data[n:]
+	}
+	return true
+}
+
+// maxPassiveInput bounds the chunks isPassiveInput classifies: a burst of
+// mouse motion in one read is a few hundred bytes.
+const maxPassiveInput = 4096
+
+// passiveReportLen is the length of the passive report at the start of b,
+// or 0 when b does not start with one.
+func passiveReportLen(b []byte) int {
+	if len(b) < 3 || b[0] != 0x1b || b[1] != '[' {
+		return 0
+	}
+	if b[2] == 'M' {
+		if len(b) < 6 || !passiveMouseButton(int(b[3])-32) {
+			return 0
+		}
+		return 6
+	}
+	i := 2
+	for i < len(b) && b[i] >= 0x30 && b[i] <= 0x3f {
+		i++
+	}
+	params := string(b[2:i])
+	for i < len(b) && b[i] >= 0x20 && b[i] <= 0x2f {
+		i++
+	}
+	if i >= len(b) || b[i] < 0x40 || b[i] > 0x7e {
+		return 0
+	}
+	final, n := b[i], i+1
+	switch {
+	case params == "" && (final == 'I' || final == 'O'):
+		return n // focus in or out
+	case strings.HasPrefix(params, "<") && (final == 'M' || final == 'm'):
+		if button, ok := leadingInt(params[1:]); ok && passiveMouseButton(button) {
+			return n
+		}
+		return 0
+	case final == 'M':
+		if button, ok := leadingInt(params); ok && passiveMouseButton(button-32) {
+			return n
+		}
+		return 0
+	case strings.HasPrefix(params, "?") || strings.HasPrefix(params, ">"),
+		final == 'R', final == 'n', final == 't', final == 'y' && b[i-1] == '$':
+		// A reply to a query. A legacy modified F3 (CSI 1;5R) has the
+		// form of a cursor position report and counts here too, as in
+		// the CLI's decoder (internal/cli/input.go), whose tables these
+		// mirror.
+		return n
+	}
+	if _, rest, ok := strings.Cut(params, ";"); ok {
+		mods, _, _ := strings.Cut(rest, ";")
+		if strings.HasSuffix(mods, ":3") {
+			return n // a key release
+		}
+	}
+	return 0
+}
+
+// passiveMouseButton: wheel buttons (64 and up) and motion (32 added) edit
+// nothing; presses and releases of a button may answer a prompt.
+func passiveMouseButton(button int) bool {
+	return button >= 0 && button&(64|32) != 0
+}
+
+// leadingInt reads the decimal number at the start of s, up to a ';'. As in
+// the CLI's decoder, a number past 32 bits is not one.
+func leadingInt(s string) (int, bool) {
+	if end := strings.IndexByte(s, ';'); end >= 0 {
+		s = s[:end]
+	}
+	v, err := strconv.ParseUint(s, 10, 32)
+	return int(v), err == nil
 }
 
 func newTerminalState(cols, rows uint16, maxScrollbackBytes uint) (*terminalState, error) {

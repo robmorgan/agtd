@@ -204,6 +204,20 @@ func (s *ownerState) writeInput(data []byte) error {
 	if err := s.input.enqueue(data); err != nil {
 		return err
 	}
+	// Reports the client terminal sent by itself, or for a scroll or the
+	// mouse crossing the window, reach the program but are not typing
+	// (isPassiveInput): they answer nothing and are not activity. They do
+	// show someone is looking, which is all a done or error record waits
+	// for.
+	if isPassiveInput(data) {
+		if s.status != nil {
+			s.status.userSaw()
+			if s.activity != nil {
+				s.activity.setNative(time.Now(), s.status.derive(), s.watched(), false)
+			}
+		}
+		return nil
+	}
 	now := time.Now()
 	// Typing answers whatever the session was waiting for, for both
 	// sources: a blocked status record counts as answered until the

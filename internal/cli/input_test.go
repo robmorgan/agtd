@@ -60,6 +60,12 @@ func TestKeyDecoder(t *testing.T) {
 		{"kitty release dropped", []string{"\x1b[27;1:3u"}, nil},
 		{"csi split across reads", []string{"\x1b[", "B"}, []keyEvent{key(keyDown)}},
 		{"bracketed paste", []string{"\x1b[200~he", "llo\x1b[201~x"}, []keyEvent{{isPaste: true, paste: "hello"}, char('x')}},
+		// The picker and the overlay never see mouse reports, focus
+		// changes or keys they have no name for (the echo does).
+		{"mouse and focus dropped", []string{"\x1b[<64;10;5M\x1b[M`*%\x1b[I"}, nil},
+		{"unnamed keys dropped", []string{"\x1bOP\x1b[15~"}, nil},
+		{"query replies dropped", []string{"\x1b[12;40R\x1b[?62;22c\x1b[?1u"}, nil},
+		{"x10 mouse split across reads", []string{"\x1b[M`", "*%a"}, []keyEvent{char('a')}},
 	} {
 		var d keyDecoder
 		var got []keyEvent
@@ -77,6 +83,28 @@ func TestKeyDecoder(t *testing.T) {
 		}
 		if all := strings.Join(tc.chunks, ""); tc.want != nil && !strings.Contains(all, string(raw)) {
 			t.Errorf("%s: raw bytes %q are not from the input %q", tc.name, raw, all)
+		}
+	}
+}
+
+// Wheel scrolls and motion edit nothing; clicks, drags' presses and the
+// extra buttons may (they can move the cursor or pick from a menu).
+func TestMouseKeyButtons(t *testing.T) {
+	for button, want := range map[int]keyCode{
+		-1:  keyUnknown, // an X10 byte below 32
+		0:   keyUnknown, // left press
+		2:   keyUnknown, // right press
+		3:   keyUnknown, // release (X10)
+		32:  keyPassive, // drag with the left button
+		35:  keyPassive, // motion, no button
+		64:  keyPassive, // wheel up
+		65:  keyPassive, // wheel down
+		68:  keyPassive, // Shift-wheel
+		80:  keyPassive, // Ctrl-wheel
+		128: keyUnknown, // button 8
+	} {
+		if got := mouseKey(button); got != want {
+			t.Errorf("button %d: %v, want %v", button, got, want)
 		}
 	}
 }
