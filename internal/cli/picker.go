@@ -869,9 +869,6 @@ func (c *client) pickSession() (string, error) {
 					p.handlePaste(ev.paste)
 					continue
 				}
-				if ev.code == keyNone {
-					continue
-				}
 				chosen, done, err := p.handleKey(ev)
 				if err != nil {
 					return "", err

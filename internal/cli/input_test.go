@@ -57,9 +57,15 @@ func TestKeyDecoder(t *testing.T) {
 		{"alt letter", []string{"\x1bx"}, []keyEvent{{code: keyChar, r: 'x', mods: modAlt}}},
 		{"kitty esc", []string{"\x1b[27u"}, []keyEvent{key(keyEsc)}},
 		{"kitty enter and ctrl-y", []string{"\x1b[13u\x1b[121;5u"}, []keyEvent{key(keyEnter), {code: keyChar, r: 'y', mods: modCtrl}}},
-		{"kitty release", []string{"\x1b[27;1:3u"}, []keyEvent{{release: true}}},
+		{"kitty release dropped", []string{"\x1b[27;1:3u"}, nil},
 		{"csi split across reads", []string{"\x1b[", "B"}, []keyEvent{key(keyDown)}},
 		{"bracketed paste", []string{"\x1b[200~he", "llo\x1b[201~x"}, []keyEvent{{isPaste: true, paste: "hello"}, char('x')}},
+		// The picker and the overlay never see mouse reports, focus
+		// changes or keys they have no name for (the echo does).
+		{"mouse and focus dropped", []string{"\x1b[<64;10;5M\x1b[M`*%\x1b[I"}, nil},
+		{"unnamed keys dropped", []string{"\x1bOP\x1b[15~"}, nil},
+		{"query replies dropped", []string{"\x1b[12;40R\x1b[?62;22c\x1b[?1u"}, nil},
+		{"x10 mouse split across reads", []string{"\x1b[M`", "*%a"}, []keyEvent{char('a')}},
 	} {
 		var d keyDecoder
 		var got []keyEvent
@@ -101,7 +107,7 @@ func TestKeyDecoderKeepsEveryByte(t *testing.T) {
 		"\x1b[200~pasted\x1b[201~",
 	} {
 		for split := 0; split <= len(in); split++ {
-			var d keyDecoder
+			d := keyDecoder{forwardAll: true}
 			var raw []byte
 			for _, chunk := range []string{in[:split], in[split:]} {
 				for _, ev := range d.push([]byte(chunk)) {
@@ -114,8 +120,8 @@ func TestKeyDecoderKeepsEveryByte(t *testing.T) {
 		}
 	}
 	// Kitty functional keys are not text.
-	var d keyDecoder
-	if evs := d.push([]byte("\x1b[57399u")); len(evs) != 1 || evs[0].code != keyNone {
+	d := keyDecoder{forwardAll: true}
+	if evs := d.push([]byte("\x1b[57399u")); len(evs) != 1 || evs[0].code != keyUnknown {
 		t.Errorf("keypad 0: %+v", evs)
 	}
 }
@@ -150,13 +156,13 @@ func chunked(s string, n int) []string {
 // whichever read splits its end marker; a shorter one is one event.
 func TestKeyDecoderStreamsLongPastes(t *testing.T) {
 	long := string(pasteStart) + strings.Repeat("0123456789abcdef", (4<<20)/16) + string(pasteEnd)
-	var d keyDecoder
+	d := keyDecoder{forwardAll: true}
 	raw, events := pushAll(t, &d, chunked(long+"x", 4096))
 	if string(raw) != long+"x" {
 		t.Fatalf("forwarded %d bytes of %d", len(raw), len(long)+1)
 	}
 	for _, ev := range events[:len(events)-1] {
-		if ev.isPaste || ev.code != keyNone {
+		if ev.isPaste || ev.code != keyUnknown {
 			t.Fatalf("a long paste was held for prediction: %+v", ev.code)
 		}
 	}
@@ -169,7 +175,7 @@ func TestKeyDecoderStreamsLongPastes(t *testing.T) {
 		in := string(pasteStart) + body + string(pasteEnd) + "x"
 		end := len(pasteStart) + n
 		for split := end - 1; split <= end+len(pasteEnd); split++ {
-			var d keyDecoder
+			d := keyDecoder{forwardAll: true}
 			raw, events := pushAll(t, &d, []string{in[:split], in[split:]})
 			if string(raw) != in {
 				t.Fatalf("%d bytes, split at %d: forwarded %d bytes", n, split, len(raw))
@@ -189,12 +195,12 @@ func TestKeyDecoderStreamsLongPastes(t *testing.T) {
 // completes is given up by expire.
 func TestKeyDecoderBoundsIncompleteSequences(t *testing.T) {
 	long := "\x1b[" + strings.Repeat("1;", 200)
-	var d keyDecoder
+	d := keyDecoder{forwardAll: true}
 	if raw, _ := pushAll(t, &d, chunked(long, 50)); string(raw) != long || d.held() {
 		t.Fatalf("forwarded %q, holding %v", raw, d.held())
 	}
 
-	d = keyDecoder{}
+	d = keyDecoder{forwardAll: true}
 	if evs := d.push([]byte("\x1b[")); evs != nil || !d.held() {
 		t.Fatalf("Alt-[: %+v", evs)
 	}
@@ -203,7 +209,7 @@ func TestKeyDecoderBoundsIncompleteSequences(t *testing.T) {
 	}
 
 	// A paste whose end is late is forwarded from then on.
-	d = keyDecoder{}
+	d = keyDecoder{forwardAll: true}
 	var raw []byte
 	collect := func(evs []keyEvent) []keyEvent {
 		for _, ev := range evs {
@@ -223,7 +229,7 @@ func TestKeyDecoderBoundsIncompleteSequences(t *testing.T) {
 
 	// A paste whose end never comes is given up at the next expiry, and
 	// what follows is keys again.
-	d, raw = keyDecoder{}, nil
+	d, raw = keyDecoder{forwardAll: true}, nil
 	collect(d.push([]byte("\x1b[200~abc")))
 	collect(d.expire())
 	collect(d.expire())
@@ -239,12 +245,34 @@ func TestKeyDecoderBoundsIncompleteSequences(t *testing.T) {
 // bytes that might have begun its end marker included.
 func TestKeyDecoderReleasesAnUnendedPaste(t *testing.T) {
 	in := string(pasteStart) + strings.Repeat("x", pasteMax+10)
-	var d keyDecoder
+	d := keyDecoder{forwardAll: true}
 	raw, _ := pushAll(t, &d, chunked(in, 4096))
 	for _, ev := range d.expire() {
 		raw = append(raw, ev.raw...)
 	}
 	if string(raw) != in || d.held() {
 		t.Fatalf("forwarded %d of %d bytes, holding %v", len(raw), len(in), d.held())
+	}
+}
+
+// Wheel scrolls and motion edit nothing; clicks, drags' presses and the
+// extra buttons may (they can move the cursor or pick from a menu).
+func TestMouseKeyButtons(t *testing.T) {
+	for button, want := range map[int]keyCode{
+		-1:  keyUnknown, // an X10 byte below 32
+		0:   keyUnknown, // left press
+		2:   keyUnknown, // right press
+		3:   keyUnknown, // release (X10)
+		32:  keyPassive, // drag with the left button
+		35:  keyPassive, // motion, no button
+		64:  keyPassive, // wheel up
+		65:  keyPassive, // wheel down
+		68:  keyPassive, // Shift-wheel
+		80:  keyPassive, // Ctrl-wheel
+		128: keyUnknown, // button 8
+	} {
+		if got := mouseKey(button); got != want {
+			t.Errorf("button %d: %v, want %v", button, got, want)
+		}
 	}
 }

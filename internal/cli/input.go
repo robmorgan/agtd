@@ -253,6 +253,13 @@ const (
 	keyPageUp
 	keyPageDown
 	keyDelete
+	// keyUnknown is a key the decoder has no name for (F1, Insert, ...)
+	// or a mouse click; keyPassive is input that edits nothing: a wheel
+	// scroll, mouse motion, a focus change, a key release or a reply to a
+	// terminal query. Only a decoder with forwardAll returns either, for
+	// the local echo to send on as they arrived.
+	keyUnknown
+	keyPassive
 )
 
 type keyMods uint8
@@ -263,16 +270,18 @@ const (
 	modCtrl
 )
 
-// keyEvent is one key press, or (with paste set) a bracketed paste.
+// keyEvent is one key press, or (with paste set) a bracketed paste. From a
+// decoder with forwardAll it can also be input that is not a key the
+// decoder names (keyUnknown) or that edits nothing (keyPassive): a mouse
+// report, a focus change, a key release, a terminal's reply to a query.
 type keyEvent struct {
 	code    keyCode
 	r       rune // for keyChar
 	mods    keyMods
 	paste   string
 	isPaste bool
-	// release: a key release (kitty keyboard protocol), which changes
-	// nothing in an input field.
-	release bool
+	// focus: a focus report (1004), in or out; raw tells which.
+	focus bool
 	// raw is the bytes the terminal sent for it, so the local echo can
 	// forward a key exactly as it arrived.
 	raw []byte
@@ -281,23 +290,26 @@ type keyEvent struct {
 // keyDecoder turns terminal input into key events. It reads the legacy
 // encodings a plain raw-mode terminal sends and the kitty keyboard
 // protocol's CSI-u form, which the overlay receives because attach enables
-// it. As with most terminal libraries, an ESC that ends a read is the Esc
-// key; any other incomplete sequence waits for the next read. Sequences it
-// does not know (function keys, mouse reports, the terminal's replies to
-// queries) are events with code keyNone, carrying their bytes like any
-// other, so the local echo forwards them unchanged.
+// it, and tells apart the other reports a terminal sends: mouse reports
+// (X10, urxvt 1015 and SGR 1006), focus changes (1004) and replies to
+// queries in CSI form (OSC and DCS replies read as keys). As with
+// most terminal libraries, an ESC that ends a read is the Esc key; any
+// other incomplete sequence waits for the next read.
 //
 // What it holds is bounded. An incomplete sequence longer than
 // keySequenceMax is not a key, and goes as it is. A bracketed paste is held
 // until its end marker, up to pasteMax; a longer one is forwarded as it
-// arrives, in keyNone events, holding back only what may be the start of
-// its end marker, and the end marker is looked for once in each byte. The
-// overlay and the picker skip keyNone events, so they ignore a paste longer
-// than pasteMax (a session name or a query never is). The local echo calls
-// expire when nothing completes what is held, and reset when the attachment
-// or the overlay takes over.
+// arrives, in keyUnknown events, holding back only what may be the start of
+// its end marker, and the end marker is looked for once in each byte. So
+// the overlay and the picker, which get no keyUnknown events, ignore a
+// paste longer than pasteMax (a session name or a query never is). The
+// local echo calls expire when nothing completes what is held, and reset
+// when the attachment or the overlay takes over.
 type keyDecoder struct {
 	pending []byte
+	// forwardAll also returns keyUnknown and keyPassive events; the
+	// picker and the overlay have no use for them.
+	forwardAll bool
 	// paste is the bracketed paste being read, from its start marker (or,
 	// once streaming, what is left of it after the last event); scanned
 	// is how much of it is known to hold no end marker.
@@ -331,7 +343,7 @@ func (d *keyDecoder) push(chunk []byte) []keyEvent {
 			var ev keyEvent
 			var ok bool
 			ev, ok, b = d.readPaste(b)
-			if ok {
+			if ok && d.wants(ev) {
 				events = append(events, ev)
 			}
 			continue
@@ -349,13 +361,21 @@ func (d *keyDecoder) push(chunk []byte) []keyEvent {
 				break
 			}
 			// Too long to be a key: it goes as it is.
-			ev, n = keyEvent{}, len(b)
+			ev, n = keyEvent{code: keyUnknown}, len(b)
 		}
 		ev.raw = append([]byte(nil), b[:n]...)
-		events = append(events, ev)
+		if ev.code != keyNone && d.wants(ev) {
+			events = append(events, ev)
+		}
 		b = b[n:]
 	}
 	return events
+}
+
+// wants reports whether this decoder returns ev: keyUnknown and keyPassive
+// events only with forwardAll.
+func (d *keyDecoder) wants(ev keyEvent) bool {
+	return d.forwardAll || (ev.code != keyUnknown && ev.code != keyPassive)
 }
 
 // readPaste adds b to the paste being read. It returns the event that ends
@@ -368,7 +388,9 @@ func (d *keyDecoder) readPaste(b []byte) (ev keyEvent, ok bool, rest []byte) {
 	if i := bytes.Index(d.paste[from:], pasteEnd); i >= 0 {
 		end := from + i + len(pasteEnd)
 		ev.raw = d.paste[:end]
-		if !d.streaming {
+		if d.streaming {
+			ev.code = keyUnknown
+		} else {
 			ev.isPaste = true
 			ev.paste = string(ev.raw[len(pasteStart) : end-len(pasteEnd)])
 		}
@@ -391,6 +413,7 @@ func (d *keyDecoder) streamPaste() (ev keyEvent, ok bool, rest []byte) {
 	if len(d.paste) <= keep {
 		return keyEvent{}, false, nil
 	}
+	ev.code = keyUnknown
 	ev.raw = append([]byte(nil), d.paste[:len(d.paste)-keep]...)
 	d.paste = append(make([]byte, 0, keep), d.paste[len(d.paste)-keep:]...)
 	d.scanned = len(d.paste)
@@ -417,7 +440,7 @@ func (d *keyDecoder) expire() []keyEvent {
 		return nil
 	}
 	if raw := d.reset(); len(raw) > 0 {
-		return []keyEvent{{raw: raw}}
+		return []keyEvent{{code: keyUnknown, raw: raw}}
 	}
 	return nil
 }
@@ -447,7 +470,11 @@ func decodeKey(b []byte) (keyEvent, int) {
 			if len(b) < 3 {
 				return keyEvent{}, 0
 			}
-			return keyEvent{code: ss3Key(b[2])}, 3
+			code := ss3Key(b[2])
+			if code == keyNone {
+				code = keyUnknown
+			}
+			return keyEvent{code: code}, 3
 		case 0x1b:
 			return keyEvent{code: keyEsc}, 1
 		}
@@ -494,6 +521,20 @@ func ss3Key(c byte) keyCode {
 }
 
 func decodeCSI(b []byte) (keyEvent, int) {
+	if len(b) < 3 {
+		return keyEvent{}, 0
+	}
+	if b[2] == 'M' {
+		// An X10 mouse report: CSI M and three bytes (button, column,
+		// row), each offset by 32, sent with mouse reporting on and
+		// SGR encoding (1006) off. With UTF-8 coordinates (1005) a
+		// column or row past 95 takes two bytes and is misread; the
+		// agents use SGR.
+		if len(b) < 6 {
+			return keyEvent{}, 0
+		}
+		return keyEvent{code: mouseKey(int(b[3]) - 32)}, 6
+	}
 	i := 2
 	for i < len(b) && b[i] >= 0x30 && b[i] <= 0x3f {
 		i++
@@ -507,9 +548,40 @@ func decodeCSI(b []byte) (keyEvent, int) {
 	final := b[i]
 	n := i + 1
 	if final < 0x40 || final > 0x7e {
-		// Not a CSI sequence after all: ESC [ is an event of its own,
-		// and what follows is decoded afresh.
-		return keyEvent{}, 2
+		// Not a CSI sequence after all: the ESC [ goes on its own (the
+		// echo forwards it) and decoding resumes after it.
+		return keyEvent{code: keyUnknown}, 2
+	}
+	if b[2] == '<' && (final == 'M' || final == 'm') {
+		// An SGR mouse report (1006): CSI < button ; column ; row, M
+		// for a press and m for a release.
+		j := 3
+		button, ok := csiDecimal(b, &j)
+		if !ok {
+			return keyEvent{code: keyUnknown}, n
+		}
+		return keyEvent{code: mouseKey(int(button))}, n
+	}
+	if final == 'M' {
+		// An urxvt mouse report (1015): CSI button ; column ; row M,
+		// the button offset by 32 as in X10 (the SGR form, with its
+		// '<', is handled above).
+		j := 2
+		if button, ok := csiDecimal(b, &j); ok {
+			return keyEvent{code: mouseKey(int(button) - 32)}, n
+		}
+	}
+	if i == 2 && (final == 'I' || final == 'O') {
+		return keyEvent{code: keyPassive, focus: true}, n // focus in or out (1004)
+	}
+	if b[2] == '?' || b[2] == '>' || final == 'R' || final == 'n' || final == 't' || (final == 'y' && b[i-1] == '$') {
+		// The terminal's reply to a query the program sent: device
+		// attributes, a cursor position, a mode, status or window report,
+		// the kitty keyboard flags. The worker leaves these to an attached
+		// client terminal, so they go to the program as they arrived.
+		// (A legacy modified F3, CSI 1;5R, lands here too and is
+		// forwarded the same way.)
+		return keyEvent{code: keyPassive}, n
 	}
 	params := splitParams(string(b[2:i]))
 	param := func(idx, sub int) int {
@@ -533,7 +605,7 @@ func decodeCSI(b []byte) (keyEvent, int) {
 		}
 	}
 	if param(1, 1) == 3 {
-		return keyEvent{release: true}, n
+		return keyEvent{code: keyPassive}, n // a key release
 	}
 	var code keyCode
 	switch final {
@@ -567,8 +639,8 @@ func decodeCSI(b []byte) (keyEvent, int) {
 		default:
 			if cp < 0x20 || cp > utf8.MaxRune || cp >= kittyFunctionalFirst && cp <= kittyFunctionalLast {
 				// Not text: a functional key (keypad, media, a
-				// modifier on its own) or a reply such as CSI ? flags u.
-				return keyEvent{}, n
+				// modifier on its own).
+				return keyEvent{code: keyUnknown}, n
 			}
 			r := rune(cp)
 			if mods&modShift != 0 {
@@ -579,6 +651,9 @@ func decodeCSI(b []byte) (keyEvent, int) {
 			return keyEvent{code: keyChar, r: r, mods: mods}, n
 		}
 	}
+	if code == keyNone {
+		code = keyUnknown
+	}
 	return keyEvent{code: code, mods: mods}, n
 }
 
@@ -588,6 +663,16 @@ const (
 	kittyFunctionalFirst = 57344
 	kittyFunctionalLast  = 63743
 )
+
+// mouseKey classifies a mouse report by its button value: wheel scrolls
+// (64 and up) and motion (32 added) edit nothing; a click may (it can move
+// the cursor or pick from a menu).
+func mouseKey(button int) keyCode {
+	if button >= 0 && button&(64|32) != 0 {
+		return keyPassive
+	}
+	return keyUnknown
+}
 
 func splitParams(s string) [][]string {
 	if s == "" {

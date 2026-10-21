@@ -229,6 +229,21 @@ func scenarios() []scenario {
 			}, append(fieldSteps, step{send: "\x03", pause: 500 * time.Millisecond}, step{send: "\x03", pause: 500 * time.Millisecond}, step{send: "\x04", pause: 2 * time.Second})...),
 		},
 		{
+			// pi's input field in its fullscreen mode (the alternate
+			// screen), the same way. pi gets an empty config directory
+			// and no network, extensions, skills or context files, so
+			// its startup screen shows none of the recording user's
+			// setup, logins or a changelog.
+			name: "pi-fullscreen-field",
+			argv: []string{"pi", "--tui-mode", "fullscreen", "--offline", "--no-session",
+				"--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files"},
+			env:   append(userEnv(), "PI_CODING_AGENT_DIR="+filepath.Join(workDir, ".pi-agent")),
+			setup: setupEmpty,
+			steps: append([]step{
+				{pause: 6 * time.Second, mark: "idle"},
+			}, append(fieldSteps, step{send: "\x03", pause: 500 * time.Millisecond}, step{send: "\x03", pause: 500 * time.Millisecond}, step{send: "\x04", pause: 2 * time.Second})...),
+		},
+		{
 			// Codex with the user's own login: startup, the slash command
 			// popup, the local /model picker, and quitting.
 			name:  "codex",

@@ -38,8 +38,22 @@ const (
 	// which left a shell printing ":3A" for every arrow key after a detach
 	// that popped one level. The stack is per screen, so the pop follows
 	// the return to the main screen, where attach pushed its level.
-	attachRestoreSequence = "\x1b[?2026l\x1b[?1049l\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?2004l\x1b[?1004l\x1b[<32u\x1b[>4m\x1b[?7h\x1b[m\x1b[0 q\x1b[?25h"
-	attachClearSequence   = "\x1b[2J\x1b[H"
+	attachRestoreSequence = "\x1b[?2026l\x1b[?1049l" + attachMouseOffSequence + "\x1b[?2004l\x1b[?1004l\x1b[<32u\x1b[>4m\x1b[?7h\x1b[m\x1b[0 q\x1b[?25h"
+	// attachMouseOffSequence turns mouse reporting off, in every mode and
+	// encoding.
+	attachMouseOffSequence = "\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l"
+	attachClearSequence    = "\x1b[2J\x1b[H"
+	// attachRepaintSequence starts every paint of a snapshot: mouse
+	// reporting off, then a clear. A snapshot sets only the modes that
+	// differ from the defaults, so without this a mouse mode the agent
+	// turned off while its output was held (local echo) or not seen (a
+	// reconnect) would stay on here, and the terminal would keep sending
+	// reports it no longer wants. Focus events (1004) are left alone:
+	// some terminals (Ghostty) report the focus whenever the mode is
+	// turned on, and the snapshot already turns it on again; with local
+	// echo the echo holds back that repeated report (echo.focus), without
+	// it the agent gets it, as it always has.
+	attachRepaintSequence = attachMouseOffSequence + attachClearSequence
 	// attachDetachSequence clears the session's screen after a detach, so
 	// the shell's prompt does not land in the middle of the agent's UI. The
 	// session's output stays in the terminal's scrollback.
@@ -327,6 +341,7 @@ func (c *client) attachOnce(id, uid string, titled *bool) (res attachResult, err
 	writeOut([]byte(attachEnterSequence))
 	for {
 		writeOut(attachStartupBytes(snapshot))
+		ech.repainted()
 		res, err := c.runAttachment(id, stream, keys, &parser, winch, quit, sizeOwnership(attached), ech)
 		if err == nil || !c.reconnectable(err) {
 			return res, err
@@ -706,6 +721,7 @@ func handleFrame(f frame, overlayOpen bool, size *protocol.SizeOwnership, ech *e
 		// snapshot replaces the screen, and output continues from it.
 		if !overlayOpen && !ech.holding() {
 			writeOut(resyncBytes(f.resp.AttachResync.Data))
+			ech.repainted()
 		}
 		if ech != nil {
 			ech.output(len(f.resp.AttachResync.Data))
@@ -762,9 +778,6 @@ func noteSizeOwner(size *protocol.SizeOwnership, note protocol.SizeOwnership, ec
 // closed and the screen was restored.
 func (c *client) overlayInput(ov *overlay, chunk []byte, stream *attachStream, size *protocol.SizeOwnership, ech *echo) (res *attachResult, closed bool, err error) {
 	for _, ev := range ov.keys.push(chunk) {
-		if ev.code == keyNone && !ev.isPaste {
-			continue
-		}
 		out, err := ov.handle(ev)
 		if err != nil {
 			return nil, false, err
@@ -788,6 +801,7 @@ func (c *client) overlayInput(ov *overlay, chunk []byte, stream *attachStream, s
 			}
 			writeOut([]byte("\x1b[?25h"))
 			writeOut(attachStartupBytes(restored))
+			ech.repainted()
 			return nil, true, nil
 		case overlaySwitch:
 			return &attachResult{outcome: outcomeSwitch, next: out.session}, false, nil
@@ -844,18 +858,19 @@ func resizeRequest() *protocol.Request {
 	return &protocol.Request{AttachResize: &protocol.Geometry{Cols: cols, Rows: rows, PixelWidth: pw, PixelHeight: ph}}
 }
 
-// attachStartupBytes paints a snapshot on a cleared screen: at attach, after
+// attachStartupBytes paints a snapshot after attachRepaintSequence (mouse
+// reporting off, a clear): at attach, after
 // a reattach, and after the overlay closes. The keyboard flags are not
 // pushed here (attachEnterSequence is written once per attachment): the
 // snapshot sets the agent's flags on the level already pushed, and every
 // push would be one more level for the detach to pop.
 func attachStartupBytes(snapshot []byte) []byte {
-	return append([]byte(attachClearSequence), snapshot...)
+	return append([]byte(attachRepaintSequence), snapshot...)
 }
 
 // resyncBytes repaints the screen from a resync snapshot.
 func resyncBytes(snapshot []byte) []byte {
-	return append([]byte(attachClearSequence), snapshot...)
+	return append([]byte(attachRepaintSequence), snapshot...)
 }
 
 // terminalTitleBytes sets both the window and icon titles.

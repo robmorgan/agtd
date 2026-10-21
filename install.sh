@@ -3,7 +3,7 @@
 # to run again: it only replaces binaries that changed, and if a daemon is
 # running, upgrades it with a live handoff so running sessions keep going.
 #
-#   curl -fsSL https://raw.githubusercontent.com/robmorgan/agtd/main/install.sh | bash
+#   curl -fsSL https://agtd.sh/install.sh | bash
 #   ./install.sh                  # from a checkout: builds that checkout
 #
 # By default it downloads the latest release's binaries (macOS 13+, or Linux

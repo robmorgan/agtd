@@ -26,8 +26,11 @@ import (
 // text, Backspace, Delete, Left, Right and the Shift-Enter and Alt-Enter
 // newlines (Ctrl-J and Ctrl-Enter differ between agents: Ctrl-Enter submits
 // in Claude Code and inserts a newline in Codex). Any other key (Enter, Tab,
-// Esc, Ctrl-C, Up, Down, ...) is sent at once and not predicted; the echo
-// then pauses until the field is seen again. While keys
+// Esc, Ctrl-C, Up, Down, a mouse click, ...) is sent at once and not
+// predicted; the echo then pauses until the field is seen again. Input that
+// edits nothing (a wheel scroll, so a fullscreen agent scrolls its
+// transcript, mouse motion, a focus change, a key release, the terminal's
+// CSI reply to the agent's query) is passed on without pausing. While keys
 // are unconfirmed the attachment's output is held (dropped), since the
 // agent's own redraws would fight the drawing; once the field confirms every
 // key, the screen is repainted from a snapshot inside synchronized output,
@@ -72,6 +75,9 @@ const (
 	// drops them and lets keys through raw, so an agent that stopped
 	// reading never pins a stale drawing.
 	echoMaxStates = 512
+	// echoFocusWindow is how long after a repaint the terminal's answer
+	// to it turning focus reporting back on is expected.
+	echoFocusWindow = 500 * time.Millisecond
 
 	syncBegin = "\x1b[?2026h"
 	syncEnd   = "\x1b[?2026l"
@@ -440,11 +446,22 @@ type echo struct {
 	// unpredicted (held), so that none overtakes them.
 	resend bool
 	held   bool
-	timer  *time.Timer
+	// focus is the last focus report sent to the agent, and focusUntil
+	// the end of the window after a repaint. Some terminals (Ghostty)
+	// report the focus whenever focus reporting is turned on, and a
+	// repaint of a focus-reporting agent's snapshot turns it on again
+	// (twice for a fullscreen agent: the primary screen's modes, then its
+	// own). A report that repeats the last one inside that window is
+	// such an answer and stays here; a change, or a repeat at any other
+	// time (a new program turning focus reporting on), goes.
+	focus      string
+	focusUntil time.Time
+	timer      *time.Timer
 }
 
 func newEcho(cfg echoConfig) *echo {
 	e := &echo{cfg: cfg, now: time.Now, timer: time.NewTimer(time.Hour)}
+	e.keys.forwardAll = true
 	e.timer.Stop()
 	// The field is asked for once the attach's output has been quiet for
 	// a moment, whether or not any follows the snapshot: the prompt may
@@ -497,9 +514,15 @@ func (e *echo) input(data []byte) (send, paint []byte) {
 	return send, paint
 }
 
-// key takes one key: it is held for a resend, sent, or predicted and
-// batched. It returns what to send now and whether the text changed.
+// key takes one key: it is held back (a repeated focus report), held for a
+// resend, sent, or predicted and batched. It returns what to send now and whether the text changed.
 func (e *echo) key(ev keyEvent) (send []byte, drawn bool) {
+	if ev.focus {
+		if r := string(ev.raw); r == e.focus && e.now().Before(e.focusUntil) {
+			return nil, false
+		}
+		e.focus = string(ev.raw)
+	}
 	if e.resend {
 		e.pending = append(e.pending, ev.raw...)
 		e.held = true
@@ -511,14 +534,20 @@ func (e *echo) key(ev keyEvent) (send []byte, drawn bool) {
 		}
 		return nil, false
 	}
+	if ev.code == keyPassive {
+		// A wheel scroll, mouse motion, a focus change, a key
+		// release or a query reply edits no text, so the drawing
+		// stands and the field need not be asked for. It goes in
+		// order behind the keys still batched, or at once.
+		if e.flushDue.IsZero() {
+			return ev.raw, false
+		}
+		e.pending = append(e.pending, ev.raw...)
+		return nil, false
+	}
 	if !e.active() || len(e.states) >= echoMaxStates {
 		e.pending = append(e.pending, ev.raw...)
 		return e.flush(), false
-	}
-	if ev.release {
-		// It changes nothing in the field: it goes with the keys
-		// around it.
-		return e.queue(ev.raw), false
 	}
 	if !e.predict(ev) {
 		// Unpredicted: it goes now, with everything before it, and
@@ -796,7 +825,16 @@ func (e *echo) snapshotAnswer(data []byte) (paint []byte) {
 		return nil
 	}
 	e.dropped, e.dirty, e.painted, e.offset = 0, false, false, 0
-	return []byte(syncBegin + attachClearSequence + string(data) + syncEnd)
+	e.repainted()
+	return []byte(syncBegin + attachRepaintSequence + string(data) + syncEnd)
+}
+
+// repainted notes a snapshot painted over the session's screen (the echo's
+// repaint, a resync, the overlay closing), opening the focus window.
+func (e *echo) repainted() {
+	if e != nil {
+		e.focusUntil = e.now().Add(echoFocusWindow)
+	}
 }
 
 // suspend ends the echo for now (the overlay opens, the attachment ends):
@@ -840,6 +878,9 @@ func (e *echo) reattached() {
 	if e.resend {
 		e.flushDue = time.Time{}
 	}
+	// A focus report sent before the stream was lost may never have
+	// arrived: the next one goes, whatever it repeats.
+	e.focus = ""
 	e.painted, e.dropped, e.dirty, e.offset = false, 0, false, 0
 	e.probeDue = e.now()
 	e.probing, e.snapshotDue = false, false

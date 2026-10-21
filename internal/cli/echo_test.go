@@ -184,7 +184,7 @@ func TestEchoFlow(t *testing.T) {
 		t.Fatal("still holding after the field confirmed everything")
 	}
 	reqs = e.probe()
-	if paint := e.snapshotAnswer([]byte("SNAP")); string(paint) != syncBegin+attachClearSequence+"SNAP"+syncEnd {
+	if paint := e.snapshotAnswer([]byte("SNAP")); string(paint) != syncBegin+attachRepaintSequence+"SNAP"+syncEnd {
 		t.Fatalf("repaint %q", paint)
 	}
 	if e.dropped != 0 || e.painted {
@@ -221,6 +221,176 @@ func TestEchoUnpredictedKeysGoAtOnceAndPause(t *testing.T) {
 	e.fieldAnswer(claudeField([]string{""}))
 	if send, paint := e.input([]byte("ef\r")); string(send) != "def\r" || paint != nil || !e.paused {
 		t.Fatalf("one read: send %q, paint %q, paused %v", send, paint, e.paused)
+	}
+}
+
+// A fullscreen agent (Claude Code, Codex) turns on mouse reporting and
+// scrolls its transcript on the wheel: input that edits nothing goes on as
+// it arrived, in order, and leaves the drawing standing. Clicks and keys the
+// decoder has no name for go too, and pause the echo.
+func TestEchoForwardsInputThatIsNotText(t *testing.T) {
+	passive := []string{
+		"\x1b[<64;10;5M", // SGR wheel up
+		"\x1b[<65;10;5M", // SGR wheel down
+		"\x1b[<35;12;7M", // SGR motion, no button
+		"\x1b[M`*%",      // X10 wheel up
+		"\x1b[96;10;5M",  // urxvt (1015) wheel up
+		"\x1b[97;1:3u",   // kitty key release
+		"\x1b[12;40R",    // cursor position report
+		"\x1b[?62;22c",   // device attributes
+		"\x1b[?2026;2$y", // mode report
+		"\x1b[?1u",       // kitty keyboard flags
+		"\x1b[>1;10;0c",  // secondary device attributes
+		"\x1b[0n",        // status report
+		"\x1b[8;24;80t",  // window size report
+	}
+	for _, in := range passive {
+		e := newEcho(echoConfig{flushAfter: echoFlushAfter})
+		if send, _ := e.input([]byte(in)); string(send) != in {
+			t.Errorf("%q without a field: send %q", in, send)
+		}
+		e.fieldAnswer(claudeField([]string{""}))
+		typeKeys(e, "ab")
+		// Behind the batched keys, not ahead of them.
+		if send, paint := e.input([]byte(in)); send != nil || paint != nil || e.paused || e.unconfirmed() != 2 {
+			t.Errorf("%q while typing: send %q, paint %q, paused %v, unconfirmed %d", in, send, paint, e.paused, e.unconfirmed())
+		}
+		if send := e.flush(); string(send) != "ab"+in {
+			t.Errorf("%q: flushed %q", in, send)
+		}
+		// Nothing batched: at once.
+		if send, _ := e.input([]byte(in)); string(send) != in || e.paused {
+			t.Errorf("%q idle: send %q, paused %v", in, send, e.paused)
+		}
+	}
+	for _, in := range []string{
+		"\x1b[<0;10;5M",          // SGR left press
+		"\x1b[<0;10;5m",          // SGR left release
+		"\x1b[M #%",              // X10 left press
+		"\x1b[32;10;5M",          // urxvt (1015) left press
+		"\x1b[0;10;5M",           // urxvt report with a button below 32
+		"\x1b[<99999999999;1;1M", // SGR button out of range
+		"\x1bOP",                 // F1
+		"\x1b[15~",               // F5
+		"\x1b[2~",                // Insert
+		"\x1b[\x01",              // not a CSI sequence: ESC [, then Ctrl-A
+		"\x1b[<;10;5M",           // SGR report with no button
+	} {
+		e := newEcho(echoConfig{flushAfter: echoFlushAfter})
+		if send, paint := e.input([]byte(in)); string(send) != in || paint != nil {
+			t.Errorf("%q without a field: send %q, paint %q", in, send, paint)
+		}
+		e.fieldAnswer(claudeField([]string{""}))
+		typeKeys(e, "ab")
+		if send, _ := e.input([]byte(in)); string(send) != "ab"+in || !e.paused {
+			t.Errorf("%q: send %q, paused %v", in, send, e.paused)
+		}
+		// Paused, it still goes at once.
+		if send, paint := e.input([]byte(in)); string(send) != in || paint != nil || !e.paused {
+			t.Errorf("%q paused: send %q, paint %q, paused %v", in, send, paint, e.paused)
+		}
+	}
+}
+
+// The same input against the echo's other states: one read mixing typing
+// and a wheel scroll, a scroll while paused, a click after the batch went
+// but before the agent confirmed it, and both at the prediction cap.
+func TestEchoInputThatIsNotTextInEveryState(t *testing.T) {
+	const wheel, click = "\x1b[<64;10;5M", "\x1b[<0;10;5M"
+
+	e := newEcho(echoConfig{flushAfter: echoFlushAfter})
+	e.fieldAnswer(claudeField([]string{""}))
+	in := "a" + wheel + "b"
+	if send, _ := e.input([]byte(in)); send != nil || e.paused || e.unconfirmed() != 2 {
+		t.Fatalf("mixed read: send %q, paused %v, unconfirmed %d", send, e.paused, e.unconfirmed())
+	}
+	if send := e.flush(); string(send) != in {
+		t.Fatalf("mixed read: flushed %q", send)
+	}
+
+	e = newEcho(echoConfig{flushAfter: echoFlushAfter})
+	e.fieldAnswer(claudeField([]string{""}))
+	e.input([]byte("\r"))
+	due := e.probeDue
+	if send, paint := e.input([]byte(wheel)); string(send) != wheel || paint != nil || !e.paused || e.probeDue != due {
+		t.Fatalf("paused: send %q, paint %q, paused %v, probe moved %v", send, paint, e.paused, e.probeDue != due)
+	}
+
+	e = newEcho(echoConfig{flushAfter: echoFlushAfter})
+	e.fieldAnswer(claudeField([]string{""}))
+	typeKeys(e, "ab")
+	e.flush()
+	if send, _ := e.input([]byte(click)); string(send) != click || !e.paused || e.unconfirmed() != 0 || !e.dirty {
+		t.Fatalf("click while holding: send %q, paused %v, unconfirmed %d, dirty %v", send, e.paused, e.unconfirmed(), e.dirty)
+	}
+
+	// A scroll while the keys are unconfirmed: it goes at once and the
+	// drawing stands; the agent's scrolled screen is held with the rest of
+	// its output and painted from a snapshot once the keys are confirmed.
+	e = newEcho(echoConfig{flushAfter: echoFlushAfter})
+	e.fieldAnswer(claudeField([]string{""}))
+	typeKeys(e, "ab")
+	e.flush()
+	if send, paint := e.input([]byte(wheel)); string(send) != wheel || paint != nil || e.paused || e.unconfirmed() != 2 || !e.holding() {
+		t.Fatalf("scroll while holding: send %q, paint %q, paused %v, unconfirmed %d", send, paint, e.paused, e.unconfirmed())
+	}
+	e.output(500)
+	if reqs := e.probe(); len(reqs) != 2 || reqs[1].AttachSnapshot == nil {
+		t.Fatalf("probe after held output: %v", reqs)
+	}
+	e.fieldAnswer(claudeField([]string{"ab"}))
+	if paint := e.snapshotAnswer([]byte("SNAP")); string(paint) != syncBegin+attachRepaintSequence+"SNAP"+syncEnd {
+		t.Fatalf("repaint after the scroll: %q", paint)
+	}
+
+	// While the field is being asked for, input that edits nothing goes at
+	// once and leaves the question outstanding.
+	e = newEcho(echoConfig{flushAfter: echoFlushAfter})
+	e.fieldAnswer(claudeField([]string{""}))
+	e.probe()
+	if send, _ := e.input([]byte("\x1b[I")); string(send) != "\x1b[I" || !e.probing || e.paused {
+		t.Fatalf("focus while probing: send %q, probing %v, paused %v", send, e.probing, e.paused)
+	}
+
+	// A click while the field is being asked for makes the answer stale:
+	// it describes the field before the click, so the echo stays paused
+	// and asks again.
+	e = newEcho(echoConfig{flushAfter: echoFlushAfter})
+	e.fieldAnswer(claudeField([]string{""}))
+	e.probe()
+	e.input([]byte(click))
+	if _, paint := e.fieldAnswer(claudeField([]string{""})); paint != nil || !e.paused || e.probeDue.IsZero() {
+		t.Fatalf("click while probing: paint %q, paused %v", paint, e.paused)
+	}
+
+	// Opening the overlay sends what is batched, a scroll queued behind
+	// the keys included, in order.
+	e = newEcho(echoConfig{flushAfter: echoFlushAfter})
+	e.fieldAnswer(claudeField([]string{""}))
+	typeKeys(e, "ab")
+	e.input([]byte(wheel))
+	if send := e.suspend(); string(send) != "ab"+wheel || len(e.pending) != 0 || e.unconfirmed() != 0 {
+		t.Fatalf("suspend: sent %q, pending %q, unconfirmed %d", send, e.pending, e.unconfirmed())
+	}
+
+	// A click with nothing typed goes at once and pauses until the field
+	// is seen again.
+	e = newEcho(echoConfig{flushAfter: echoFlushAfter})
+	e.fieldAnswer(claudeField([]string{""}))
+	if send, paint := e.input([]byte(click)); string(send) != click || paint != nil || !e.paused || e.probeDue.IsZero() {
+		t.Fatalf("click while idle: send %q, paint %q, paused %v", send, paint, e.paused)
+	}
+
+	// Past the cap every key goes raw, after the batch, without a pause.
+	for _, in := range []string{wheel, "\x1bOP"} {
+		e = newEcho(echoConfig{flushAfter: echoFlushAfter})
+		e.fieldAnswer(claudeField([]string{""}))
+		typeKeys(e, strings.Repeat("a", echoMaxStates))
+		send, _ := e.input([]byte(in))
+		send = append(send, e.flush()...)
+		if !bytes.HasSuffix(send, []byte(in)) || e.paused || len(e.pending) != 0 {
+			t.Errorf("%q at the cap: send ends %q, paused %v", in, send[max(len(send)-8, 0):], e.paused)
+		}
 	}
 }
 
@@ -927,4 +1097,64 @@ func TestEchoReleasesAnUnendedPaste(t *testing.T) {
 	if string(sent) != in {
 		t.Fatalf("sent %d of %d bytes", len(sent), len(in))
 	}
+}
+
+// Some terminals (Ghostty) report the focus whenever focus reporting is
+// turned on, which a repaint of a focus-reporting agent's snapshot does
+// (twice for a fullscreen one). A report repeating the last one just after
+// a repaint stays here; a change goes at any time, in any terminal, and so
+// does a repeat away from a repaint (a new program turning reporting on).
+func TestEchoDropsTheFocusReportsARepaintCauses(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	e := newEcho(echoConfig{flushAfter: echoFlushAfter})
+	e.now = func() time.Time { return now }
+	e.fieldAnswer(claudeField([]string{""}))
+	send := func(in string) string {
+		out, _ := e.input([]byte(in))
+		return string(out)
+	}
+	if got := send("\x1b[I"); got != "\x1b[I" {
+		t.Fatalf("first report: %q", got)
+	}
+	e.repainted()
+	if got := send("\x1b[I") + send("\x1b[I"); got != "" {
+		t.Fatalf("the repaint's answers went on: %q", got)
+	}
+	if got := send("\x1b[O"); got != "\x1b[O" {
+		t.Fatalf("switching away right after a repaint: %q", got)
+	}
+	now = now.Add(echoFocusWindow)
+	if got := send("\x1b[O"); got != "\x1b[O" {
+		t.Fatalf("a repeat away from a repaint: %q", got)
+	}
+	// A change while keys are batched goes behind them, without a pause.
+	typeKeys(e, "ab")
+	if out, _ := e.input([]byte("\x1b[I")); out != nil || e.paused || e.unconfirmed() != 2 {
+		t.Fatalf("focus in while typing: send %q, paused %v", out, e.paused)
+	}
+	if out := e.flush(); string(out) != "ab\x1b[I" {
+		t.Fatalf("flushed %q", out)
+	}
+	// After a reattach the last report may never have arrived: the next
+	// one goes even inside the reattach repaint's window, behind the keys
+	// the field proves missing.
+	e.reattached()
+	e.repainted()
+	if got := send("\x1b[I"); got != "" {
+		t.Fatalf("a report overtook the resend: %q", got)
+	}
+	e.probe()
+	if out, _ := e.fieldAnswer(claudeField([]string{""})); string(out) != "ab\x1b[I" {
+		t.Fatalf("resent %q", out)
+	}
+	// With no resend owed, it goes at once.
+	e.probe()
+	e.fieldAnswer(claudeField([]string{"ab"}))
+	e.reattached()
+	e.repainted()
+	if got := send("\x1b[I"); got != "\x1b[I" {
+		t.Fatalf("first report after a reattach: %q", got)
+	}
+	var none *echo
+	none.repainted() // no echo: nothing to note
 }
