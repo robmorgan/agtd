@@ -202,7 +202,7 @@ func TestNoRetryWithoutRequestTokens(t *testing.T) {
 // overlay is open (its close repaints from a fresh snapshot); either way
 // the attachment carries on.
 func TestResyncFrames(t *testing.T) {
-	if got := string(resyncBytes([]byte("screen"))); got != "\x1b[2J\x1b[Hscreen" || strings.Contains(got, attachEnterSequence) {
+	if got := string(resyncBytes([]byte("screen"))); got != attachRepaintSequence+"screen" || strings.Contains(got, attachEnterSequence) {
 		t.Fatalf("resync bytes %q", got)
 	}
 	f := frame{resp: &protocol.Response{AttachResync: &protocol.Bytes{Data: []byte("s")}}}

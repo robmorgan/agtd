@@ -17,8 +17,15 @@ func TestAttachSequences(t *testing.T) {
 	// A snapshot is painted without pushing keyboard flags: the push is
 	// once per attachment, and the detach empties the stack.
 	got := string(attachStartupBytes([]byte("snapshot")))
-	if got != "\x1b[2J\x1b[Hsnapshot" {
+	if got != "\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[2J\x1b[Hsnapshot" {
 		t.Fatalf("startup %q", got)
+	}
+	// Every repaint turns mouse reporting off before the snapshot, which
+	// turns back on the modes the agent has: one it left while its output
+	// was held or unseen does not stay on here. Focus events stay as they
+	// are, since turning them on makes the terminal report the focus.
+	if resync := string(resyncBytes([]byte("snapshot"))); resync != got {
+		t.Fatalf("resync %q", resync)
 	}
 	if attachEnterSequence != "\x1b[>1u" {
 		t.Fatal("enter sequence changed")
