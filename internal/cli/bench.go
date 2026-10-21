@@ -74,8 +74,14 @@ func (a *app) benchCommands() *cobra.Command {
 // echoBench is one attachment used for measuring.
 type echoBench struct {
 	stream *attachStream
+	// frames: the screen arrives as frames; ackField asks for the field
+	// in them, as the echo does, so a key's confirmation rides on the
+	// frame with its echo rather than on a request of its own.
+	framed, ackField bool
 	// carry is the end of the last output, for a marker split across frames.
 	carry []byte
+	// lastField is the field of the last frame that had one.
+	lastField *protocol.Field
 	// Counters since reset.
 	bytes, frames, resyncs int
 }
@@ -103,7 +109,8 @@ func (c *client) benchEcho(id string, opts echoBenchOptions, out io.Writer) erro
 		how = "frames"
 	}
 	fmt.Fprintf(out, "session %s on %s (%s), %s\n", id, where, attached.AttachID, how)
-	b := &echoBench{stream: stream}
+	b := &echoBench{stream: stream, framed: attached.HasFeature(protocol.CapAttachFrames)}
+	b.ackField = b.framed && opts.field
 	// Let the attach's output settle.
 	if err := b.drain(300 * time.Millisecond); err != nil {
 		return err
@@ -122,7 +129,23 @@ func (c *client) benchEcho(id string, opts echoBenchOptions, out io.Writer) erro
 			return fmt.Errorf("marker %d never came back: %w", seq, err)
 		}
 		echoes = append(echoes, time.Since(start))
-		if opts.field {
+		shows := func(f *protocol.Field) bool {
+			return f != nil && f.Found && slices.ContainsFunc(f.Rows, func(row string) bool { return strings.Contains(row, m) })
+		}
+		switch {
+		case opts.field && b.framed:
+			// The frame that carried the echo carries the field too
+			// (the acknowledgements ask for it); if the program had not
+			// drawn the key yet, the next frames do.
+			n := 0
+			if !shows(b.lastField) {
+				if err := b.await(func(r *protocol.Response) bool { n++; return r.AttachFrame != nil && shows(r.AttachFrame.Field) }, benchTimeout); err != nil {
+					return fmt.Errorf("no frame's field showed marker %d: %w", seq, err)
+				}
+			}
+			confirms = append(confirms, time.Since(start))
+			probes = append(probes, n)
+		case opts.field:
 			n := 0
 			for {
 				n++
@@ -130,16 +153,10 @@ func (c *client) benchEcho(id string, opts echoBenchOptions, out io.Writer) erro
 					return err
 				}
 				var f *protocol.Field
-				if err := b.await(func(r *protocol.Response) bool {
-					f = r.Field
-					if f == nil && r.AttachFrame != nil {
-						f = r.AttachFrame.Field
-					}
-					return f != nil
-				}, benchTimeout); err != nil {
+				if err := b.await(func(r *protocol.Response) bool { f = r.Field; return f != nil }, benchTimeout); err != nil {
 					return fmt.Errorf("the field was not answered: %w", err)
 				}
-				if f.Found && slices.ContainsFunc(f.Rows, func(row string) bool { return strings.Contains(row, m) }) {
+				if shows(f) {
 					break
 				}
 				if n >= 50 {
@@ -160,7 +177,9 @@ func (c *client) benchEcho(id string, opts echoBenchOptions, out io.Writer) erro
 	}
 	if opts.count > 0 {
 		fmt.Fprintf(out, "echo        %s\n", benchDist(echoes))
-		if opts.field {
+		if opts.field && b.framed {
+			fmt.Fprintf(out, "confirmed   %s  (frames after the echo's: p50 %d, max %d)\n", benchDist(confirms), benchPercentile(probes, 50), slices.Max(probes))
+		} else if opts.field {
 			fmt.Fprintf(out, "confirmed   %s  (field probes per key: p50 %d, max %d)\n", benchDist(confirms), benchPercentile(probes, 50), slices.Max(probes))
 		}
 		fmt.Fprintf(out, "output/key  p50 %d B, max %d B (a marker is %d bytes)\n", benchPercentile(perKey, 50), slices.Max(perKey), len(benchMarker(1)))
@@ -275,10 +294,13 @@ func (b *echoBench) await(done func(*protocol.Response) bool, timeout time.Durat
 					b.bytes += len(row)
 				}
 				b.frames++
+				if f.resp.AttachFrame.Field != nil {
+					b.lastField = f.resp.AttachFrame.Field
+				}
 			}
 			finished := done(f.resp)
 			if f.resp.AttachFrame != nil {
-				if err := b.stream.send(&protocol.Request{AttachFrameAck: &protocol.FrameAck{Seq: f.resp.AttachFrame.Seq}}); err != nil {
+				if err := b.stream.send(&protocol.Request{AttachFrameAck: &protocol.FrameAck{Seq: f.resp.AttachFrame.Seq, Field: b.ackField}}); err != nil {
 					return err
 				}
 			}
