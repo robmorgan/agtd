@@ -70,7 +70,8 @@ func FuzzSnapshotRestore(f *testing.F) {
 			// Leaving with 1049 restores the saved cursor (its position
 			// and origin mode), and the saved cursor is a known limit (a
 			// snapshot does not carry it), so that state is left out here.
-			if d := diffImages(cursorless(imageOf(ts.term)), cursorless(imageOf(client))); d != "" {
+			want, got := withoutSoftWraps(imageOf(ts.term), imageOf(client))
+			if d := diffImages(cursorless(want), cursorless(got)); d != "" {
 				if hyperlinkPendingWrap(ts.term) {
 					return
 				}
@@ -80,11 +81,9 @@ func FuzzSnapshotRestore(f *testing.F) {
 	})
 }
 
-// cursorless leaves out of img the known limits and the state that
-// restoring a saved cursor sets: the cursor's position and pending wrap,
-// and origin mode.
+// cursorless leaves out of img the state that restoring a saved cursor
+// sets: the cursor's position and pending wrap, and origin mode.
 func cursorless(img terminalImage) terminalImage {
-	img = withoutKnownLimits(img)
 	img.CursorX, img.CursorY, img.PendingWrap = 0, 0, false
 	modes := strings.Split(img.Modes, ",")
 	img.Modes = strings.Join(slices.DeleteFunc(modes, func(m string) bool { return m == "DECOM" }), ",")

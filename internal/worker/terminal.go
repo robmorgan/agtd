@@ -601,44 +601,20 @@ func (s *terminalState) primaryUnderAlternate(scrollback int) (out []byte, shape
 // working directory (OSC 7) either, which names a directory on the
 // session's host, not the client's.
 //
-// The formatter leaves out blank rows at the bottom of the screen. Written
-// into a client from the top, the rows it does emit then end up too low
-// whenever there is scrollback: after a clear screen, say, the prompt
-// would land on the bottom row instead of the top, with old output above
-// it. So formatScreen adds the missing line feeds after the screen
-// contents, before the cursor and pen are restored, so the client scrolls
-// exactly as far as this terminal has. The formatter separates rows with
-// CRLF and emits no other CRLF, so the count of rows it emitted is the
-// count of CRLFs plus one.
+// Every row is written, blank rows at the bottom included (the formatter
+// keeps them in VT form without trimming), with CRLF between rows and no
+// other CRLF: written into a client from the top, the rows land where
+// they are here, however much scrollback comes before them.
+// TestSnapshotWritesEveryRow pins that.
 //
 // With scrollback other than allScrollback, only the last scrollback rows
 // of scrollback are formatted, followed by the screen.
 func formatScreen(term *libghostty.Terminal, format libghostty.FormatterFormat, region bool, scrollback int) ([]byte, error) {
-	sel, rows, err := scrollbackSelection(term, scrollback)
+	sel, _, err := scrollbackSelection(term, scrollback)
 	if err != nil {
 		return nil, err
 	}
-	out, err := runFormatter(term, format, true, region, sel)
-	if err != nil || format != libghostty.FormatterFormatVT {
-		return out, err
-	}
-	missing := int(rows) - 1 - bytes.Count(out, crlf)
-	if missing <= 0 {
-		return out, nil
-	}
-	// The same formatting without the trailing extras is the prefix of
-	// out that ends with the screen contents.
-	contents, err := runFormatter(term, format, false, false, sel)
-	if err != nil {
-		return nil, err
-	}
-	if !bytes.HasPrefix(out, contents) {
-		return out, nil
-	}
-	padded := make([]byte, 0, len(out)+missing*len(crlf))
-	padded = append(padded, contents...)
-	padded = append(padded, bytes.Repeat(crlf, missing)...)
-	return append(padded, out[len(contents):]...), nil
+	return runFormatter(term, format, region, sel)
 }
 
 var crlf = []byte("\r\n")
@@ -680,11 +656,10 @@ func scrollbackSelection(term *libghostty.Terminal, scrollback int) (*libghostty
 }
 
 // runFormatter formats term's active screen. The modes and tab stops come
-// before the screen contents; with trailing set, the state emitted after
-// them (the scrolling region if region is also set, keyboard modes, then
-// cursor, pen, hyperlink, protection, kitty keyboard flags and charsets)
-// follows.
-func runFormatter(term *libghostty.Terminal, format libghostty.FormatterFormat, trailing, region bool, sel *libghostty.Selection) ([]byte, error) {
+// before the screen contents, and the state emitted after them (the
+// scrolling region if region is set, keyboard modes, then cursor, pen,
+// hyperlink, protection, kitty keyboard flags and charsets) follows.
+func runFormatter(term *libghostty.Terminal, format libghostty.FormatterFormat, region bool, sel *libghostty.Selection) ([]byte, error) {
 	f, err := libghostty.NewFormatter(term,
 		libghostty.WithFormatterSelection(sel),
 		libghostty.WithFormatterFormat(format),
@@ -694,14 +669,14 @@ func runFormatter(term *libghostty.Terminal, format libghostty.FormatterFormat, 
 		// Tab stops also matter for the alternate screen: setting them
 		// ends with CUP home, which is where the screen contents start.
 		libghostty.WithFormatterExtraTabstops(true),
-		libghostty.WithFormatterExtraScrollingRegion(trailing && region),
-		libghostty.WithFormatterExtraKeyboard(trailing),
-		libghostty.WithFormatterExtraCursor(trailing),
-		libghostty.WithFormatterExtraStyle(trailing),
-		libghostty.WithFormatterExtraHyperlink(trailing),
-		libghostty.WithFormatterExtraProtection(trailing),
-		libghostty.WithFormatterExtraKittyKeyboard(trailing),
-		libghostty.WithFormatterExtraCharsets(trailing),
+		libghostty.WithFormatterExtraScrollingRegion(region),
+		libghostty.WithFormatterExtraKeyboard(true),
+		libghostty.WithFormatterExtraCursor(true),
+		libghostty.WithFormatterExtraStyle(true),
+		libghostty.WithFormatterExtraHyperlink(true),
+		libghostty.WithFormatterExtraProtection(true),
+		libghostty.WithFormatterExtraKittyKeyboard(true),
+		libghostty.WithFormatterExtraCharsets(true),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create formatter: %w", err)

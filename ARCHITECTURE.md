@@ -1303,7 +1303,7 @@ that writes in small pieces, such as `yes | head`, gives mostly 30 to 130 bytes 
 PTY pump batches them: reads that arrive while the owner
 goroutine is busy are handed over together, up to 8 KiB, as one `VTWrite` and one chunk for each
 client; an idle owner gets each read at once, so batching adds no latency. A snapshot is a few
-getters, one or two formatter runs and one render-state update. [BENCHMARKS.md](BENCHMARKS.md)
+getters, one formatter run and one render-state update. [BENCHMARKS.md](BENCHMARKS.md)
 has the measurements: a `VTWrite` costs about 50 ns plus the parsing, and at 1 KiB per call the
 call overhead is under 1%, while output through the worker is limited by the kernel's PTY.
 
@@ -1325,9 +1325,6 @@ and its terminal to it first. It is built from libghostty's VT formatter, with t
   the mode the program used, so when the program exits, the shell and its scrollback are back. The
   scrolling region is emitted once, after the switch (it is terminal-wide), and the pen is reset
   after the switch so the alternate screen does not inherit the primary one's.
-* **Blank rows at the bottom.** The formatter leaves them out, so with scrollback the rows it
-  writes would land too low (after a clear screen, the prompt at the bottom, under old output).
-  The missing line feeds are added after the screen contents.
 * **Only changed colors.** The formatter's palette option sets all 256 colors to libghostty's
   defaults, overwriting the user's theme; the snapshot sets only the palette entries and default
   foreground, background and cursor colors that a program changed.
@@ -1353,8 +1350,10 @@ written to someone else's terminal cannot carry it (`TestSnapshotKnownLimits` de
 formatter's):
 
 * **Soft wraps.** Every row is written with a line break after it, so a wrapped line comes back
-  as separate lines that a later resize does not reflow. Frames ("Screen frames") have the same
-  trait, being the same formatting.
+  as separate lines that a later resize does not reflow. A wide character that did not fit at
+  the end of a row leaves a spacer head there, which keeps the pen it was written with; the
+  formatter writes the character on the next row and nothing in the spacer head's place. Frames
+  ("Screen frames") have the same traits, being the same formatting.
 * **A hyperlink that ends in a pending wrap.** The cursor block reprints the last cell to recreate
   the pending wrap, inside a fresh OSC 8, so a link without an explicit id comes back as two links
   to the same URI, the last cell its own.

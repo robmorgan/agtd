@@ -122,12 +122,12 @@ func TestAttachWithBoundedScrollback(t *testing.T) {
 // snapshot of orig with at most scrollback rows of scrollback, differs from
 // what it should be: orig, but with only the last of those rows.
 func diffBoundedRestore(orig, restored *libghostty.Terminal, scrollback int) string {
-	want := withoutKnownLimits(imageOf(orig))
+	want, got := withoutSoftWraps(imageOf(orig), imageOf(restored))
 	sel, _ := must2(scrollbackSelection(orig, scrollback))
 	want.ScrollbackRows = min(want.ScrollbackRows, uint(scrollback))
 	want.Text = formatSelection(orig, libghostty.FormatterFormatPlain, true, sel)
 	want.Styled = formatSelection(orig, libghostty.FormatterFormatVT, false, sel)
-	return diffImages(want, withoutKnownLimits(imageOf(restored)))
+	return diffImages(want, got)
 }
 
 // formatSelection is formatContent restricted to sel (nil for everything).
