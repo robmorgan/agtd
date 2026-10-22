@@ -118,7 +118,7 @@ func TestHelp(t *testing.T) {
 	var root bytes.Buffer
 	writeHelp(&root, (&app{}).rootCommand())
 	help := root.String()
-	for _, want := range []string{"agtd - agent multiplexer", "agt 0.1.0", "list         List known sessions [aliases: ls]", "-V, --version"} {
+	for _, want := range []string{"agtd - agent multiplexer", "agt " + Version, "list         List known sessions [aliases: ls]", "-V, --version"} {
 		if !strings.Contains(help, want) {
 			t.Errorf("root help lacks %q:\n%s", want, help)
 		}
