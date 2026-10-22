@@ -27,6 +27,10 @@ const (
 	// overlayTakeSize is a palette action rather than a mode: the
 	// attachment takes the session's size and the overlay closes.
 	overlayTakeSize
+	// overlaySubmitSwitch is a palette action too: Enter goes to the
+	// session and the attachment moves to the session that needs
+	// attention.
+	overlaySubmitSwitch
 )
 
 type overlayOutcomeKind int
@@ -38,6 +42,9 @@ const (
 	// overlayTookSize closes the overlay after the attachment asked to
 	// own the session's size.
 	overlayTookSize
+	// overlaySubmit sends Enter to the session and switches to the
+	// session that needs attention, or closes the overlay when none does.
+	overlaySubmit
 )
 
 type overlayOutcome struct {
@@ -50,7 +57,10 @@ type paletteItem struct {
 	mode        overlayMode
 }
 
+// paletteItems are the palette's commands. Submit and switch comes first,
+// so that Ctrl-Y, Enter is it.
 var paletteItems = []paletteItem{
+	{"↵", "Submit and switch", overlaySubmitSwitch},
 	{"s", "Switch session", overlaySwitcher},
 	{"t", "New session", overlayNewSession},
 	{"i", "Session details", overlayDetails},
@@ -184,8 +194,11 @@ func (o *overlay) handlePalette(ev keyEvent) (overlayOutcome, error) {
 		return overlayOutcome{kind: overlayClose}, nil
 	case ev.code == keyEnter:
 		if o.paletteSelected < len(items) {
-			if items[o.paletteSelected].mode == overlayTakeSize {
+			switch items[o.paletteSelected].mode {
+			case overlayTakeSize:
 				return overlayOutcome{kind: overlayTookSize}, nil
+			case overlaySubmitSwitch:
+				return overlayOutcome{kind: overlaySubmit}, nil
 			}
 			return overlayOutcome{}, o.run(items[o.paletteSelected].mode)
 		}

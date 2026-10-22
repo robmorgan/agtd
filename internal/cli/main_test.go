@@ -94,10 +94,15 @@ func TestSendInputArguments(t *testing.T) {
 		{[]string{"--host", "dev", "demo", "hi"}, "demo", "hi", "", "dev"},
 		{[]string{"-H", "dev", "demo", "-H", "x"}, "demo", "-H x", "", "dev"},
 		{[]string{"-H=dev", "demo", "hi"}, "demo", "hi", "", "dev"},
+		{[]string{"--compose", "demo", "run", "it"}, "demo", "run it", "", ""},
+		{[]string{"demo", "--compose", "x"}, "demo", "--compose x", "", ""},
 	} {
 		in, err := parseSendInput(tc.args)
 		if err != nil || in.session != tc.session || strings.Join(in.data, " ") != tc.data || in.source != tc.source || in.host != tc.host {
 			t.Errorf("%v: %+v %v", tc.args, in, err)
+		}
+		if in.compose != (tc.args[0] == "--compose") {
+			t.Errorf("%v: compose %v", tc.args, in.compose)
 		}
 	}
 	var usage usageError

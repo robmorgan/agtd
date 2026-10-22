@@ -210,6 +210,13 @@ const (
 	// AttachSnapshot is answered with a full Frame. See "Screen frames" in
 	// ARCHITECTURE.md.
 	CapAttachFrames = "attach-frames"
+	// CapAttachCompose: a whole prompt as one request, encoded by the
+	// worker as the program's terminal modes ask for input (a paste,
+	// bracketed when the program asked for that, then Enter as its
+	// keyboard mode wants it): SendInput.Compose on a control stream, for
+	// scripts, and AttachCompose on an attach stream, for the overlay's
+	// submit and switch. Empty text is Enter alone.
+	CapAttachCompose = "attach-compose"
 )
 
 // GlobalSessionID identifies one incarnation of a session across every
@@ -231,13 +238,13 @@ const MinProtocolVersion uint16 = 1
 func Capabilities() []string {
 	return []string{CapControlStream, CapGitState, CapArtifacts, CapSessionUID, CapRequestTokens, CapAttachFeatures, CapAttachReplace, CapAttachResync, CapRuntimeStats,
 		CapEvents, CapSessionActivity, CapSessionStatus, CapDaemonID, CapSessionRestart, CapWorkerHandoff, CapTerminalMemory, CapAttachScrollback, CapAttachSizeOwner,
-		CapAttachField, CapTerminalColors, CapAttachFrames}
+		CapAttachField, CapTerminalColors, CapAttachFrames, CapAttachCompose}
 }
 
 // AttachCapabilities are the capabilities that apply to an attach stream,
 // listed in AttachSession.Features.
 func AttachCapabilities() []string {
-	return []string{CapSessionUID, CapAttachReplace, CapAttachResync, CapSessionRestart, CapAttachScrollback, CapAttachSizeOwner, CapAttachField, CapTerminalColors, CapAttachFrames}
+	return []string{CapSessionUID, CapAttachReplace, CapAttachResync, CapSessionRestart, CapAttachScrollback, CapAttachSizeOwner, CapAttachField, CapTerminalColors, CapAttachFrames, CapAttachCompose}
 }
 
 // AttachFeatures is the attach-stream features a client may ask for given

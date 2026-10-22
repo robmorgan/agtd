@@ -651,13 +651,23 @@ func (rt *runtime) handleConnection(conn transport.Stream) (keep bool, err error
 	case req.AttachSession != nil:
 		return false, rt.serveAttach(conn, reader, req.AttachSession)
 	case req.SendInput != nil, req.AttachInput != nil:
-		data := []byte(nil)
+		data, compose := []byte(nil), false
 		if req.SendInput != nil {
-			data = req.SendInput.Data
+			data, compose = req.SendInput.Data, req.SendInput.Compose
 		} else {
 			data = req.AttachInput.Data
 		}
-		if err := rt.owner.do(func(s *ownerState) error { return s.writeInput(data) }); err != nil {
+		if err := rt.owner.do(func(s *ownerState) error {
+			if compose {
+				// A whole prompt, encoded for the program's modes
+				// (compose.go).
+				var err error
+				if data, err = s.compose(data); err != nil {
+					return err
+				}
+			}
+			return s.writeInput(data)
+		}); err != nil {
 			return false, fail(err)
 		}
 		return false, reply(&protocol.Response{InputAccepted: protocol.Empty})
@@ -780,6 +790,9 @@ func (rt *runtime) serveAttach(conn transport.Stream, reader *bufio.Reader, req 
 	// A client that asked for CapAttachFrames gets the screen as frames
 	// instead of the raw output (frames.go).
 	frames := slices.Contains(features, protocol.CapAttachFrames)
+	// A client that asked for CapAttachCompose may send a whole prompt to
+	// encode for the program (compose.go).
+	composes := slices.Contains(features, protocol.CapAttachCompose)
 	// A client that asked for CapTerminalColors may report its terminal's
 	// default colours, which answer the program's colour queries from now
 	// on (colors.go).
@@ -1031,6 +1044,24 @@ loop:
 					// The agent has stopped reading its input. Dropping
 					// keystrokes silently would be worse than ending the
 					// attachment with the reason.
+					final = protocol.ErrorResponsef("%v", err)
+					break loop
+				}
+			case in.req.AttachCompose != nil && composes:
+				// A whole prompt, or Enter alone, encoded for the
+				// program's modes (compose.go); typed, like AttachInput.
+				text := in.req.AttachCompose.Data
+				if err := rt.owner.do(func(s *ownerState) error {
+					data, err := s.compose(text)
+					if err != nil {
+						return err
+					}
+					s.noteInput(att.attachID, data, time.Now())
+					return s.writeInput(data)
+				}); err != nil {
+					if errors.Is(err, errOwnerStopped) {
+						return err
+					}
 					final = protocol.ErrorResponsef("%v", err)
 					break loop
 				}

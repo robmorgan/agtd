@@ -483,7 +483,9 @@ owned by someone else.
 Interactive PTY attach is available with `agt attach <name>`. Detach with `Ctrl-\`, switch to
 the previous running session with `Ctrl-[`, or switch to the next running session with `Ctrl-]`, or
 `agt detach <name> --attach <attach_id>` for a specific client, or
-`agt detach <name> --all` to disconnect every attached client on the session.
+`agt detach <name> --all` to disconnect every attached client on the session. `Ctrl-Y` opens agt's
+palette over the session; its first command, Submit and switch (so `Ctrl-Y`, `Enter`), sends Enter
+to the agent and moves you to the session that needs attention, or stays when none does.
 Use `agt attachments <name>` to inspect the current attachment ids, which one sets the session's
 size (`size-owner`), and the size each one has.
 Attach clears the visible screen and repaints from the daemon's retained terminal state; if the
@@ -527,7 +529,9 @@ its session is removed; the UID never is, so a reconnecting client can tell that
 a name is no longer the one it was attached to.
 Multiple interactive attachers are allowed per session, and the TUI uses the same shared attach
 path when a worker is focused. Background PTY writes are still available with
-`agt send-input <name> -- <text>`.
+`agt send-input <name> -- <text>`, and `agt send-input --compose <name> -- <prompt>` sends a whole
+prompt the way the agent's terminal asks for input (a paste, bracketed when the agent turned that
+on, then Enter as its keyboard mode wants it), for scripts and `agt events --exec` hooks.
 
 ## Remote Access (Preview)
 
@@ -627,7 +631,7 @@ agt --host devbox workspace add mono ~/src/mono       # name a directory on the 
 agt new -w mono devbox/auth-tests                     # and start sessions in it
 agt --host devbox ls
 agt attach devbox/auth-refactor
-agt send-input devbox/auth-refactor -- "run the tests"
+agt send-input --compose devbox/auth-refactor -- "run the tests"   # a whole prompt, then Enter
 agt history devbox/auth-refactor
 agt diff devbox/auth-refactor --stat
 agt --host devbox events --follow --notify             # tell me when a devbox session needs me

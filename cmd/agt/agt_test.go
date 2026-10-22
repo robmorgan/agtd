@@ -367,6 +367,64 @@ func TestAttachEndToEnd(t *testing.T) {
 	}
 }
 
+// Ctrl-Y, Enter submits what was typed and moves to the session that needs
+// attention, or stays when none does; agt send-input --compose sends a whole
+// prompt with Enter.
+func TestSubmitAndSwitchEndToEnd(t *testing.T) {
+	e := newEnv(t, "")
+	e.startAndDetach("other")
+	tm := e.start("new", "demo")
+	m := tm.expect(0, "attached to demo")
+	m = tm.expect(m, "$ ")
+	// Nothing needs attention: Enter goes to the shell and the attachment
+	// stays.
+	tm.write("echo stay-$((1+1))")
+	m = tm.expect(m, "stay-$((1+1))")
+	tm.write("\x19")
+	m = tm.expect(m, "Submit and switch")
+	tm.write("\r")
+	m = tm.expect(m, "stay-2")
+	tm.write("echo still-$((1+2))\r")
+	m = tm.expect(m, "still-3")
+
+	// The other session asks for attention: Enter goes to this shell and
+	// the attachment moves there.
+	e.mustRun("agt", "send-input", "other",
+		`printf '\033]7501;state=blocked:kind=permission:app=sh:msg=RGVwbG95Pw==\033\\'`+"\r")
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(e.mustRun("agt", "status", "other"), "activity: blocked") {
+		if time.Now().After(deadline) {
+			t.Fatal("other never needed attention")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	tm.write("echo go-$((2+2))")
+	m = tm.expect(m, "go-$((2+2))")
+	tm.write("\x19")
+	m = tm.expect(m, "Submit and switch")
+	tm.write("\r")
+	m = tm.expect(m, "\x1b]0;other - agtd\x07")
+	deadline = time.Now().Add(5 * time.Second)
+	for !strings.Contains(e.mustRun("agt", "history", "demo"), "go-4") {
+		if time.Now().After(deadline) {
+			t.Fatal("the submitted command did not run in demo")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// A whole prompt from a script, Enter included.
+	e.mustRun("agt", "send-input", "--compose", "demo", "echo composed-$((3+3))")
+	deadline = time.Now().Add(5 * time.Second)
+	for !strings.Contains(e.mustRun("agt", "history", "demo"), "composed-6") {
+		if time.Now().After(deadline) {
+			t.Fatal("send-input --compose did not run in demo")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	tm.write("\x1c")
+	tm.wait()
+}
+
 // The first terminal attached owns the session's size; others are pending
 // until they take it over (overlay or --take-size) or the owner leaves.
 func TestSizeOwnershipEndToEnd(t *testing.T) {

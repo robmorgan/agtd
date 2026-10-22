@@ -1,6 +1,6 @@
 # Design: a remote attach that feels local
 
-Status: revision 3 (2026-10-19); Phases 1 and 2 built the same day on branch `native-echo` (merged as PR #59), Phase 0 measured on 2026-10-20 (PR #62, BENCHMARKS.md "Remote interaction"), Phase 3 built on 2026-10-20 on branch `attach-frames` (ARCHITECTURE.md "Screen frames"); Phase 4 remains
+Status: revision 3 (2026-10-19); Phases 1 and 2 built the same day on branch `native-echo` (merged as PR #59), Phase 0 measured on 2026-10-20 (PR #62, BENCHMARKS.md "Remote interaction"), Phase 3 built on 2026-10-20 on branch `attach-frames` (ARCHITECTURE.md "Screen frames"), Phase 4 on 2026-10-22 on branch `attach-compose` (submit and switch, `attach-compose`)
 (ARCHITECTURE.md, "The Input Field And Local Echo"); Phases 0, 3 and 4 remain.
 Scope: `agt attach` to a remote daemon, with typing that is echoed locally but looks exactly like
 typing into the agent's own input box, for Claude Code, Codex and pi alike, and with output that
@@ -258,8 +258,10 @@ The user-visible change, on today's output stream.
   no state matches (the agent moved on, or the field is gone) the keys are dropped and the
   bottom-row status says how many, as the reattach status does today. Nothing is resent without
   a match.
-* **Configuration.** `[composer] enabled = true`, `flush_after = "50ms"`, `predict = true`
-  (false sends keys as today with no echo), and `[composer.<app>]` overrides for the Field rules.
+* **Configuration.** `[composer] enabled = true` (false sends keys as today, with no echo) and
+  `flush_after = "50ms"`. As built, `enabled` is the `predict` switch this bullet first proposed,
+  and the per-app Field rules are the worker's profiles (`internal/worker/field.go`), with no
+  `[composer.<app>]` override in config until an agent needs one.
   No key legend, because there are no new keys: the agent's own apply.
 
 Tests: the editor model and wrapper against the probe's fixtures (the prediction for the typed
