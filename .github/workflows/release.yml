@@ -67,14 +67,16 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
+      # Still on Node 20 (which GitHub runs on Node 24) as of v2.2.1, the
+      # latest; kept because ziglang.org asks CI to use its mirrors, as this does.
       - uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: .build
           key: libghostty-linux-${{ matrix.arch }}-${{ env.ZIG_VERSION }}-${{ hashFiles('scripts/build-libghostty.sh') }}
@@ -94,7 +96,7 @@ jobs:
             sh -c 'ldd --version | head -n 1 && /x/agt --version && /x/agtd bench sessions --count 2 --duration 1s'
       - name: Package
         run: tar -C dist/linux-${{ matrix.arch }}/out -czf dist/agtd-linux-${{ matrix.arch }}.tar.gz agt agtd LICENSE
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: agtd-linux-${{ matrix.arch }}
           path: dist/agtd-linux-${{ matrix.arch }}.tar.gz
@@ -112,14 +114,14 @@ jobs:
         run: |
           echo "::error::a release needs the macOS signing and notarization secrets (see the top of release.yml)"
           exit 1
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: .build
           key: libghostty-macos-${{ env.ZIG_VERSION }}-${{ hashFiles('scripts/build-libghostty.sh') }}
@@ -229,7 +231,7 @@ jobs:
         run: security delete-keychain "${KEYCHAIN}" || true
       - name: Package
         run: tar -C "${OUT}" -czf dist/agtd-darwin-universal.tar.gz agt agtd LICENSE
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: agtd-darwin-universal
           path: dist/agtd-darwin-universal.tar.gz
@@ -242,7 +244,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: agtd-*
           path: dist
