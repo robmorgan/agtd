@@ -2,6 +2,7 @@ package worker
 
 import (
 	"bytes"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -58,7 +59,7 @@ func FuzzSnapshotRestore(f *testing.F) {
 		client.VTWrite([]byte("\x1b[2J\x1b[H"))
 		client.VTWrite(snap)
 		if d := diffRestored(ts.term, client); d != "" {
-			if alternateScrollback(ts.term) || graphemeModeChanged(ts.term, data) {
+			if alternateScrollback(ts.term) || graphemeModeChanged(ts.term, data) || hyperlinkPendingWrap(ts.term) {
 				return // a known limit; see TestSnapshotKnownLimits
 			}
 			t.Fatalf("restored terminal differs:\n%s\nsnapshot: %q", d, snap)
@@ -70,6 +71,9 @@ func FuzzSnapshotRestore(f *testing.F) {
 			// and origin mode), and the saved cursor is a known limit (a
 			// snapshot does not carry it), so that state is left out here.
 			if d := diffImages(cursorless(imageOf(ts.term)), cursorless(imageOf(client))); d != "" {
+				if hyperlinkPendingWrap(ts.term) {
+					return
+				}
 				t.Fatalf("primary screen under the alternate screen differs:\n%s\nsnapshot: %q", d, snap)
 			}
 		}
@@ -85,6 +89,18 @@ func cursorless(img terminalImage) terminalImage {
 	modes := strings.Split(img.Modes, ",")
 	img.Modes = strings.Join(slices.DeleteFunc(modes, func(m string) bool { return m == "DECOM" }), ",")
 	return img
+}
+
+// hyperlinkPendingWrap reports whether the cursor is in a pending wrap on a
+// row that holds a hyperlink: the snapshot's reprint of the last cell can
+// then split the link in two (a known limit; see TestSnapshotKnownLimits).
+func hyperlinkPendingWrap(term *libghostty.Terminal) bool {
+	if pending, _ := term.CursorPendingWrap(); !pending {
+		return false
+	}
+	y, _ := term.CursorY()
+	_, _, rowFlags, _, _ := cellsOf(term)
+	return strings.Contains(rowFlags, fmt.Sprintf("%dh ", y))
 }
 
 // graphemeModeChanged reports whether the stream may have switched

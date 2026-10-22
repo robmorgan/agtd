@@ -412,6 +412,15 @@ func TestSnapshotKnownLimits(t *testing.T) {
 			differs: []string{"RowFlags"},
 		},
 		{
+			// The cursor block reprints the last cell to recreate the
+			// pending wrap, inside a fresh OSC 8 for its hyperlink, so a
+			// link without an explicit id comes back as two links to the
+			// same URI (the last cell its own). Only the VT rendering
+			// shows it; a link with an explicit id is restored as one.
+			name: "hyperlink that ends in a pending wrap", stream: "\x1b]8;;https://example.com\x1b\\" + strings.Repeat("x", 80),
+			differs: []string{"Styled"},
+		},
+		{
 			// Without grapheme clustering a zero-width codepoint joins the
 			// cell before it; with it, U+061C (a control) starts its own
 			// grapheme and is dropped. Cells do not record which mode
