@@ -3,10 +3,8 @@
 #
 # go.mitchellh.com/libghostty tracks a specific ghostty commit; this pin must
 # match the GIT_TAG in that module's CMakeLists.txt, or be a later commit with
-# the same C API (include/ghostty). It is currently ahead, on a Ghostty main
-# that keeps that API (only additions) and brings the formatter's origin mode
-# fix (ghostty #14588), program status revision 0.4 (#14630) and the
-# formatter's pending wrap over a blank cell (#14670). Requires Zig 0.16+.
+# the same C API (include/ghostty). It currently matches the bindings' pin
+# (df1957c, 2026-10-21). Ghostty needs Zig 0.17+ since ghostty #14519.
 #
 # GHOSTTY_TARGET (a Zig target triple, e.g. x86_64-linux-gnu.2.28 or
 # x86_64-macos) builds for that target into its own directory,
@@ -19,7 +17,7 @@
 #        eval "$(scripts/build-libghostty.sh --env)"   # only print exports
 set -euo pipefail
 
-GHOSTTY_COMMIT="81598385d608dda4946093d6d6a234d204a2f225"
+GHOSTTY_COMMIT="f54340ad77814fe319d136e5e915d6a48de8dd23"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD="${HERE}/../.build"
 SRC="${BUILD}/ghostty"
@@ -46,9 +44,9 @@ need_zig() {
   local v
   v="$("${ZIG}" version 2>/dev/null || true)"
   case "${v}" in
-    0.16.*|0.1[7-9].*|[1-9]*) return 0 ;;
+    0.1[7-9].*|[1-9]*) return 0 ;;
   esac
-  echo "error: Zig 0.16.0 or newer is required to build libghostty-vt (found '${v:-none}')." >&2
+  echo "error: Zig 0.17.0 or newer is required to build libghostty-vt (found '${v:-none}')." >&2
   echo "       Install it (brew install zig) or point ZIG=/path/to/zig." >&2
   exit 1
 }

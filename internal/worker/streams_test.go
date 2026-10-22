@@ -138,7 +138,7 @@ func checkReplay(data []byte, cut int) error {
 // diffRestored compares a restored terminal with the original, leaving out
 // what TestSnapshotKnownLimits shows a snapshot cannot restore.
 func diffRestored(orig, restored *libghostty.Terminal) string {
-	return diffImages(withoutKnownLimits(imageOf(orig)), withoutKnownLimits(imageOf(restored)))
+	return diffImages(withoutSoftWraps(imageOf(orig), imageOf(restored)))
 }
 
 func TestSnapshotRestoresRecordedStreams(t *testing.T) {

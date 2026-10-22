@@ -487,9 +487,9 @@ overhead is about 1% and at 64 bytes about 25%. Plain line output parses at 630-
 (`BenchmarkTerminalFeed`, 8 KiB chunks); creating and freeing a terminal takes 9.6 µs.
 
 The worker makes one `VTWrite` per chunk of PTY output, and nothing on the output path crosses
-the boundary per cell or per character. A snapshot is a few getters, one formatter run (two when
-blank rows at the bottom need padding), one render-state update for the cursor shape, and with
-the alternate screen up a binary snapshot and decode of the terminal.
+the boundary per cell or per character. A snapshot is a few getters, one formatter run, one
+render-state update for the cursor shape, and with the alternate screen up a binary snapshot and
+decode of the terminal.
 
 PTY reads can be much smaller than a chunk. With `yes 'line padding…' | head -c 8M` writing to a
 PTY, a bare read loop on macOS got 480,000 reads, almost all of 33 to 128 bytes, at 25.8 MB/s.

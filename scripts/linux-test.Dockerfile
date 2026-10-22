@@ -3,7 +3,7 @@
 # from macOS) gets exercised from a Mac. Go and Zig match the versions the
 # README requires.
 FROM golang:1.26-bookworm
-ARG ZIG_VERSION=0.16.0
+ARG ZIG_VERSION=0.17.0
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends xz-utils git procps lsof >/dev/null \
  && rm -rf /var/lib/apt/lists/*
 RUN arch="$(uname -m)" && case "$arch" in arm64) arch=aarch64;; esac \

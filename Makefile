@@ -9,7 +9,7 @@ export PKG_CONFIG_PATH
 LDFLAGS := -X agtd.sh/internal/cli.Version=$(VERSION) \
 	-X agtd.sh/internal/daemon.Version=$(VERSION)
 
-# libghostty-vt, which agtd links, needs Zig 0.16+ (see README.md).
+# libghostty-vt, which agtd links, needs Zig 0.17+ (see README.md).
 libghostty:
 	ZIG=$(ZIG) ./scripts/build-libghostty.sh
 
