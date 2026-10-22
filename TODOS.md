@@ -117,6 +117,30 @@ echo-mouse-passthrough, but a scroll can still hide a permission prompt.
 **Priority:** P3
 **Depends on:** None
 
+### Stamp frames with the input they show
+
+**What:** Have each `AttachFrame` carry how much of the attachment's input
+the worker had read when it built the frame (an input sequence number or
+byte count), and have the local echo confirm keys against that instead of
+deriving it from the frame window (`frameField` in internal/cli/echo.go).
+
+**Why:** Today the echo proves what a frame shows from ordering: the worker
+reads input and `FrameAck`s in order on one stream and builds frame N only
+after the ack of frame N-`protocol.FrameWindow`. That holds over a QUIC
+stream, but breaks if frames or acks move to unreliable QUIC datagrams
+(mosh-style, a lost frame replaced by the next instead of retransmitted).
+A stamp states it outright: no ignored "unproven" fields and no re-probing
+to get past the window, so keys confirm a frame or two sooner.
+
+**Context:** Raised merging attach-frames (#66) into echo-review (#68). It
+is a new field in `Frame`, so a capability and golden-frame updates; keep
+the window rule for workers without it. Only needed before frames go
+unreliable; input itself stays on a reliable ordered stream.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** None
+
 ## Completed
 
 ### Keep the echo paused when input pauses it during a field probe
