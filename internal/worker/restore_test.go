@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"fmt"
 	"reflect"
 	"strings"
@@ -349,6 +350,44 @@ func TestSnapshotRestores(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+// TestSnapshotWritesEveryRow pins that the formatter writes every row of the
+// screen in VT form, blank rows at the bottom included (ghostty #14766),
+// with CRLF between rows and no other CRLF: written into a client from the
+// top, the rows then land where they are here, however much scrollback
+// comes before them. A libghostty that trimmed those rows again would land
+// a screen cleared over scrollback at the bottom of the client's.
+func TestSnapshotWritesEveryRow(t *testing.T) {
+	var scrollback strings.Builder
+	for i := range 200 {
+		fmt.Fprintf(&scrollback, "line %d\r\n", i)
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"empty", ""},
+		{"blank rows at the bottom", "a\r\nb\r\n"},
+		{"cleared screen over scrollback", scrollback.String() + "\x1b[H\x1b[2J$ "},
+		{"cursor below the last text", scrollback.String() + "done\r\n"},
+		{"alternate screen", scrollback.String() + "$ vim\x1b[?1049h\x1b[H\x1b[2Jalt\x1b[3;4H"},
+	} {
+		for _, rows := range []int{allScrollback, 0, 10} {
+			t.Run(fmt.Sprintf("%s/scrollback=%d", tc.name, rows), func(t *testing.T) {
+				ts := newTestTerminal(t, 80, 24)
+				ts.feed([]byte(tc.stream))
+				sel, want, err := scrollbackSelection(ts.term, rows)
+				if err != nil {
+					t.Fatal(err)
+				}
+				out, err := runFormatter(ts.term, libghostty.FormatterFormatVT, true, sel)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := uint(bytes.Count(out, crlf)) + 1; got != want {
+					t.Fatalf("formatted %d rows, want %d:\n%q", got, want, out)
+				}
+			})
+		}
 	}
 }
 
