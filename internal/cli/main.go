@@ -22,7 +22,7 @@ import (
 
 // Version is the client version, reported by `agt --version` and
 // `agt daemon info`. Builds set it (and agtd's) from one place.
-var Version = "0.1.0"
+var Version = "0.1.1"
 
 const rootIntro = `A local multi-session coding workflow for daemon-backed agents.
 
