@@ -573,3 +573,95 @@ func processRSS(t *testing.T, pid int) int64 {
 }
 
 func strp(s string) *string { return &s }
+
+// readFrame returns the next screen frame.
+func (c *client) readFrame() *protocol.Frame {
+	c.t.Helper()
+	for {
+		resp := c.read()
+		if resp.AttachFrame != nil {
+			return resp.AttachFrame
+		}
+		if resp.Error != nil || resp.SessionEnded != nil || resp.EndOfStream != nil {
+			c.t.Fatalf("no frame: %+v", resp)
+		}
+	}
+}
+
+func (c *client) ack(seq uint32) {
+	c.t.Helper()
+	c.send(&protocol.Request{AttachFrameAck: &protocol.FrameAck{Seq: seq}})
+}
+
+func frameText(f *protocol.Frame) string {
+	var b strings.Builder
+	for _, r := range f.Rows {
+		b.Write(r.VT)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// Extended offline under frames: the network goes with a frame in flight
+// and unacknowledged. The daemon drops the silent client's attachment, the
+// session carries on, and the reattach on a new connection starts from a
+// full frame of the screen as it is then, acknowledged from one.
+func TestFrameReattachAfterOutage(t *testing.T) {
+	h, client := remoteHarness(t, time.Second)
+	id := h.mustCreate("offline-frames")
+	relay := transporttest.NewRelay(t, h.srv.RemoteAddr())
+	frames := []string{protocol.CapAttachFrames}
+	c, attached := mustAttachOn(t, openStream(t, h.dialQUIC(client, relay.Addr())), id, protocol.AttachSession{Features: frames})
+	if !attached.HasFeature(protocol.CapAttachFrames) {
+		t.Fatalf("frames not negotiated: %v", attached.Features)
+	}
+	f := c.readFrame()
+	if !f.Full || f.Seq != 1 {
+		t.Fatalf("first frame: full %v seq %d", f.Full, f.Seq)
+	}
+	c.ack(f.Seq)
+	c.input("one\n")
+	if f = c.readFrame(); !strings.Contains(frameText(f), "got:one") {
+		t.Fatalf("frame after typing: %q", frameText(f))
+	}
+	// Frame 2 goes unacknowledged: the network dies under it.
+	relay.Drop(true)
+	h.eventually("the daemon to drop the silent client", func() bool { return len(h.attachments(id)) == 0 })
+	h.sendInput(id, "while-offline\n")
+	h.eventually("output while offline", func() bool { return strings.Contains(h.history(id), "got:while-offline") })
+	time.Sleep(2 * time.Second) // well past the dead-peer timeout
+	relay.Drop(false)
+
+	// The client has given the old connection up too.
+	c.conn.SetReadDeadline(time.Now().Add(testTimeout))
+	for {
+		resp, err := protocol.ReadResponse(c.r)
+		if err != nil {
+			if !transport.IsConnectionLost(err) {
+				t.Fatalf("old connection failed with %v, which is not a lost connection", err)
+			}
+			break
+		}
+		if resp == nil {
+			t.Fatal("old attachment ended cleanly")
+		}
+	}
+	c2, again := mustAttachOn(t, openStream(t, h.dialQUIC(client, relay.Addr())), id, protocol.AttachSession{
+		Features: frames, ExpectUID: attached.SessionUID, Replaces: attached.AttachID,
+	})
+	if again.SessionUID != attached.SessionUID || again.AttachID == attached.AttachID {
+		t.Fatalf("reattached %+v after %+v", again, attached)
+	}
+	f = c2.readFrame()
+	if !f.Full || f.Seq != 1 || !strings.Contains(frameText(f), "got:one") || !strings.Contains(frameText(f), "got:while-offline") {
+		t.Fatalf("reattach frame: full %v seq %d %q", f.Full, f.Seq, frameText(f))
+	}
+	c2.ack(f.Seq)
+	c2.input("back\n")
+	if f = c2.readFrame(); !strings.Contains(frameText(f), "got:back") {
+		t.Fatalf("frame after the reattach: %q", frameText(f))
+	}
+	if atts := h.attachments(id); len(atts) != 1 || atts[0].AttachID != again.AttachID {
+		t.Fatalf("attachments = %+v, want only %s", atts, again.AttachID)
+	}
+}

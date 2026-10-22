@@ -290,8 +290,9 @@ bin/agtd bench sessions --count 500 --json-file report.json
 ```
 
 `--output-heavy N` adds sessions that write output as fast as they can, `--attach K` attaches K
-clients to one of them, `--duration` sets how long CPU, throughput and fan-out are measured, and
-`--fill-lines` sizes the session used for the full-scrollback snapshot. macOS allows 511
+clients to one of them (`--attach-mode raw|frames|both`: the raw output, screen frames, or each in
+turn), `--duration` sets how long CPU, throughput and fan-out are measured, and `--fill-lines`
+sizes the session used for the full-scrollback snapshot. macOS allows 511
 pseudo-terminals for all programs together (`kern.tty.ptmx_max`), so about 500 sessions at most.
 
 For local development, run the freshly built CLI against the freshly built daemon without reinstalling:

@@ -115,6 +115,7 @@ func runBench(argv []string) int {
 	fs.IntVar(&opts.Count, "count", 10, "idle sessions to create")
 	fs.IntVar(&opts.OutputHeavy, "output-heavy", 0, "sessions that write output continuously")
 	fs.IntVar(&opts.Attach, "attach", 0, "clients to attach to one output-heavy session")
+	fs.StringVar(&opts.AttachMode, "attach-mode", "both", "how they receive the screen: raw, frames or both")
 	fs.DurationVar(&opts.Duration, "duration", 5*time.Second, "how long to measure idle CPU, throughput and fan-out")
 	fs.IntVar(&opts.FillLines, "fill-lines", 200_000, "lines printed by the full-scrollback session (0 skips it)")
 	fs.IntVar(&opts.Parallel, "parallel", 8, "requests in flight while creating and sampling sessions")

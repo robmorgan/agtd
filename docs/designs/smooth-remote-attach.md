@@ -1,6 +1,6 @@
 # Design: a remote attach that feels local
 
-Status: revision 3 (2026-10-19); Phases 1 and 2 built the same day on branch `native-echo` (merged as PR #59), Phase 0 measured on 2026-10-20 (PR #62, BENCHMARKS.md "Remote interaction"), Phase 3 built on 2026-10-20 on branch `attach-frames` (ARCHITECTURE.md "Screen frames"); Phase 4 remains
+Status: revision 3 (2026-10-19); Phases 1 and 2 built the same day on branch `native-echo` (merged as PR #59), Phase 0 measured on 2026-10-20 (PR #62, BENCHMARKS.md "Remote interaction"), Phase 3 built on 2026-10-20 on branch `attach-frames` (ARCHITECTURE.md "Screen frames") and measured under a flood on 2026-10-22 (BENCHMARKS.md "Screen frames against raw output"); Phase 4 remains
 (ARCHITECTURE.md, "The Input Field And Local Echo"); Phases 0, 3 and 4 remain.
 Scope: `agt attach` to a remote daemon, with typing that is echoed locally but looks exactly like
 typing into the agent's own input box, for Claude Code, Codex and pi alike, and with output that

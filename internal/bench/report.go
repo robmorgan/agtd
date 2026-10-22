@@ -44,6 +44,7 @@ type Report struct {
 		Count       int     `json:"count"`
 		OutputHeavy int     `json:"output_heavy"`
 		Attach      int     `json:"attach"`
+		AttachMode  string  `json:"attach_mode"`
 		DurationSec float64 `json:"duration_sec"`
 		FillLines   int     `json:"fill_lines"`
 	} `json:"options"`
@@ -72,7 +73,10 @@ type Report struct {
 	FullSnapshot *SnapshotReport `json:"full_snapshot,omitempty"`
 
 	Output *OutputReport `json:"output,omitempty"`
-	FanOut *FanOutReport `json:"fan_out,omitempty"`
+	// FanOut is the fan-out of the raw output, FanOutFrames of screen
+	// frames, each when measured.
+	FanOut       *FanOutReport `json:"fan_out,omitempty"`
+	FanOutFrames *FanOutReport `json:"fan_out_frames,omitempty"`
 
 	Database DatabaseReport `json:"database"`
 }
@@ -159,23 +163,40 @@ type OutputReport struct {
 
 // FanOutReport is one output-heavy session with Clients attached.
 type FanOutReport struct {
+	// Mode is how the clients received the screen: "raw", the PTY output
+	// as it comes (dropped and resynced for a client that falls behind),
+	// or "frames", acknowledged screen frames.
+	Mode        string  `json:"mode"`
 	Clients     int     `json:"clients"`
 	IntervalSec float64 `json:"interval_sec"`
 	// PTYBytesPerSec is the session's output while they were attached.
-	PTYBytesPerSec    float64 `json:"pty_bytes_per_sec"`
-	ClientBytesPerSec Dist    `json:"client_bytes_per_sec"`
-	// Delivered is the fraction of the output each client received; the
-	// rest was dropped for falling behind.
-	Delivered     Dist   `json:"delivered"`
+	PTYBytesPerSec float64 `json:"pty_bytes_per_sec"`
+	// ClientBytesPerSec is what each client received: the PTY output for
+	// a raw client, the bytes on the wire for a frame client.
+	ClientBytesPerSec Dist `json:"client_bytes_per_sec"`
+	// Delivered is, per client, the fraction of the output a raw client
+	// received (the rest was dropped for falling behind), or the bytes a
+	// frame client received per byte of output.
+	Delivered Dist `json:"delivered"`
+	// FramesPerSec is each frame client's frame rate.
+	FramesPerSec  Dist   `json:"frames_per_sec,omitzero"`
 	DroppedChunks uint64 `json:"dropped_chunks"`
-	// ChunkBytes is the mean size of a PTY read, each a frame per client.
+	// ChunkBytes is the mean size of a PTY read, each a frame per raw
+	// client.
 	ChunkBytes float64 `json:"chunk_bytes"`
 	// EchoMs is how long typed input took to come back, as echo, to every
-	// client: input latency behind a stream of output.
+	// client: input latency behind a stream of output. Under frames the
+	// echo must be in a frame's rows, or in the rows that scrolled off
+	// between two frames; one that scrolled further is lost.
 	EchoMs     Dist    `json:"echo_ms"`
 	EchoesLost int     `json:"echoes_lost"`
 	WorkerCPU  float64 `json:"worker_cpu_percent"`
 	DaemonCPU  float64 `json:"daemon_cpu_percent"`
+	// WorkerAlone is the worker with no client attached, just before, and
+	// Worker with the clients attached, at the end: what the attachments
+	// cost it in memory.
+	WorkerAlone ProcessSample `json:"worker_alone"`
+	Worker      ProcessSample `json:"worker"`
 }
 
 // DatabaseReport is the cost of state.db with Rows sessions in it.
@@ -339,10 +360,24 @@ func (r *Report) Print(w io.Writer) {
 		procRows(o.Workers)
 		tw.Flush()
 	}
-	if f := r.FanOut; f != nil {
-		fmt.Fprintf(w, "\nFan-out: %d clients on one output-heavy session over %.1f s\n", f.Clients, f.IntervalSec)
-		fmt.Fprintf(w, "PTY output %s/s in %s reads; per client %s/s (p50), delivered %.1f%% (min %.1f%%); %d chunks dropped; worker %.0f%% CPU, daemon %.0f%%\n",
-			mib(f.PTYBytesPerSec), mib(f.ChunkBytes), mib(f.ClientBytesPerSec.P50), 100*f.Delivered.P50, 100*f.Delivered.Min, f.DroppedChunks, f.WorkerCPU, f.DaemonCPU)
+	for _, f := range []*FanOutReport{r.FanOut, r.FanOutFrames} {
+		if f == nil {
+			continue
+		}
+		fmt.Fprintf(w, "\nFan-out (%s): %d clients on one output-heavy session over %.1f s\n", f.Mode, f.Clients, f.IntervalSec)
+		if f.Mode == "frames" {
+			fmt.Fprintf(w, "PTY output %s/s; per client %s/s on the wire (p50, %.1f%% of the output) in %.0f frames/s; worker %.0f%% CPU, daemon %.0f%%\n",
+				mib(f.PTYBytesPerSec), mib(f.ClientBytesPerSec.P50), 100*f.Delivered.P50, f.FramesPerSec.P50, f.WorkerCPU, f.DaemonCPU)
+		} else {
+			fmt.Fprintf(w, "PTY output %s/s in %s reads; per client %s/s (p50), delivered %.1f%% (min %.1f%%); %d chunks dropped; worker %.0f%% CPU, daemon %.0f%%\n",
+				mib(f.PTYBytesPerSec), mib(f.ChunkBytes), mib(f.ClientBytesPerSec.P50), 100*f.Delivered.P50, 100*f.Delivered.Min, f.DroppedChunks, f.WorkerCPU, f.DaemonCPU)
+		}
 		fmt.Fprintf(w, "echo to every client: p50 %s, p99 %s, max %s, %d lost\n", ms(f.EchoMs.P50), ms(f.EchoMs.P99), ms(f.EchoMs.Max), f.EchoesLost)
+		per := func(alone, with uint64) string {
+			return mib((float64(with) - float64(alone)) / float64(max(1, f.Clients)))
+		}
+		fmt.Fprintf(w, "worker memory: %s private alone, %s with the clients (%s per client); Go heap %s alone, %s with (%s per client)\n",
+			mib(float64(f.WorkerAlone.Private)), mib(float64(f.Worker.Private)), per(f.WorkerAlone.Private, f.Worker.Private),
+			mib(float64(f.WorkerAlone.GoHeap)), mib(float64(f.Worker.GoHeap)), per(f.WorkerAlone.GoHeap, f.Worker.GoHeap))
 	}
 }
