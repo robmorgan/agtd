@@ -512,9 +512,11 @@ agent's own wrapping and pen, and sends the keys as you type them, batched for a
 worker finds the input box on the session's screen, so this works for Claude Code, Codex, pi and
 a shell prompt alike, and never draws where it cannot be sure: in a menu, a permission prompt or
 an editor, keys go raw as before. Text, Backspace, Delete, Left, Right and the Shift-Enter or
-Alt-Enter newline are drawn locally; Enter, Tab, Esc, Ctrl-C, Ctrl-J, Ctrl-Enter and the other
-keys are never predicted, so the agent's own menus, completions and history work as they always
-did, one round trip late. Mouse input reaches the agent as it is, so in a fullscreen agent
+Alt-Enter newline are drawn locally, and over frames Enter on a prompt empties the box at once
+(not on an empty box, a slash command, an @ mention or a backslash continuation, where Enter may
+do something else); Tab, Esc, Ctrl-C, Ctrl-J, Ctrl-Enter and the other keys are never
+predicted, so the agent's own menus, completions and history work as they always did, one round
+trip late. Mouse input reaches the agent as it is, so in a fullscreen agent
 (Claude Code, Codex, `pi --tui-mode fullscreen`) the wheel scrolls its transcript while you type;
 a scroll made in the middle of typing shows once the agent has drawn your keys. The agent's rendering replaces the drawing as soon as it arrives; the one thing you may
 notice is that the screen behind the box stands still for about a round trip after you pause

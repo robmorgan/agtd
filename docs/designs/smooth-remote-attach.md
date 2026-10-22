@@ -1,6 +1,6 @@
 # Design: a remote attach that feels local
 
-Status: revision 3 (2026-10-19); Phases 1 and 2 built the same day on branch `native-echo` (merged as PR #59), Phase 0 measured on 2026-10-20 (PR #62, BENCHMARKS.md "Remote interaction"), Phase 3 built on 2026-10-20 on branch `attach-frames` (ARCHITECTURE.md "Screen frames") and measured under a flood on 2026-10-22 (BENCHMARKS.md "Screen frames against raw output"), Phase 4 built on 2026-10-22 on branch `attach-compose` (submit and switch, `attach-compose`; ARCHITECTURE.md "Composed input").
+Status: revision 4 (2026-10-22: Enter predicted as the submit over frames); revision 3 (2026-10-19); Phases 1 and 2 built the same day on branch `native-echo` (merged as PR #59), Phase 0 measured on 2026-10-20 (PR #62, BENCHMARKS.md "Remote interaction"), Phase 3 built on 2026-10-20 on branch `attach-frames` (ARCHITECTURE.md "Screen frames") and measured under a flood on 2026-10-22 (BENCHMARKS.md "Screen frames against raw output"), Phase 4 built on 2026-10-22 on branch `attach-compose` (submit and switch, `attach-compose`; ARCHITECTURE.md "Composed input").
 Scope: `agt attach` to a remote daemon, with typing that is echoed locally but looks exactly like
 typing into the agent's own input box, for Claude Code, Codex and pi alike, and with output that
 never lags behind a slow link.
@@ -31,8 +31,8 @@ the box growing the way that agent's box grows. The keys reach the agent a round
 it draws the same thing in the same place, so nothing visibly changes when it does. Its own
 behaviour while typing (the hint row going away, the `/` menu, `@` completion, a paste
 placeholder) happens as it always did, one round trip late, under text that was already there.
-Enter is just Enter. If agt cannot be sure it would draw what the agent draws, it draws nothing
-and the keys go raw, as today.
+Enter is just Enter, and over frames the box empties as it is pressed. If agt cannot be sure it
+would draw what the agent draws, it draws nothing and the keys go raw, as today.
 
 Five rules that make that hold:
 
@@ -42,16 +42,22 @@ Five rules that make that hold:
 2. **Echo locally, send continuously.** Keys are sent as they are typed, batched for at most
    `flush_after` (50 ms by default). The local echo is a prediction of what the agent will draw
    once those keys reach it, and only keys every editor handles the same way are predicted:
-   printable text, Backspace, Left and Right, and the Alt-Enter newline. Any other key (Tab, Esc,
-   Ctrl-C, Up, Down, Home, End, Enter) is sent and not predicted; local echo pauses until the
-   agent's rendering is seen again. The agent is always the authority: when its field is observed,
+   printable text, Backspace, Left and Right, and the Alt-Enter newline; over frames, Enter on a
+   prompt too, as the submit (revision 4). Any other key (Tab, Esc, Ctrl-C, Up, Down, Home, End)
+   is sent and not predicted; local echo pauses until the agent's rendering is seen again. The
+   agent is always the authority: when its field is observed,
    the CLI finds which of its recent predicted states the agent has reached and repaints only what
    is still in flight; if none matches, it adopts what the agent drew.
 3. **The agent's chrome is the agent's.** Borders, rules, prompt glyph, placeholder, hint rows and
    colours are the cells already on screen. When the echo needs more rows, the box grows in the
    agent's direction using the agent's own cells; nothing is invented.
-4. **Hand over, never repaint over.** After Enter the local text stays on screen until the agent's
-   own rendering replaces it. The user never sees the box empty out and refill.
+4. **Hand over, never repaint over.** After an unpredicted key the local text stays on screen
+   until the agent's own rendering replaces it. Enter is the exception since revision 4: over
+   frames the box is drawn empty at once, because waiting a round trip to see a prompt go made
+   every submit feel late, and a frame that shows something else (a newline the agent inserted,
+   a menu's choice) is adopted like any other unpredicted drawing. Enter is left unpredicted
+   where it may not submit: an empty box, a slash command, an @ mention at the cursor, a
+   backslash continuation, and in raw mode, where the hold would drop the agent's answer.
 5. **Not native, then raw.** No field found (a menu, a permission prompt, an unknown program): keys
    pass straight through with no echo. Slower, never wrong.
 
@@ -248,10 +254,11 @@ The user-visible change, on today's output stream.
   A probe that still shows keys in flight is asked again after the next flush or 150 ms. The one
   visible compromise of this phase: while keys are in flight the screen behind the echo is still,
   for about a round trip after each pause in typing. Phase 3 removes it.
-* **Enter and the rest.** Enter, Tab, Esc, Ctrl-C, Up, Down and every other key go out in the
-  batch unpredicted; the local text stays on screen and the hold ends at once, so the agent's
-  output (the box emptying into the transcript, a menu opening, a completion) replaces it in
-  place. Nothing is ever shown by agt on success.
+* **Enter and the rest.** Tab, Esc, Ctrl-C, Up, Down and every other key go out in the batch
+  unpredicted; the local text stays on screen and the hold ends at once, so the agent's output
+  (a menu opening, a completion) replaces it in place. Enter is predicted as the submit over
+  frames (rule 4) and goes out with the batch at once; in raw mode it is unpredicted like the
+  rest. Nothing is ever shown by agt on success.
 * **Outages.** On a lost connection the queue is kept. After the reattach the CLI asks for the
   Field, matches it against the states as usual, and resends only the keys after the match; if
   no state matches (the agent moved on, or the field is gone) the keys are dropped and the

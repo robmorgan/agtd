@@ -23,11 +23,13 @@ func TestPainterFullAndPartialFrames(t *testing.T) {
 		t.Fatalf("cache: seq %d rows %q %q", p.Seq(), p.Row(0), p.Row(1))
 	}
 	// A partial frame paints only its rows, keeps the prefix and resets a
-	// mode the new prefix no longer sets.
+	// mode the new prefix no longer sets. The overlay ends with the echo's
+	// cursor, so the frame's cursor (which lags the keys in flight) is not
+	// written after it.
 	part := &protocol.Frame{Seq: 2, Cols: 10, Lines: 3, CursorRow: 1, CursorCol: 0, Prefix: []byte("\x1b[?25l\x1b[3g\x1b[H"),
 		Rows: []protocol.FrameRow{{Index: 1, VT: []byte("hi")}}, Keyboard: []byte("\x1b[=7;1u"), Effects: []byte("\a"), CursorShape: 6}
 	out = string(p.Apply(part, []byte("OVERLAY")))
-	want = syncBegin + "\x1b[?2004l" + "\x1b[?25l\x1b[3g\x1b[H" + "\x1b[2;1H" + rowStart + "hi" + "\x1b[=7;1u" + "\a" + "OVERLAY" + "\x1b[6 q" + "\x1b[2;1H" + syncEnd
+	want = syncBegin + "\x1b[?2004l" + "\x1b[?25l\x1b[3g\x1b[H" + "\x1b[2;1H" + rowStart + "hi" + "\x1b[=7;1u" + "\a" + "OVERLAY" + "\x1b[6 q" + syncEnd
 	if out != want {
 		t.Fatalf("partial frame:\n got %q\nwant %q", out, want)
 	}
@@ -42,6 +44,25 @@ func TestPainterFullAndPartialFrames(t *testing.T) {
 	out = string(p.Apply(&protocol.Frame{Seq: 4, Cols: 10, Lines: 3}, nil))
 	if !strings.Contains(out, "\x1b[0 q") {
 		t.Fatalf("shape not reset: %q", out)
+	}
+}
+
+// While keys are in flight the echo's overlay places the cursor where the
+// typing will be; the program's cursor in the frame is behind by those
+// keys and must not be placed after it. Without an overlay the frame's
+// cursor stands.
+func TestPainterLeavesTheCursorToTheOverlay(t *testing.T) {
+	p := New()
+	p.Apply(&protocol.Frame{Seq: 1, Full: true, Cols: 20, Lines: 2}, nil)
+	frame := &protocol.Frame{Seq: 2, Cols: 20, Lines: 2, CursorRow: 1, CursorCol: 3}
+	overlay := "\x1b[2;1Htyping\x1b[2;7H"
+	out := string(p.Apply(frame, []byte(overlay)))
+	if !strings.HasSuffix(out, overlay+syncEnd) {
+		t.Fatalf("the frame's cursor was placed after the overlay: %q", out)
+	}
+	out = string(p.Apply(&protocol.Frame{Seq: 3, Cols: 20, Lines: 2, CursorRow: 1, CursorCol: 3}, nil))
+	if !strings.HasSuffix(out, "\x1b[2;4H"+syncEnd) {
+		t.Fatalf("no overlay: the frame's cursor should stand: %q", out)
 	}
 }
 

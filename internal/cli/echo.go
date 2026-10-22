@@ -25,9 +25,12 @@ import (
 // Only keys every editor handles the same way are predicted: printable
 // text, Backspace, Delete, Left, Right and the Shift-Enter and Alt-Enter
 // newlines (Ctrl-J and Ctrl-Enter differ between agents: Ctrl-Enter submits
-// in Claude Code and inserts a newline in Codex). Any other key (Enter, Tab,
-// Esc, Ctrl-C, Up, Down, a mouse click, ...) is sent at once and not
-// predicted; the echo then pauses until the field is seen again. Input that
+// in Claude Code and inserts a newline in Codex). Under frames, Enter on a
+// prompt is predicted as the submit, the field emptying at once (submits
+// says when; a frame that shows otherwise, a newline or a menu's choice,
+// is adopted like any other unpredicted drawing). Any other key (Tab, Esc,
+// Ctrl-C, Up, Down, a mouse click, ...) is sent at once and not predicted;
+// the echo then pauses until the field is seen again. Input that
 // edits nothing (a wheel scroll, so a fullscreen agent scrolls its
 // transcript, mouse motion, a focus change, a key release, the terminal's
 // CSI reply to the agent's query) is passed on without pausing. While keys
@@ -150,6 +153,12 @@ func (t *echoText) insert(s string) {
 		t.lines[t.line] = line
 		t.col += len(cells)
 	}
+}
+
+// clear empties the text, as a submit does.
+func (t *echoText) clear() {
+	t.lines = [][]gcell{nil}
+	t.line, t.col = 0, 0
 }
 
 func (t *echoText) newline() {
@@ -572,7 +581,13 @@ func (e *echo) key(ev keyEvent) (send []byte, drawn bool) {
 	}
 	lay := layout(e.text, e.field)
 	e.states = append(e.states, echoState{rows: lay.texts(), cRow: lay.cRow, cCol: lay.cCol, key: ev})
-	return e.queue(ev.raw), true
+	send = e.queue(ev.raw)
+	if ev.code == keyEnter && ev.mods == 0 {
+		// A submit ends the batch: nothing is typed after it that
+		// would share the flush.
+		send = append(send, e.flush()...)
+	}
+	return send, true
 }
 
 // noteHeld arms the expiry of what the decoder holds: bytes that wait for
@@ -597,8 +612,13 @@ func (e *echo) predict(ev keyEvent) bool {
 	case ev.code == keyEnter && (ev.mods == modShift || ev.mods == modAlt):
 		// Shift-Enter reaches the echo only from a terminal with the
 		// kitty keyboard protocol; elsewhere it is a plain Enter and
-		// goes to the agent unpredicted, which submits.
+		// goes to the agent as one.
 		e.text.newline()
+	case ev.code == keyEnter && ev.mods == 0 && e.frames && e.submits():
+		// The prompt goes to the agent and the field empties. Only
+		// under frames: in raw mode the hold would drop the agent's
+		// answer until the field was probed.
+		e.text.clear()
 	case ev.code == keyBackspace && ev.mods == 0:
 		e.text.backspace()
 	case ev.code == keyDelete && ev.mods == 0:
@@ -611,6 +631,38 @@ func (e *echo) predict(ev keyEvent) bool {
 		return false
 	}
 	return true
+}
+
+// submits reports that Enter on the text as it stands would submit it in
+// Claude Code, Codex and pi alike: there is text, it does not end with a
+// backslash (a continuation), it is not a slash command (a menu may be
+// open, and Enter picks from it) and the word at the cursor is not an @
+// mention (a completion may be open). Anywhere else Enter goes
+// unpredicted, as every unpredicted key does.
+func (e *echo) submits() bool {
+	t := &e.text
+	if len(t.lines) == 0 || t.line >= len(t.lines) {
+		return false
+	}
+	text := 0
+	for _, line := range t.lines {
+		text += len(line)
+	}
+	if text == 0 {
+		return false
+	}
+	if first := t.lines[0]; len(first) > 0 && first[0].s == "/" {
+		return false
+	}
+	if last := t.lines[len(t.lines)-1]; len(last) > 0 && last[len(last)-1].s == "\\" {
+		return false
+	}
+	line := t.lines[t.line]
+	start := min(t.col, len(line))
+	for start > 0 && line[start-1].s != " " {
+		start--
+	}
+	return start >= min(t.col, len(line)) || line[start].s != "@"
 }
 
 // pause stops drawing until the field is seen again: the agent's output
@@ -703,7 +755,9 @@ func (e *echo) probe() []*protocol.Request {
 }
 
 // overlay is the drawing to put over a frame: the predicted rows while
-// keys are in flight, nothing once the frame shows them itself.
+// keys are in flight, ending with the cursor where the prediction puts it
+// (the painter leaves it there rather than at the frame's, which is behind
+// by those keys); nothing once the frame shows them itself.
 func (e *echo) overlay() []byte {
 	if e == nil || !e.frames || !e.holding() || !e.active() {
 		return nil

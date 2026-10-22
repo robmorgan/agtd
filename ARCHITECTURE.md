@@ -1028,7 +1028,13 @@ the agent after at most `[composer] flush_after` (50 ms; `0` sends each key on i
 keys every editor handles the same way are predicted: printable text, Backspace, Delete, Left,
 Right and the Shift-Enter and Alt-Enter newlines (measured: Ctrl-J is a newline in Claude Code
 and Codex but nothing in pi, and Ctrl-Enter submits in Claude Code, is a newline in Codex and
-nothing in pi, so neither is predicted). Any other key (Enter, Tab, Esc, Ctrl-C, Up, Down, a
+nothing in pi, so neither is predicted). Over frames, Enter on a prompt is predicted as the
+submit: the batch goes at once and the field is drawn empty, so a submit does not wait a round
+trip to clear the box; `submits` leaves Enter unpredicted on an empty box, a slash command, an @
+mention at the cursor or a backslash continuation, where the agent may do something else, and
+in raw mode, where the hold would drop the agent's answer until the field was probed. A frame
+that shows something other than the empty field is adopted like any unpredicted drawing. Any
+other key (Tab, Esc, Ctrl-C, Up, Down, a
 mouse click, ...) goes at once, with the batch before it, and the echo pauses until the field is
 seen again, so the agent's own menus, completions and submit work as they always did, one round
 trip late; a field asked for before such a key is stale when it arrives, so it is ignored and
