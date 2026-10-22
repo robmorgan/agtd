@@ -1255,14 +1255,81 @@ func TestEchoOverlayEndsWithThePredictedCursor(t *testing.T) {
 	}
 }
 
+// Under frames Enter on a prompt is predicted as the submit: the batch
+// goes at once and the field is drawn empty, so the box clears without
+// waiting a round trip. A frame that shows the empty field proves it.
+func TestEchoFramesPredictEnterAsASubmit(t *testing.T) {
+	e, now := framesEcho(t, []string{""})
+	typeKeys(e, "abc")
+	send, paint := e.input([]byte("\r"))
+	if string(send) != "abc\r" || e.paused || !e.holding() {
+		t.Fatalf("enter: sent %q, paused %v, holding %v", send, e.paused, e.holding())
+	}
+	empty := []byte(cup(36, 2)) // the field's row, at its text column
+	if !bytes.HasSuffix(paint, []byte(cup(36, 2)+syncEnd)) || !bytes.Contains(paint, []byte("\x1b[116X")) {
+		t.Fatalf("enter should paint the field empty: %q", paint)
+	}
+	if got := e.overlay(); !bytes.HasSuffix(got, empty) {
+		t.Fatalf("overlay after enter: %q", got)
+	}
+	// A frame from before the keys landed proves nothing.
+	frameWith(e, 2, []string{"abc"})
+	if !e.holding() {
+		t.Fatal("a lagging frame should not confirm the submit")
+	}
+	frameWith(e, 4, []string{""})
+	if e.holding() || e.paused || e.overlay() != nil {
+		t.Fatalf("the empty field should prove the submit: holding %v paused %v", e.holding(), e.paused)
+	}
+	_ = now
+}
+
+// When the agent did something else with Enter (a newline after a
+// backslash it saw, a menu's choice), the frame shows a field that matches
+// no prediction and the echo adopts it, as for any unpredicted drawing.
+func TestEchoFramesAdoptWhatEnterDrew(t *testing.T) {
+	e, _ := framesEcho(t, []string{""})
+	typeKeys(e, "abc")
+	e.input([]byte("\r"))
+	frameWith(e, 4, []string{"abc", ""})
+	if e.holding() || !e.dirty || len(e.field.Rows) != 2 || e.field.Rows[0] != "abc" {
+		t.Fatalf("after an unpredicted result: holding %v dirty %v rows %q", e.holding(), e.dirty, e.field.Rows)
+	}
+}
+
+// Enter is not predicted where it may not submit: an empty field, a slash
+// command, an @ mention at the cursor, a backslash continuation, and never
+// in raw mode. Those go unpredicted and pause the echo, as before.
+func TestEchoEnterUnpredictedWhereItMayNotSubmit(t *testing.T) {
+	for _, text := range []string{"", "/help", "see @src/ma", "line one\\"} {
+		e, _ := framesEcho(t, []string{""})
+		typeKeys(e, text)
+		if send, _ := e.input([]byte("\r")); !e.paused || e.holding() || !strings.HasSuffix(string(send), "\r") {
+			t.Fatalf("%q: enter should go unpredicted: paused %v holding %v sent %q", text, e.paused, e.holding(), send)
+		}
+	}
+	// An @ earlier in the line, not at the cursor, is just text.
+	e, _ := framesEcho(t, []string{""})
+	typeKeys(e, "@src/main.go is")
+	if e.input([]byte("\r")); e.paused || !e.holding() {
+		t.Fatal("an @ mention behind the cursor should not stop the submit")
+	}
+	raw, _ := fixedClockEcho(echoFlushAfter)
+	raw.fieldAnswer(claudeField([]string{""}))
+	typeKeys(raw, "abc")
+	if send, _ := raw.input([]byte("\r")); !raw.paused || raw.holding() || string(send) != "abc\r" {
+		t.Fatalf("raw mode: enter should go unpredicted: paused %v sent %q", raw.paused, send)
+	}
+}
+
 // A frame built before an unpredicted key or a resize reached the worker
 // shows a field that may be gone: it neither resumes the echo nor starts
 // it, and the field is asked for until a later frame shows it.
 func TestEchoFramesIgnoreAFieldFromBeforeAPauseOrResize(t *testing.T) {
 	e, now := framesEcho(t, []string{"ab"})
 	frameWith(e, 2, []string{"ab"})
-	if send, _ := e.input([]byte("\r")); string(send) != "\r" || !e.paused {
-		t.Fatalf("enter: send %q, paused %v", send, e.paused)
+	if send, _ := e.input([]byte("\t")); string(send) != "\t" || !e.paused {
+		t.Fatalf("tab: send %q, paused %v", send, e.paused)
 	}
 	e.tick(now.Add(time.Second)) // the probe
 	for _, seq := range []uint32{3, 4} {
