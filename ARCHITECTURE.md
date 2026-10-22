@@ -1207,7 +1207,10 @@ repaints from a snapshot anyway. If output keeps arriving faster than the client
 a resync each time it drains, which keeps it as current as its link allows. A frame client
 (`attach-frames`, see "Screen frames") has no queue to overflow: it is sent one frame at a time
 and the next is built from the screen as it is once all but the newest are acknowledged, so it
-falls behind by at most two frames and is never dropped or resynced. A client that stalls
+falls behind by at most two frames and is never dropped or resynced; one that stops reading
+altogether leaves the worker blocked writing a frame to it with nothing queued behind, and is
+released when its connection goes (`TestStalledFrameClientIsBounded`: 67 MB through the PTY with
+the worker's heap flat). A raw client that stalls
 outright may do so with a resync already in its blocked write; when it reads again it gets that
 stale one first and, since it lagged meanwhile, a fresh one right after. A client that did not
 ask for resyncs (an older CLI) keeps the old behaviour: its screen is wrong until the program

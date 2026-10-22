@@ -101,14 +101,30 @@ func (b *bench) measureOutput(ctx context.Context) error {
 const echoInterval = 100 * time.Millisecond
 
 // fanOutClient is one client attached during the fan-out phase. Its reader
-// goroutine is the only writer of everything but received, which the phase
-// reads while it runs.
+// goroutine is the only writer of everything but received and frames,
+// which the phase reads while it runs.
 type fanOutClient struct {
-	a        *attachment
+	a *attachment
+	// framed is whether the client receives screen frames rather than
+	// the raw output.
+	framed bool
+	// received is the PTY output a raw client received.
 	received atomic.Uint64
+	// frames counts the frames a frame client received.
+	frames atomic.Uint64
 	// seen maps an echo marker to when this client first received it.
 	seen  map[int]time.Time
 	carry []byte
+}
+
+// bytes is what the client has received: the PTY output for a raw
+// client, the bytes on the wire (frames and their framing) for a frame
+// client, whose frames carry rows rather than output.
+func (c *fanOutClient) bytes() uint64 {
+	if c.framed {
+		return c.a.wire.Load()
+	}
+	return c.received.Load()
 }
 
 // markerPrefix and markerSuffix frame an echo marker's sequence number.
@@ -126,6 +142,13 @@ func marker(seq int) string {
 // scan records the markers in data, including one split across reads.
 func (c *fanOutClient) scan(data []byte, now time.Time) {
 	buf := append(c.carry, data...)
+	c.markers(buf, now)
+	keep := min(len(buf), markerLen-1)
+	c.carry = append(c.carry[:0], buf[len(buf)-keep:]...)
+}
+
+// markers records the markers in buf, which is scanned whole (a row).
+func (c *fanOutClient) markers(buf []byte, now time.Time) {
 	for i := 0; ; {
 		j := bytes.Index(buf[i:], []byte(markerPrefix))
 		if j < 0 || i+j+markerLen > len(buf) {
@@ -141,31 +164,72 @@ func (c *fanOutClient) scan(data []byte, now time.Time) {
 		}
 		i = at + 1
 	}
-	keep := min(len(buf), markerLen-1)
-	c.carry = append(c.carry[:0], buf[len(buf)-keep:]...)
 }
 
+// read takes the client's responses until its stream ends. A frame client
+// acknowledges each frame at once, as agt attach does, and looks for the
+// markers in the frame's rows and in the rows that scrolled off between
+// frames.
 func (c *fanOutClient) read() {
 	for {
 		resp, err := protocol.ReadResponse(c.a.r)
-		if err != nil || resp == nil || resp.PtyOutput == nil {
+		if err != nil || resp == nil {
 			return
 		}
-		c.received.Add(uint64(len(resp.PtyOutput.Data)))
-		c.scan(resp.PtyOutput.Data, time.Now())
+		now := time.Now()
+		switch {
+		case resp.PtyOutput != nil:
+			c.received.Add(uint64(len(resp.PtyOutput.Data)))
+			c.scan(resp.PtyOutput.Data, now)
+		case resp.AttachFrame != nil:
+			f := resp.AttachFrame
+			c.frames.Add(1)
+			for _, row := range f.History {
+				c.markers(row, now)
+			}
+			for _, row := range f.Rows {
+				c.markers(row.VT, now)
+			}
+			if c.a.write(&protocol.Request{AttachFrameAck: &protocol.FrameAck{Seq: f.Seq}}) != nil {
+				return
+			}
+		}
 	}
 }
 
-// measureFanOut attaches clients to one output-heavy session and measures
-// what each receives, what the worker drops for them, and how long typed
-// input takes to come back to all of them.
-func (b *bench) measureFanOut(ctx context.Context) error {
+func (b *bench) measureFanOutRaw(ctx context.Context) error {
+	if b.opts.AttachMode == "frames" {
+		return nil
+	}
+	return b.measureFanOut(ctx, false)
+}
+
+func (b *bench) measureFanOutFrames(ctx context.Context) error {
+	if b.opts.AttachMode == "raw" {
+		return nil
+	}
+	return b.measureFanOut(ctx, true)
+}
+
+// measureFanOut attaches clients to one output-heavy session, for the raw
+// output or for screen frames, and measures what each receives, what the
+// worker drops for them, how long typed input takes to come back to all
+// of them, and what the worker's CPU and memory come to with them attached.
+func (b *bench) measureFanOut(ctx context.Context, frames bool) error {
 	k := b.opts.Attach
 	if k == 0 {
 		return nil
 	}
 	id := floodName(0)
 	p, err := b.sessionPIDs(func(s string) bool { return s == id })
+	if err != nil {
+		return err
+	}
+	// The worker with no clients, once the previous phase's have gone.
+	if err := sleep(ctx, settle); err != nil {
+		return err
+	}
+	alone, err := b.sessionStats(id, false)
 	if err != nil {
 		return err
 	}
@@ -178,11 +242,11 @@ func (b *bench) measureFanOut(ctx context.Context) error {
 		readers.Wait()
 	}()
 	for range k {
-		a, _, err := b.attach(id)
+		a, _, err := b.attach(id, frames)
 		if err != nil {
 			return err
 		}
-		c := &fanOutClient{a: a, seen: map[int]time.Time{}}
+		c := &fanOutClient{a: a, framed: frames, seen: map[int]time.Time{}}
 		clients = append(clients, c)
 		readers.Add(1)
 		go func() {
@@ -199,8 +263,10 @@ func (b *bench) measureFanOut(ctx context.Context) error {
 		return err
 	}
 	received0 := make([]uint64, k)
+	frames0 := make([]uint64, k)
 	for i, c := range clients {
-		received0[i] = c.received.Load()
+		received0[i] = c.bytes()
+		frames0[i] = c.frames.Load()
 	}
 	daemon := []int{b.daemon.Process.Pid}
 	start := time.Now()
@@ -225,7 +291,7 @@ func (b *bench) measureFanOut(ctx context.Context) error {
 			sent[seq] = time.Now()
 			sentMu.Unlock()
 			in := &protocol.Request{AttachInput: &protocol.Bytes{Data: []byte(marker(seq) + "\n")}}
-			if protocol.WriteRequest(clients[0].a.s, in) != nil {
+			if clients[0].a.write(in) != nil {
 				return
 			}
 		}
@@ -243,8 +309,10 @@ func (b *bench) measureFanOut(ctx context.Context) error {
 	wall := time.Since(start)
 	wc1, dc1 := cpuOf(p.workers), cpuOf(daemon)
 	received := make([]uint64, k)
+	frameRates := make([]float64, k)
 	for i, c := range clients {
-		received[i] = c.received.Load() - received0[i]
+		received[i] = c.bytes() - received0[i]
+		frameRates[i] = float64(c.frames.Load()-frames0[i]) / wall.Seconds()
 	}
 	// Let the last markers arrive, then stop the readers so their maps can
 	// be read.
@@ -262,7 +330,12 @@ func (b *bench) measureFanOut(ctx context.Context) error {
 	for i, r := range received {
 		rates[i] = float64(r) / wall.Seconds()
 		if produced > 0 {
-			delivered[i] = min(1, float64(r)/float64(produced))
+			// A raw client received a part of the output; a frame
+			// client received so many bytes per byte of it.
+			delivered[i] = float64(r) / float64(produced)
+			if !frames {
+				delivered[i] = min(1, delivered[i])
+			}
 		}
 	}
 	var echoes []float64
@@ -276,7 +349,8 @@ func (b *bench) measureFanOut(ctx context.Context) error {
 			}
 		}
 	}
-	b.report.FanOut = &FanOutReport{
+	rep := &FanOutReport{
+		Mode:              "raw",
 		Clients:           k,
 		IntervalSec:       wall.Seconds(),
 		PTYBytesPerSec:    float64(produced) / wall.Seconds(),
@@ -288,6 +362,15 @@ func (b *bench) measureFanOut(ctx context.Context) error {
 		EchoesLost:        lost,
 		WorkerCPU:         percent(wc1-wc0, wall),
 		DaemonCPU:         percent(dc1-dc0, wall),
+		WorkerAlone:       sampleOf(alone.Worker),
+		Worker:            sampleOf(after.Worker),
+	}
+	if frames {
+		rep.Mode = "frames"
+		rep.FramesPerSec = summarize(frameRates)
+		b.report.FanOutFrames = rep
+	} else {
+		b.report.FanOut = rep
 	}
 	return nil
 }

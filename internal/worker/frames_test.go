@@ -3,6 +3,7 @@ package worker
 import (
 	"bytes"
 	"fmt"
+	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -521,4 +522,95 @@ func TestFrameClientsDrainAtTheirOwnPace(t *testing.T) {
 	fast.expectEnd()
 	slow.expectEnd()
 	h.waitExit()
+}
+
+// A frame client whose connection goes with the window's frames in flight
+// and none of them acknowledged: the flood goes on for the other client,
+// the lost attachment is released, and a client attaching afterwards starts
+// from a full frame of the screen as it is then.
+func TestFrameClientLostMidFrame(t *testing.T) {
+	const script = `stty -echo; read go; head -c 3000000 /dev/zero | tr '\0' x | fold -w 100; printf 'FLOODED\r\n'; read l; exit 0`
+	h := startWorkerWith(t, script)
+	lost, _ := h.attachWith(protocol.AttachSession{Features: []string{protocol.CapAttachFrames}})
+	fast, _ := h.attachWith(protocol.AttachSession{Features: []string{protocol.CapAttachFrames}})
+	f := lost.readFrame()
+	lost.ack(f.Seq, false)
+	g := fast.readFrame()
+	fast.ack(g.Seq, false)
+	fast.input("go\n")
+	lost.readFrame()
+	lost.readFrame()
+	lost.conn.Close()
+	for {
+		g = fast.readFrame()
+		fast.ack(g.Seq, false)
+		if strings.Contains(frameText(g), "FLOODED") {
+			break
+		}
+	}
+	h.eventually("the lost attachment to be released", func() bool { return len(h.attachments()) == 1 })
+	late, _ := h.attachWith(protocol.AttachSession{Features: []string{protocol.CapAttachFrames}})
+	if f = late.readFrame(); !f.Full || f.Seq != 1 || !strings.Contains(frameText(f), "FLOODED") {
+		t.Fatalf("the late client's first frame: full %v seq %d %q", f.Full, f.Seq, frameText(f))
+	}
+	late.ack(f.Seq, false)
+	fast.input("l\n")
+	fast.expectEnd()
+	late.expectEnd()
+	h.waitExit()
+}
+
+// A frame client that stops reading while the session writes 67 MB is
+// owed at most the window's frames: the PTY is not stalled, a client that
+// keeps acknowledging sees the whole flood with nothing dropped, the
+// worker's heap stays flat, and when the stalled client's connection goes
+// (with the worker blocked writing a frame to it) it is released.
+func TestStalledFrameClientIsBounded(t *testing.T) {
+	const script = `stty -echo; read go; head -c 67000000 /dev/zero | tr '\0' x | fold -w 100; printf 'FLOODED\r\n'; read l; exit 0`
+	h := startWorkerWith(t, script)
+	stalled, _ := h.attachWith(protocol.AttachSession{Features: []string{protocol.CapAttachFrames}})
+	live, _ := h.attachWith(protocol.AttachSession{Features: []string{protocol.CapAttachFrames}})
+	f := stalled.readFrame()
+	stalled.ack(f.Seq, false)
+	g := live.readFrame()
+	live.ack(g.Seq, false)
+	base := heapInUse()
+	start := time.Now()
+	live.input("go\n")
+	// The stalled client reads nothing from here on.
+	frames, peak := 0, base
+	for {
+		g = live.readFrame()
+		live.ack(g.Seq, false)
+		frames++
+		if frames%200 == 0 {
+			peak = max(peak, heapInUse())
+		}
+		if strings.Contains(frameText(g), "FLOODED") {
+			break
+		}
+	}
+	peak = max(peak, heapInUse())
+	t.Logf("67 MB took %s and %d frames for the live client; heap %d -> peak %d MB",
+		time.Since(start).Round(time.Millisecond), frames, base>>20, peak>>20)
+	if peak > base+32<<20 {
+		t.Errorf("heap grew from %d to %d MB behind a stalled frame client", base>>20, peak>>20)
+	}
+	if resp := h.request(&protocol.Request{GetSessionStats: &protocol.GetSessionStats{SessionID: h.sessionID}}); resp.SessionStats == nil || resp.SessionStats.DroppedOutputChunks != 0 {
+		t.Errorf("stats = %+v, want no dropped output", resp.SessionStats)
+	}
+	stalled.conn.Close()
+	h.eventually("the stalled attachment to be released", func() bool { return len(h.attachments()) == 1 })
+	live.input("l\n")
+	live.expectEnd()
+	h.waitExit()
+}
+
+// heapInUse is this process's live heap after a collection; the worker
+// runs in this process.
+func heapInUse() uint64 {
+	goruntime.GC()
+	var ms goruntime.MemStats
+	goruntime.ReadMemStats(&ms)
+	return ms.HeapInuse
 }
