@@ -162,6 +162,8 @@ type attachStream struct {
 	exited chan struct{}
 	// announcesLeave: the worker takes AttachLeave (CapAttachSizeOwner).
 	announcesLeave bool
+	// composes: the worker takes AttachCompose (CapAttachCompose).
+	composes bool
 }
 
 func startAttachStream(s transport.Stream, r *bufio.Reader) *attachStream {
@@ -273,6 +275,7 @@ func (c *client) connectAttach(ctx context.Context, id string, prev attachIdenti
 	case resp.Attached != nil:
 		a := startAttachStream(s, r)
 		a.announcesLeave = slices.Contains(resp.Attached.Features, protocol.CapAttachSizeOwner)
+		a.composes = slices.Contains(resp.Attached.Features, protocol.CapAttachCompose)
 		return a, resp.Attached, nil, nil
 	case resp.SessionEnded != nil:
 		s.Close()
@@ -863,31 +866,57 @@ func (c *client) overlayInput(ov *overlay, chunk []byte, stream *attachStream, s
 			return nil, false, err
 		}
 		switch out.kind {
-		case overlayTookSize, overlayClose:
-			if out.kind == overlayTookSize {
-				// The worker resizes before it answers the snapshot
-				// asked for next, so the restored screen has the new size.
-				cols, rows, pw, ph := terminalGeometry()
-				if err := stream.send(&protocol.Request{AttachTakeSize: &protocol.Geometry{Cols: cols, Rows: rows, PixelWidth: pw, PixelHeight: ph}}); err != nil {
-					return nil, false, err
-				}
+		case overlayTookSize:
+			// The worker resizes before it answers the snapshot asked
+			// for next, so the restored screen has the new size.
+			cols, rows, pw, ph := terminalGeometry()
+			if err := stream.send(&protocol.Request{AttachTakeSize: &protocol.Geometry{Cols: cols, Rows: rows, PixelWidth: pw, PixelHeight: ph}}); err != nil {
+				return nil, false, err
 			}
-			restored, ended, err := restoreSnapshot(stream, size, ech, painter)
+			return closeOverlay(stream, size, ech, painter)
+		case overlayClose:
+			return closeOverlay(stream, size, ech, painter)
+		case overlaySubmit:
+			// Enter goes on the attach stream, behind the keys the echo
+			// sent when the overlay opened. The worker encodes it for
+			// the program's keyboard mode when it can; an older one gets
+			// a carriage return.
+			req := &protocol.Request{AttachInput: &protocol.Bytes{Data: []byte("\r")}}
+			if stream.composes {
+				req = &protocol.Request{AttachCompose: &protocol.Bytes{}}
+			}
+			if err := stream.send(req); err != nil {
+				return nil, false, err
+			}
+			next, err := c.attentionSession(ov.session)
 			if err != nil {
 				return nil, false, err
 			}
-			if ended != nil {
-				return &attachResult{outcome: outcomeEnded, ended: ended}, false, nil
+			if next != "" {
+				return &attachResult{outcome: outcomeSwitch, next: next}, false, nil
 			}
-			writeOut([]byte("\x1b[?25h"))
-			writeOut(attachStartupBytes(restored))
-			ech.repainted()
-			return nil, true, nil
+			// Nothing else needs attention: stay, and watch the answer.
+			return closeOverlay(stream, size, ech, painter)
 		case overlaySwitch:
 			return &attachResult{outcome: outcomeSwitch, next: out.session}, false, nil
 		}
 	}
 	return nil, false, nil
+}
+
+// closeOverlay restores the session's screen once the overlay has closed.
+func closeOverlay(stream *attachStream, size *protocol.SizeOwnership, ech *echo, painter *screen.Painter) (*attachResult, bool, error) {
+	restored, ended, err := restoreSnapshot(stream, size, ech, painter)
+	if err != nil {
+		return nil, false, err
+	}
+	if ended != nil {
+		return &attachResult{outcome: outcomeEnded, ended: ended}, false, nil
+	}
+	writeOut([]byte("\x1b[?25h"))
+	writeOut(attachStartupBytes(restored))
+	ech.repainted()
+	return nil, true, nil
 }
 
 // restoreSnapshot asks for the current screen after the overlay closes,
@@ -986,6 +1015,26 @@ func writeOut(b []byte) {
 		}
 		b = b[n:]
 	}
+}
+
+// attentionSession is the running session other than id that most needs
+// attention: the first in list order (attention first, the most recently
+// raised first) with attention raised, or "" when none has.
+func (c *client) attentionSession(id string) (string, error) {
+	sessions, err := c.listSessions(0)
+	if err != nil {
+		return "", err
+	}
+	return attentionSessionIn(orderedSessions(sessions), id), nil
+}
+
+func attentionSessionIn(sessions []*session.Record, id string) string {
+	for _, s := range sessions {
+		if s.SessionID != id && s.Status == session.StatusRunning && s.Attention.Rank() > 0 {
+			return s.SessionID
+		}
+	}
+	return ""
 }
 
 // adjacentLiveSession is the running session before or after id in list

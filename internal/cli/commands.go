@@ -139,7 +139,7 @@ func (a *app) commands() []*cobra.Command {
 	cmds = append(cmds, annotate(detach, "[OPTIONS] [SESSION_ID]", "[SESSION_ID]"))
 
 	var sendInput *cobra.Command
-	sendInput = a.command("send-input SESSION [--source-session-id ID] DATA...", "Send background input to a live session", nil, func(args []string) error {
+	sendInput = a.command("send-input SESSION [--source-session-id ID] [--compose] DATA...", "Send background input to a live session", nil, func(args []string) error {
 		in, err := parseSendInput(args)
 		if errors.Is(err, errHelp) {
 			writeHelp(os.Stdout, sendInput)
@@ -155,9 +155,18 @@ func (a *app) commands() []*cobra.Command {
 		if err != nil {
 			return err
 		}
-		req := &protocol.SendInput{SessionID: in.session, Data: []byte(strings.Join(in.data, " "))}
+		req := &protocol.SendInput{SessionID: in.session, Data: []byte(strings.Join(in.data, " ")), Compose: in.compose}
 		if in.source != "" {
 			req.SourceSessionID = &in.source
+		}
+		if in.compose {
+			w, err := c.welcome()
+			if err != nil {
+				return err
+			}
+			if !protocol.HasCapability(w.Capabilities, protocol.CapAttachCompose) {
+				return fmt.Errorf("agtd does not support --compose; %s", upgradeHint)
+			}
 		}
 		_, err = c.call(&protocol.Request{SendInput: req}, 0, func(r *protocol.Response) bool { return r.InputAccepted != nil })
 		return err
@@ -167,6 +176,7 @@ func (a *app) commands() []*cobra.Command {
 	sendInput.DisableFlagParsing = true
 	sendInput.Flags().String("source-session-id", "", "")
 	withValue(sendInput, "source-session-id", "SOURCE_SESSION_ID")
+	sendInput.Flags().Bool("compose", false, "send DATA as one prompt: pasted as the program's terminal modes ask, then Enter")
 	cmds = append(cmds, annotate(sendInput, "[OPTIONS] <SESSION_ID> <DATA>...", "<SESSION_ID>\n<DATA>..."))
 
 	var vt bool
@@ -889,6 +899,7 @@ func resolveDetachSessionID(id string) (string, error) {
 
 type sendInputArgs struct {
 	session, source, host string
+	compose               bool
 	data                  []string
 }
 
@@ -921,6 +932,9 @@ func parseSendInput(args []string) (sendInputArgs, error) {
 		switch arg {
 		case "-h", "--help":
 			return in, errHelp
+		case "--compose":
+			in.compose = true
+			continue
 		case "--":
 			if i+1 < len(args) {
 				in.session = args[i+1]

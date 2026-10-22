@@ -55,6 +55,28 @@ func TestAdjacentSession(t *testing.T) {
 	}
 }
 
+// Submit and switch goes to the running session, other than the current
+// one, that most needs attention in list order, or nowhere.
+func TestAttentionSession(t *testing.T) {
+	a, b, c := demo("alpha"), demo("beta"), demo("gamma")
+	b.Attention, c.Attention = session.AttentionAction, session.AttentionNotice
+	ordered := []*session.Record{&b, &c, &a}
+	if got := attentionSessionIn(ordered, "alpha"); got != "beta" {
+		t.Fatalf("from alpha: %q", got)
+	}
+	if got := attentionSessionIn(ordered, "beta"); got != "gamma" {
+		t.Fatalf("from beta: %q", got)
+	}
+	b.Status = session.StatusExited
+	if got := attentionSessionIn(ordered, "alpha"); got != "gamma" {
+		t.Fatalf("beta exited: %q", got)
+	}
+	c.Attention = session.AttentionInfo
+	if got := attentionSessionIn(ordered, "alpha"); got != "" {
+		t.Fatalf("nothing needs attention: %q", got)
+	}
+}
+
 func TestFormatSessionEnd(t *testing.T) {
 	code := int32(3)
 	msg := "spawn failed"
@@ -81,6 +103,10 @@ func TestOverlayKeys(t *testing.T) {
 	}
 	if out, _ := o.handle(key(keyEsc)); out.kind != overlayClose {
 		t.Fatalf("esc: %+v", out)
+	}
+	// Ctrl-Y, Enter is submit and switch.
+	if out, err := o.handle(key(keyEnter)); err != nil || out.kind != overlaySubmit {
+		t.Fatalf("enter on the fresh palette: %+v %v", out, err)
 	}
 	o.handle(char('n'))
 	o.handle(char('e'))
@@ -129,11 +155,14 @@ func TestOverlayDraws(t *testing.T) {
 	if got := stripANSI(body[3].render(60, o.theme)); !strings.HasPrefix(got, " ❯ ") || runeLen(got) != 60 {
 		t.Fatalf("prompt %q", got)
 	}
-	if got := stripANSI(body[5].render(60, o.theme)); !strings.HasPrefix(got, "▌ Switch session") || !strings.HasSuffix(got, "s ") {
+	if got := stripANSI(body[5].render(60, o.theme)); !strings.HasPrefix(got, "▌ Submit and switch") || !strings.HasSuffix(got, "↵ ") {
 		t.Fatalf("first item %q", got)
 	}
-	if got := stripANSI(body[6].render(60, o.theme)); !strings.HasPrefix(got, "  New session") {
+	if got := stripANSI(body[6].render(60, o.theme)); !strings.HasPrefix(got, "  Switch session") || !strings.HasSuffix(got, "s ") {
 		t.Fatalf("second item %q", got)
+	}
+	if got := stripANSI(body[7].render(60, o.theme)); !strings.HasPrefix(got, "  New session") {
+		t.Fatalf("third item %q", got)
 	}
 	if got := stripANSI(body[18].render(60, o.theme)); !strings.Contains(got, "enter run") {
 		t.Fatalf("hints %q", got)
@@ -193,7 +222,7 @@ func TestOverlayTakeSize(t *testing.T) {
 	if out, err := o.handle(key(keyEnter)); err != nil || out.kind != overlayTookSize {
 		t.Fatalf("enter: %+v %v", out, err)
 	}
-	if got := len(paletteItems); got != 4 {
+	if got := len(paletteItems); got != 5 {
 		t.Fatalf("the take-size item leaked into the shared palette: %d items", got)
 	}
 

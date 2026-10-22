@@ -61,7 +61,11 @@ type Request struct {
 	AttachField *struct{}
 	// AttachFrameAck (CapAttachFrames) acknowledges a Frame; the next is
 	// built once it arrives.
-	AttachFrameAck  *FrameAck
+	AttachFrameAck *FrameAck
+	// AttachCompose (CapAttachCompose), on an attach stream, is a whole
+	// prompt: the worker encodes it as the program's terminal modes ask
+	// for input (a paste, then Enter). Empty, it is Enter alone.
+	AttachCompose   *Bytes
 	SendInput       *SendInput
 	GetSession      *SessionRef
 	ListSessions    *struct{}
@@ -363,6 +367,13 @@ type SendInput struct {
 	SessionID       string
 	Data            []byte
 	SourceSessionID *string
+	// Compose (CapAttachCompose) sends Data as a whole prompt: the worker
+	// encodes it as the program's terminal modes ask for input (a paste,
+	// then Enter). It is written only when set, since the daemon forwards
+	// the request to the worker in the base encoding; a worker that does
+	// not know it rejects the trailing byte rather than typing the text
+	// unencoded.
+	Compose bool
 }
 
 type GetHistory struct {
@@ -525,6 +536,7 @@ const (
 	kAttachLeaveRequest    kind = 51
 	kAttachFieldRequest    kind = 52
 	kAttachFrameAckRequest kind = 53
+	kAttachComposeRequest  kind = 54
 
 	kDaemonInfoResponse     kind = 101
 	kCreateSessionResponse  kind = 102
@@ -855,6 +867,9 @@ func encodeRequest(req *Request, f Features) (kind, []byte, error) {
 		e.u32(req.AttachFrameAck.Seq)
 		e.bool(req.AttachFrameAck.Field)
 		return kAttachFrameAckRequest, e.buf, e.err
+	case req.AttachCompose != nil:
+		e.bytes(req.AttachCompose.Data)
+		return kAttachComposeRequest, e.buf, e.err
 	case req.DetachSession != nil:
 		e.str(req.DetachSession.SessionID)
 		e.bool(req.DetachSession.All)
@@ -872,6 +887,9 @@ func encodeRequest(req *Request, f Features) (kind, []byte, error) {
 		e.str(req.SendInput.SessionID)
 		e.bytes(req.SendInput.Data)
 		e.optStr(req.SendInput.SourceSessionID)
+		if req.SendInput.Compose {
+			e.bool(true)
+		}
 		return kSendInputRequest, e.buf, e.err
 	case req.GetSession != nil:
 		e.str(req.GetSession.SessionID)
@@ -998,6 +1016,8 @@ func decodeRequest(k kind, payload []byte, f Features) (*Request, error) {
 		req.AttachField = Empty
 	case kAttachFrameAckRequest:
 		req.AttachFrameAck = &FrameAck{Seq: d.u32(), Field: d.bool()}
+	case kAttachComposeRequest:
+		req.AttachCompose = &Bytes{d.bytes()}
 	case kDetachSessionRequest:
 		req.DetachSession = &DetachSession{SessionID: d.str(), All: d.bool()}
 	case kDetachAttachmentRequest:
@@ -1008,6 +1028,10 @@ func decodeRequest(k kind, payload []byte, f Features) (*Request, error) {
 		req.AttachSnapshot = Empty
 	case kSendInputRequest:
 		req.SendInput = &SendInput{SessionID: d.str(), Data: d.bytes(), SourceSessionID: d.optStr()}
+		// Compose is present only when set (see SendInput).
+		if d.more() {
+			req.SendInput.Compose = d.bool()
+		}
 	case kGetSessionRequest:
 		req.GetSession = &SessionRef{d.str()}
 	case kListSessionsRequest:

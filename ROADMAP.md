@@ -1108,10 +1108,10 @@ by the client, so lag never flashes.
 * [x] Local echo in the field: predicted keys, batching, the hold while keys are in flight, the
       atomic repaint once the field confirms them, resend after a reattach for the keys the
       field proves missing
-* [ ] Measurements on a real slow link (`agt bench echo`, a delay knob on the test relay)
-* [ ] Screen frames (`attach-frames`): rows diffed per attachment, one frame in flight, the echo
+* [x] Measurements on a real slow link (`agt bench echo`, a delay knob on the test relay)
+* [x] Screen frames (`attach-frames`): rows diffed per attachment, two frames in flight, the echo
       composed over the live screen, native scrollback kept
-* [ ] `attach-compose` for scripts, submit-and-switch
+* [x] `attach-compose` for scripts, submit-and-switch
 
 ---
 

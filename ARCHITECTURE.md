@@ -502,6 +502,7 @@ features both listed. Today there is one protocol version (1), and these capabil
 | `attach-field` | attach stream: `AttachField` asks where the program's input field is, answered with `Field` (see "The input field and local echo") |
 | `terminal-colors` | `CreateSession.Colors` and, on an attach stream, `AttachSession.Colors` carry the client terminal's default colours; the worker answers the program's OSC 10 and 11 queries with the most recent ones itself (see "Terminal queries") |
 | `attach-frames` | attach stream: the screen arrives as `AttachFrame`s instead of `PtyOutput`, each acknowledged with `AttachFrameAck`; `Attached.Snapshot` holds the scrollback rows only and `AttachSnapshot` is answered with a full frame (see "Screen frames") |
+| `attach-compose` | `SendInput.Compose` (written only when set, since the daemon forwards the request to the worker in the base encoding) and, on an attach stream, `AttachCompose`: a whole prompt, or Enter alone, encoded by the worker as the program's terminal modes ask for input (see "Composed input") |
 
 The protocol grows without breaking older peers this way: a new message kind, or a field appended
 to the end of an existing message or struct (a session record, even inside a list), comes with a
@@ -546,7 +547,7 @@ tokened request after a lost remote connection (see "Duplicate And Replayed Requ
 | `ListSessions` | `Sessions` | request |
 | `ListAttachments` | `Attachments` | request |
 | `DetachSession`, `DetachAttachment` | `Ok` | request |
-| `SendInput` | `InputAccepted` | request |
+| `SendInput` | `InputAccepted`; with `Compose` (`attach-compose`) the data is a whole prompt the worker encodes for the program, Enter included | request |
 | `ListWorkspaces` | `Workspaces` | request |
 | `AddWorkspace` | `Workspace` | request |
 | `RemoveWorkspace` | `Ok` | request |
@@ -561,12 +562,13 @@ tokened request after a lost remote connection (see "Duplicate And Replayed Requ
 | `AttachSession` | `Attached` (or `SessionEnded` for a finished session), then `PtyOutput`, `AttachSnapshot`, `AttachResync`, `AttachSizeOwner`, `Field`, and finally `SessionEnded`, `EndOfStream`, `SessionRestarting` or `Error` | attach |
 | `AttachField` | `Field` (`attach-field`), on an attach stream; under `attach-frames` the next `AttachFrame` carries the field instead | attach |
 | `AttachFrameAck` | nothing; the next `AttachFrame` once the screen changes (`attach-frames`), on an attach stream | attach |
+| `AttachCompose` | nothing; the text and Enter are typed into the session as the program's modes ask (`attach-compose`), on an attach stream | attach |
 | `HandoffSession` | `HandedOff` (from the new image) | request, agtd to a worker only |
 
 Any request may instead be answered with `Error`. Kinds are numbered by area so that parallel work
 does not collide: 1-19 and 101-118 are the base protocol, 30-39 and 130-139 git state and
 artifacts, 50-59 and 150-159 attach streams (`AttachTakeSize` is 50, `AttachLeave` 51, `AttachField` 52,
-`AttachResync` 150, `AttachSizeOwner` 151, `Field` 152, `AttachFrameAck` 53, `AttachFrame` 153), 60-69 and 160-169 worker handoff.
+`AttachResync` 150, `AttachSizeOwner` 151, `Field` 152, `AttachFrameAck` 53, `AttachFrame` 153, `AttachCompose` 54), 60-69 and 160-169 worker handoff.
 
 `attach` is the bidirectional case. After the initial `AttachSession` request and `Attached`
 response (which carries a snapshot of the current screen), the worker streams `PtyOutput` frames
@@ -1084,6 +1086,21 @@ blanked until the repaint.
 that moves its box while the user types is corrected at the next field. Keys typed during a
 reconnect are still dropped. Frames (the next phase of the design) remove the hold and the
 repaint by composing the drawing over the agent's live screen.
+
+**Composed input.** A script, or the overlay's Submit and switch, has a whole prompt rather than
+keystrokes, and only the worker knows how the program asked to receive input. `agt send-input
+--compose` (`SendInput.Compose`) and the attach stream's `AttachCompose` (both `attach-compose`)
+hand the worker the text, which it encodes on the owner goroutine from the terminal's modes
+(`internal/worker/compose.go`): the text as a paste, bracketed when the program turned bracketed
+paste on and otherwise with newlines as carriage returns and unsafe control bytes made spaces
+(libghostty's paste rules), then Enter as the program's keyboard mode wants it (`CSI 13 u` under
+the kitty protocol's report-all-keys flag, modifyOtherKeys, or a carriage return), queued as one
+write. Empty text is Enter alone, which is how `Ctrl-Y`, `Enter` submits what the local echo
+typed: Enter goes on the attach stream behind the keys the echo flushed when the overlay opened,
+then the CLI moves to the running session that most needs attention (the list's order), or stays
+when none does. `SendInput.Compose` is written only when set, since the daemon forwards the
+request to the worker in the base encoding; a worker from before the capability rejects the
+trailing byte rather than typing the text unencoded.
 
 ## Screen Frames
 
