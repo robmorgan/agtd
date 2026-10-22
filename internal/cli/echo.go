@@ -703,7 +703,9 @@ func (e *echo) probe() []*protocol.Request {
 }
 
 // overlay is the drawing to put over a frame: the predicted rows while
-// keys are in flight, nothing once the frame shows them itself.
+// keys are in flight, ending with the cursor where the prediction puts it
+// (the painter leaves it there rather than at the frame's, which is behind
+// by those keys); nothing once the frame shows them itself.
 func (e *echo) overlay() []byte {
 	if e == nil || !e.frames || !e.holding() || !e.active() {
 		return nil

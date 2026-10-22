@@ -68,8 +68,11 @@ func (p *Painter) Row(y int) []byte {
 // Apply returns what to write to the terminal for f, inside synchronized
 // output: the modes that changed, the scroll, the changed rows, keyboard
 // state, colours and effects, then overlay (the local echo's rows, already
-// positioned) and the cursor. A full frame, or one of another size, starts
-// the row cache afresh.
+// positioned, ending with the cursor where the echo predicts it) or, with
+// no overlay, the frame's cursor. The frame's cursor is the program's,
+// which lags the keys still in flight: putting it after the overlay would
+// drag the cursor back a few cells on every frame while typing. A full
+// frame, or one of another size, starts the row cache afresh.
 func (p *Painter) Apply(f *protocol.Frame, overlay []byte) []byte {
 	var b bytes.Buffer
 	b.WriteString(syncBegin)
@@ -144,7 +147,9 @@ func (p *Painter) Apply(f *protocol.Frame, overlay []byte) []byte {
 		}
 		p.shape = f.CursorShape
 	}
-	b.WriteString(cup(int(f.CursorRow), int(f.CursorCol)))
+	if len(overlay) == 0 {
+		b.WriteString(cup(int(f.CursorRow), int(f.CursorCol)))
+	}
 	b.WriteString(syncEnd)
 	p.seq = f.Seq
 	p.painted = true

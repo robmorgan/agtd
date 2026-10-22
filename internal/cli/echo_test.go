@@ -1226,6 +1226,35 @@ func TestEchoFramesConfirmOnlyWhatTheyProve(t *testing.T) {
 	}
 }
 
+// The overlay over a frame ends with the cursor where the typing will be,
+// so the painter leaves it there; the frame's own cursor is the agent's,
+// behind by the keys in flight, and placing it after the overlay would
+// pull the cursor back on every frame while typing. Once a frame proves
+// the keys there is no overlay and the frame's cursor stands.
+func TestEchoOverlayEndsWithThePredictedCursor(t *testing.T) {
+	e, now := framesEcho(t, []string{""})
+	typeKeys(e, "abc")
+	e.tick(now.Add(time.Second))
+	after := []byte(cup(36, 5)) // the field's row, text column 2 + 3 keys
+	if got := e.overlay(); !bytes.HasSuffix(got, after) {
+		t.Fatalf("overlay after abc should end at the predicted cursor: %q", got)
+	}
+	// A frame from before the keys landed shows the field as it was; the
+	// prediction is replayed over it and the cursor stays predicted.
+	frameWith(e, 2, []string{"a"})
+	if got := e.overlay(); !bytes.HasSuffix(got, after) {
+		t.Fatalf("overlay over a lagging frame: %q", got)
+	}
+	// A frame built after the ack of frame 2 proves the keys.
+	frameWith(e, 4, []string{"abc"})
+	if e.holding() {
+		t.Fatalf("frame 4 should prove abc: unconfirmed %d", e.unconfirmed())
+	}
+	if got := e.overlay(); got != nil {
+		t.Fatalf("overlay once the frame shows the keys: %q", got)
+	}
+}
+
 // A frame built before an unpredicted key or a resize reached the worker
 // shows a field that may be gone: it neither resumes the echo nor starts
 // it, and the field is asked for until a later frame shows it.
