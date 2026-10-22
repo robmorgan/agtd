@@ -24,7 +24,7 @@
 #
 # agt is pure Go, so it is cross compiled with CGO_ENABLED=0.
 #
-# Requires Go and Zig 0.16+ (ZIG overrides the one on PATH).
+# Requires Go and Zig 0.17+ (ZIG overrides the one on PATH).
 set -euo pipefail
 
 PLATFORM="${1:-}"

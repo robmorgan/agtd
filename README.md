@@ -267,7 +267,7 @@ make shellcheck  # lint every tracked shell script (CI runs this on pull request
 
 The daemon's session workers link `libghostty-vt` statically, tracking the ghostty commit pinned in
 `scripts/build-libghostty.sh` (matching the Go bindings' `CMakeLists.txt`). That commit needs
-**Zig 0.16 or newer**; the script fetches it and builds it under `.build/`. Point `ZIG=` at a 0.16
+**Zig 0.17 or newer**; the script fetches it and builds it under `.build/`. Point `ZIG=` at a 0.17
 toolchain if the one on `PATH` is older. Zig is only needed when the library is (re)built; an
 up-to-date build under `.build/` is reused as is.
 

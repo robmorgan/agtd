@@ -383,7 +383,8 @@ func (s *terminalState) title() string {
 // ownerState.atGround.
 func (s *terminalState) feedUntilGround(data []byte) (int, [][]byte, terminalEffects) {
 	s.lastFeed = time.Now()
-	n, _ := s.term.VTWriteUntilGround(data)
+	stop, _ := s.term.VTWriteUntil(data, libghostty.TerminalBoundaryGround)
+	n := stop.Consumed
 	writes, effects := s.take()
 	return n, writes, effects
 }

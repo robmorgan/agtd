@@ -33,7 +33,7 @@
 #   AGTD_SRC         where to clone the source (default ~/.local/share/agtd/src)
 #   AGTD_NO_UPGRADE  set to 1 to leave a running daemon alone
 #   AGTD_NO_SERVICE  set to 1 to skip the systemd unit that starts the daemon at boot (Linux)
-#   ZIG                a Zig 0.16+ to use instead of the one on PATH
+#   ZIG                a Zig 0.17+ to use instead of the one on PATH
 
 # Everything runs from main, called on the last line, so that bash has read
 # the whole script before anything runs when it is piped from curl.
@@ -43,7 +43,7 @@ set -euo pipefail
 REPO_URL="https://github.com/robmorgan/agtd.git"
 RELEASES_URL="${AGTD_RELEASES_URL:-https://github.com/robmorgan/agtd/releases}"
 GO_VERSION="1.26.9"   # downloaded when PATH has no Go >= go.mod's
-ZIG_VERSION="0.16.0"  # downloaded when PATH has no Zig >= 0.16
+ZIG_VERSION="0.17.0"  # downloaded when PATH has no Zig >= 0.17
 DATA_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/agtd"
 TOOLCHAIN_DIR="${DATA_DIR}/toolchain"
 
@@ -188,9 +188,9 @@ ensure_go() {
   export PATH="${dir}/bin:${PATH}"
 }
 
-# ensure_zig sets ZIG to a Zig 0.16+, from $ZIG, PATH or a download.
+# ensure_zig sets ZIG to a Zig 0.17+, from $ZIG, PATH or a download.
 ensure_zig() {
-  local want="0.16.0" cand="${ZIG:-zig}" have=""
+  local want="0.17.0" cand="${ZIG:-zig}" have=""
   if command -v "${cand}" >/dev/null 2>&1; then
     have="$("${cand}" version 2>/dev/null || true)"
     if [[ "${have}" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]] && version_ge "${BASH_REMATCH[0]}" "${want}"; then

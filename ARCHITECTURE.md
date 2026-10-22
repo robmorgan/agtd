@@ -239,11 +239,13 @@ and, since the terminal tracks it (`WithContinuationMaxBytes`, 1 MiB), the parse
 middle of an escape sequence or UTF-8 character, so the rest of a sequence the agent was writing
 is parsed the same way after the handoff. Tests compare the terminals before and after (VT and
 plain renderings, cursor, active screen, modes) across real execs, and check that continuous
-output across five handoffs ends up in the shadow terminal exactly once and in order. The snapshot
-format is not yet stable across libghostty versions, so the state also carries the VT rendering;
-a new image that cannot decode the snapshot rebuilds the terminal from that (screen and scrollback
-text, most modes) and logs it. An unfinished sequence longer than 1 MiB cannot be snapshotted, and
-the handoff is refused until it completes.
+output across five handoffs ends up in the shadow terminal exactly once and in order. libghostty
+does not yet promise the snapshot format stable across versions (the move from Ghostty 81598385d
+to f54340ad kept it byte for byte, apart from Kitty image records that an older image cannot
+read), so the state also carries the VT rendering; a new image that cannot decode the snapshot
+rebuilds the terminal from that (screen and scrollback text, most modes) and logs it. An
+unfinished sequence longer than 1 MiB cannot be snapshotted, and the handoff is refused until it
+completes.
 
 Clients follow: the CLI asks for `session-restart` in `AttachSession` when the daemon's Welcome
 lists it, and on `SessionRestarting` attaches again and repaints, like after a lost connection.
@@ -1288,7 +1290,7 @@ In this way, `ghostty-vt` doesn't sit in the middle of an active terminal sessio
 the client receives so it can re-hydrate clients that connect to the session. This enables users to pick up where they
 left off as if they didn't disconnect from the terminal session at all.
 
-The worker uses `go.mitchellh.com/libghostty`, whose pinned `libghostty-vt` needs Zig 0.16 and is
+The worker uses `go.mitchellh.com/libghostty`, whose pinned `libghostty-vt` needs Zig 0.17 and is
 built `ReleaseFast` under `.build/` by `scripts/build-libghostty.sh`. Only the worker links it:
 the `agt` CLI never imports the worker (or the daemon and its SQLite store), and a test keeps it
 buildable with `CGO_ENABLED=0`.
@@ -1313,8 +1315,9 @@ and its terminal to it first. It is built from libghostty's VT formatter, with t
 
 * **An exact boundary.** It is taken only where the parser is between escape sequences and UTF-8
   characters (`VTGround`). If an attach arrives mid-sequence, it waits for the next PTY read and
-  feeds only the bytes that finish the sequence (`VTWriteUntilGround`) before taking it, at most
-  100 ms. Otherwise the client would get the sequence's tail as live output and print it.
+  feeds only the bytes that finish the sequence (`VTWriteUntil`, stopping at the ground boundary)
+  before taking it, at most 100 ms. Otherwise the client would get the sequence's tail as live
+  output and print it.
 * **The primary screen under the alternate one.** The formatter only formats the active screen,
   so while a program has the alternate screen up the worker copies the terminal (its binary
   snapshot, decoded), leaves the alternate screen in the copy, and formats the primary screen and
@@ -1349,19 +1352,9 @@ What a snapshot does not restore, because the formatter does not emit it or beca
 written to someone else's terminal cannot carry it (`TestSnapshotKnownLimits` demonstrates the
 formatter's):
 
-* **Colors of blank cells.** The formatter skips cells that hold only a background (written by an
-  erase while a background color is set) and writes a row of them as an empty line, so an
-  editor's background shows the client's default on empty rows until the program redraws them.
-  It also writes the gap before later text on a row as spaces in the pen of the text before the
-  gap. Both are fixable in libghostty's formatter (`PageFormatter`), which is where the fix
-  belongs.
-* **Soft wraps and hyperlinks of text already on screen.** Every row is written with a line
-  break after it, so a wrapped line comes back as separate lines that a later resize does not
-  reflow; hyperlinks (OSC 8) are only emitted for the pen, not for text.
-* **Blank cells' styles.** The formatter writes a gap before later text as spaces with the pen of
-  the cell before the gap, and writes nothing for a row of cells erased with a background colour,
-  so a gap can carry a colour or an inverse it did not have, and such a row comes back with the
-  default background. Frames ("Screen frames") have the same traits, being the same formatting.
+* **Soft wraps.** Every row is written with a line break after it, so a wrapped line comes back
+  as separate lines that a later resize does not reflow. Frames ("Screen frames") have the same
+  trait, being the same formatting.
 * **Text printed before grapheme clustering (mode 2027) was switched.** The mode decides how
   codepoints join into cells, cells do not record which mode made them, and the snapshot sets
   the current mode before the contents, so text printed under the other mode can split or join

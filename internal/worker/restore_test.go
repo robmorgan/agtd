@@ -338,6 +338,9 @@ func TestSnapshotRestores(t *testing.T) {
 		{"alternate screen with styles", "\x1b[32mgreen primary\x1b[0m\r\n\x1b[?1049h\x1b[2J\x1b[1;1H\x1b[44mblue alt\x1b[0m"},
 		{"wide and combining characters", "界é👍🏽 ok"},
 		{"synchronized output in progress", "\x1b[?2026hhalf a frame"},
+		{"background of erased cells", "\x1b[44m\x1b[2J\x1b[Hblue\x1b[0m"},
+		{"pen of the text before a gap", "\x1b[41mred\x1b[0m\x1b[10Gplain"},
+		{"hyperlinked text", "\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\ after"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ts := newTestTerminal(t, 80, 24)
@@ -351,7 +354,7 @@ func TestSnapshotRestores(t *testing.T) {
 
 // withoutKnownLimits leaves out the parts of img that a snapshot does not
 // restore exactly (TestSnapshotKnownLimits shows each): the colors of blank
-// cells, soft wraps and hyperlinks.
+// cells and soft wraps.
 func withoutKnownLimits(img terminalImage) terminalImage {
 	img.Blanks, img.RowFlags = "", ""
 	return img
@@ -402,29 +405,10 @@ func TestSnapshotKnownLimits(t *testing.T) {
 		differs []string
 	}{
 		{
-			// The formatter skips blank cells that carry only a
-			// background (from an erase with a background color set),
-			// and treats rows of them as blank lines.
-			name: "background of erased cells", stream: "\x1b[44m\x1b[2J\x1b[Hblue\x1b[0m",
-			differs: []string{"Blanks"},
-		},
-		{
-			// The formatter writes the gap before later text on a row as
-			// spaces in the pen of the text before the gap.
-			name: "pen of the text before a gap", stream: "\x1b[41mred\x1b[0m\x1b[10Gplain",
-			differs: []string{"Blanks"},
-		},
-		{
 			// Rows are written with a line break after each, so a
 			// soft-wrapped line comes back as separate lines (which a
 			// later resize does not reflow).
 			name: "soft-wrapped line", stream: strings.Repeat("wrap", 30),
-			differs: []string{"RowFlags"},
-		},
-		{
-			// The formatter only emits the hyperlink the pen is in, not
-			// the hyperlinks of text already on the screen.
-			name: "hyperlinked text", stream: "\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\ after",
 			differs: []string{"RowFlags"},
 		},
 		{
