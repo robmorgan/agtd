@@ -4,6 +4,9 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"agtd.sh/internal/protocol"
@@ -66,30 +69,57 @@ type attachment struct {
 	s        transport.Stream
 	r        *bufio.Reader
 	snapshot []byte
+	// wire counts the bytes read from s, framing included.
+	wire atomic.Uint64
+	// wmu serialises writers: the fan-out phase types on one stream
+	// while its reader acknowledges frames.
+	wmu sync.Mutex
+}
+
+// write sends one request on the attachment's stream.
+func (a *attachment) write(req *protocol.Request) error {
+	a.wmu.Lock()
+	defer a.wmu.Unlock()
+	return protocol.WriteRequest(a.s, req)
+}
+
+// countingReader adds what it reads to n.
+type countingReader struct {
+	r io.Reader
+	n *atomic.Uint64
+}
+
+func (c countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n.Add(uint64(n))
+	return n, err
 }
 
 // benchGeometry is the size bench clients attach with: the worker's
 // default, so attaching does not resize (and repaint) the session.
 var benchGeometry = protocol.Geometry{Cols: 160, Rows: 48}
 
-// attach attaches to a session and returns once the snapshot has arrived,
-// with the time that took: the attach latency a client sees, through the
-// daemon's proxy.
-func (b *bench) attach(id string) (*attachment, time.Duration, error) {
+// attach attaches to a session, for the raw output or for screen frames,
+// and returns once the snapshot has arrived, with the time that took: the
+// attach latency a client sees, through the daemon's proxy.
+func (b *bench) attach(id string, frames bool) (*attachment, time.Duration, error) {
 	start := time.Now()
 	s, err := transport.DialUnix(b.paths.Socket, requestTimeout)
 	if err != nil {
 		return nil, 0, err
 	}
 	s.SetDeadline(time.Now().Add(requestTimeout))
-	if err := protocol.WriteRequest(s, &protocol.Request{AttachSession: &protocol.AttachSession{
-		SessionID: id, Kind: session.AttachmentAttach, Geometry: benchGeometry,
-	}}); err != nil {
+	req := &protocol.AttachSession{SessionID: id, Kind: session.AttachmentAttach, Geometry: benchGeometry}
+	if frames {
+		req.Features = []string{protocol.CapAttachFrames}
+	}
+	if err := protocol.WriteRequest(s, &protocol.Request{AttachSession: req}); err != nil {
 		s.Close()
 		return nil, 0, err
 	}
-	r := bufio.NewReaderSize(s, 64<<10)
-	resp, err := protocol.ReadResponse(r)
+	a := &attachment{s: s}
+	a.r = bufio.NewReaderSize(countingReader{r: s, n: &a.wire}, 64<<10)
+	resp, err := protocol.ReadResponse(a.r)
 	elapsed := time.Since(start)
 	switch {
 	case err != nil:
@@ -99,11 +129,14 @@ func (b *bench) attach(id string) (*attachment, time.Duration, error) {
 		err = errors.New(resp.Error.Message)
 	case resp.Attached == nil:
 		err = fmt.Errorf("unexpected response to attach")
+	case frames && !resp.Attached.HasFeature(protocol.CapAttachFrames):
+		err = fmt.Errorf("the daemon did not grant %s", protocol.CapAttachFrames)
 	}
 	if err != nil {
 		s.Close()
 		return nil, 0, fmt.Errorf("attach to %s: %w", id, err)
 	}
 	s.SetDeadline(time.Time{})
-	return &attachment{s: s, r: r, snapshot: resp.Attached.Snapshot}, elapsed, nil
+	a.snapshot = resp.Attached.Snapshot
+	return a, elapsed, nil
 }

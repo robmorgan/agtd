@@ -122,8 +122,13 @@ func TestRunSmall(t *testing.T) {
 	if r.Output == nil || r.Output.BytesPerSec <= 0 || r.Output.Sessions != 2 {
 		t.Errorf("output = %+v", r.Output)
 	}
-	if f := r.FanOut; f == nil || f.Clients != 2 || f.PTYBytesPerSec <= 0 || f.ClientBytesPerSec.Min <= 0 || f.EchoMs.N == 0 {
+	if f := r.FanOut; f == nil || f.Mode != "raw" || f.Clients != 2 || f.PTYBytesPerSec <= 0 || f.ClientBytesPerSec.Min <= 0 || f.EchoMs.N == 0 || f.Worker.Private == 0 {
 		t.Errorf("fan-out = %+v", r.FanOut)
+	}
+	// Under frames an echo that scrolled more than a frame carries between
+	// two frames is lost, so the echoes are only reported, not required.
+	if f := r.FanOutFrames; f == nil || f.Mode != "frames" || f.Clients != 2 || f.PTYBytesPerSec <= 0 || f.ClientBytesPerSec.Min <= 0 || f.FramesPerSec.Min <= 0 || f.Worker.Private == 0 {
+		t.Errorf("fan-out (frames) = %+v", r.FanOutFrames)
 	}
 	if d := r.Database; d.Rows != 3+1+1 || d.ListSessionsMs.N == 0 || d.InsertDBMs.N == 0 || d.FileBytes == 0 {
 		t.Errorf("database = %+v", d)

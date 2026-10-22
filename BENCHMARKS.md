@@ -185,6 +185,7 @@ bin/agtd bench sessions --count 100 --output-heavy 10 --attach 10
 bin/agtd bench sessions --count 500
 bin/agtd bench sessions --count 100 --duration 60s --fill-lines 0      # idle CPU
 bin/agtd bench sessions --count 0 --output-heavy 100 --attach 100 --duration 10s --fill-lines 0
+bin/agtd bench sessions --count 0 --attach 3 --duration 10s --fill-lines 0   # fan-out, raw then frames
 go test ./internal/worker -run '^$' -bench TerminalMemory -benchtime 1x
 go test ./internal/db -run '^$' -bench .
 ```
@@ -421,6 +422,34 @@ frames"; `agt bench echo --mode frames|raw`), on 2026-10-20 with the frames buil
   Codex 0.07, Claude Code 0.18, pi 0.14, a shell 0.77, Vim 0.77, Neovim 1.5 (it restyles whole
   rows), clang's scrolling output 1.1. One frame per 2 KB chunk; fewer, larger frames over a slow
   link lower the ratio further.
+
+Under a flood, with one and three clients attached through the daemon's Unix socket (`agtd bench
+sessions --count 0 --attach K --duration 10s --fill-lines 0`, on 2026-10-22, the same M1 Max at
+load average 3-5; the session runs `yes`, the clients acknowledge every frame at once, as `agt
+attach` does; the worker alone pushes 98 MiB/s through libghostty at 133% CPU):
+
+| Clients | Mode | PTY output | Each client receives | Worker CPU | Daemon CPU | Echo p50 | Worker memory per client |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | raw | 63 MiB/s | 63 MiB/s (100%) | 196% | 73% | 0.14 ms | 1.5 MiB |
+| 1 | frames | 96 MiB/s | 1.4 MiB/s (1.5%), 244 frames/s | 145% | 2% | 0.43 ms | 1.0 MiB |
+| 3 | raw | 37 MiB/s | 37 MiB/s (100%) | 229% | 179% | 0.21 ms | 1.8 MiB |
+| 3 | frames | 84 MiB/s | 1.4 MiB/s (1.7%), 244 frames/s | 177% | 6% | 0.31 ms | 1.9 MiB |
+
+* A frame client costs the worker about 2 ms of CPU per MiB of output (15 ms/MiB with one
+  attached, 21 with three, against 13.4 alone), a raw one about 16 ms (31 and 62): the formatter
+  runs over the screen and up to 1,000 scrolled rows 244 times a second (the 4 ms floor), where
+  the raw fan-out copies every PTY read into each client's queue and through the daemon's proxy.
+  The flood itself keeps its speed under frames and loses a third to two thirds of it under raw.
+* The daemon has almost nothing to do under frames: 2-6% CPU against 73-179%, since 1.4 MiB/s
+  crosses it per client instead of the whole output.
+* Memory is the same either way, 1-2 MiB of worker memory per attachment (a frame client's row
+  cache is a screen of VT, and no frame is queued).
+* The echo is lost to a frame client under this flood: `yes` scrolls about 4,500 rows between two
+  frames, a frame carries the last 1,000 of them (`frameMaxHistory`), and the typed marker's row
+  is among the rest almost every time (96 of 97 lost with one client, 288 of 291 with three),
+  where raw delivered every one. The frames that do carry it arrive within 0.5 ms. No program a
+  person types at scrolls 1,000 rows in 4 ms; one that does loses those rows from the client's
+  scrollback, and `agt history` has them.
 
 ## Terminal and worker
 

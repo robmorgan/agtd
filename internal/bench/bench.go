@@ -55,6 +55,10 @@ type Options struct {
 	// Attach is the number of clients attached to one output-heavy session
 	// (one is started if OutputHeavy is 0).
 	Attach int
+	// AttachMode is how they receive the screen: "raw" (the PTY output),
+	// "frames" (screen frames), or "both" (the default), one after the
+	// other.
+	AttachMode string
 	// Duration is how long idle CPU, throughput and fan-out are measured.
 	Duration time.Duration
 	// FillLines is how many lines the full-scrollback session prints; 0
@@ -106,6 +110,13 @@ func Run(ctx context.Context, opts Options) (*Report, error) {
 	if opts.Parallel <= 0 {
 		opts.Parallel = 8
 	}
+	switch opts.AttachMode {
+	case "", "both":
+		opts.AttachMode = "both"
+	case "raw", "frames":
+	default:
+		return nil, fmt.Errorf("attach mode %q: want raw, frames or both", opts.AttachMode)
+	}
 	// Unix socket paths are short, so the root is too.
 	root, err := os.MkdirTemp("/tmp", "agdb-")
 	if err != nil {
@@ -116,6 +127,7 @@ func Run(ctx context.Context, opts Options) (*Report, error) {
 	b.report.Options.Count = opts.Count
 	b.report.Options.OutputHeavy = opts.OutputHeavy
 	b.report.Options.Attach = opts.Attach
+	b.report.Options.AttachMode = opts.AttachMode
 	b.report.Options.DurationSec = opts.Duration.Seconds()
 	b.report.Options.FillLines = opts.FillLines
 	b.logf("runtime root %s", root)
@@ -130,7 +142,8 @@ func Run(ctx context.Context, opts Options) (*Report, error) {
 		{"measure idle CPU", b.measureIdleCPU},
 		{"measure snapshots", b.measureSnapshots},
 		{"measure output", b.measureOutput},
-		{"measure fan-out", b.measureFanOut},
+		{"measure fan-out (raw)", b.measureFanOutRaw},
+		{"measure fan-out (frames)", b.measureFanOutFrames},
 		{"measure state.db", b.measureDatabase},
 	}
 	for _, step := range steps {
@@ -469,7 +482,7 @@ func (b *bench) measureSnapshot(ctx context.Context, ids []string, repeats int) 
 	n := len(ids) * repeats
 	err := parallelN(ctx, n, min(b.opts.Parallel, len(ids)), func(i int) error {
 		id := ids[i%len(ids)]
-		a, elapsed, err := b.attach(id)
+		a, elapsed, err := b.attach(id, false)
 		if err != nil {
 			return err
 		}
