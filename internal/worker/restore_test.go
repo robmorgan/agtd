@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"reflect"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -391,12 +393,40 @@ func TestSnapshotWritesEveryRow(t *testing.T) {
 	}
 }
 
-// withoutKnownLimits leaves out the parts of img that a snapshot does not
-// restore exactly (TestSnapshotKnownLimits shows each): the colors of blank
-// cells and soft wraps.
-func withoutKnownLimits(img terminalImage) terminalImage {
-	img.Blanks, img.RowFlags = "", ""
-	return img
+// withoutSoftWraps leaves out of want and got what a snapshot does not
+// restore about soft-wrapped rows (TestSnapshotKnownLimits shows both): the
+// wrap flags, and the style of the last cell of each row that want wraps,
+// which may be the spacer head of a wide character that did not fit there
+// (it keeps the pen it was written with, and the formatter writes the
+// character on the next row and nothing in its place). Both images lose
+// that cell by want's flags: a restored terminal never has them.
+func withoutSoftWraps(want, got terminalImage) (terminalImage, terminalImage) {
+	wrapped := map[int]bool{}
+	for _, f := range strings.Fields(want.RowFlags) {
+		if y, ok := strings.CutSuffix(f, "w"); ok {
+			n, _ := strconv.Atoi(y)
+			wrapped[n] = true
+		}
+	}
+	drop := func(img terminalImage) terminalImage {
+		flags := slices.DeleteFunc(strings.Fields(img.RowFlags), func(f string) bool { return strings.HasSuffix(f, "w") })
+		img.RowFlags = strings.Join(flags, " ")
+		var kept []string
+		for _, rec := range strings.Split(img.Blanks, "\n") {
+			if rec == "" {
+				continue
+			}
+			var y, x int
+			fmt.Sscanf(rec, "%d,%d", &y, &x)
+			if wrapped[y] && x == int(img.Cols)-1 {
+				continue
+			}
+			kept = append(kept, rec)
+		}
+		img.Blanks = strings.Join(kept, "\n")
+		return img
+	}
+	return drop(want), drop(got)
 }
 
 // TestSnapshotOriginModeUnderAlternateScreen checks that the copy the
@@ -449,6 +479,14 @@ func TestSnapshotKnownLimits(t *testing.T) {
 			// later resize does not reflow).
 			name: "soft-wrapped line", stream: strings.Repeat("wrap", 30),
 			differs: []string{"RowFlags"},
+		},
+		{
+			// A wide character that does not fit at the end of a row
+			// leaves a spacer head there, which keeps the pen it was
+			// written with; the formatter writes the character on the
+			// next row and nothing in the spacer head's place.
+			name: "styled spacer head of a wrapped wide character", stream: strings.Repeat("0", 76) + "\x1b[7m000💤",
+			differs: []string{"Blanks", "RowFlags"},
 		},
 		{
 			// The cursor block reprints the last cell to recreate the

@@ -1350,8 +1350,10 @@ written to someone else's terminal cannot carry it (`TestSnapshotKnownLimits` de
 formatter's):
 
 * **Soft wraps.** Every row is written with a line break after it, so a wrapped line comes back
-  as separate lines that a later resize does not reflow. Frames ("Screen frames") have the same
-  trait, being the same formatting.
+  as separate lines that a later resize does not reflow. A wide character that did not fit at
+  the end of a row leaves a spacer head there, which keeps the pen it was written with; the
+  formatter writes the character on the next row and nothing in the spacer head's place. Frames
+  ("Screen frames") have the same traits, being the same formatting.
 * **A hyperlink that ends in a pending wrap.** The cursor block reprints the last cell to recreate
   the pending wrap, inside a fresh OSC 8, so a link without an explicit id comes back as two links
   to the same URI, the last cell its own.
