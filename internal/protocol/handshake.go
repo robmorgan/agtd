@@ -204,6 +204,12 @@ const (
 	// the program's OSC 10 and 11 queries with the most recent ones
 	// itself, whether or not a terminal is attached.
 	CapTerminalColors = "terminal-colors"
+	// CapAttachFrames (attach stream): the client gets the screen as
+	// Frames (AttachFrame) instead of PtyOutput, acknowledging each with
+	// AttachFrameAck; Attached.Snapshot holds the scrollback rows only;
+	// AttachSnapshot is answered with a full Frame. See "Screen frames" in
+	// ARCHITECTURE.md.
+	CapAttachFrames = "attach-frames"
 )
 
 // GlobalSessionID identifies one incarnation of a session across every
@@ -225,13 +231,13 @@ const MinProtocolVersion uint16 = 1
 func Capabilities() []string {
 	return []string{CapControlStream, CapGitState, CapArtifacts, CapSessionUID, CapRequestTokens, CapAttachFeatures, CapAttachReplace, CapAttachResync, CapRuntimeStats,
 		CapEvents, CapSessionActivity, CapSessionStatus, CapDaemonID, CapSessionRestart, CapWorkerHandoff, CapTerminalMemory, CapAttachScrollback, CapAttachSizeOwner,
-		CapAttachField, CapTerminalColors}
+		CapAttachField, CapTerminalColors, CapAttachFrames}
 }
 
 // AttachCapabilities are the capabilities that apply to an attach stream,
 // listed in AttachSession.Features.
 func AttachCapabilities() []string {
-	return []string{CapSessionUID, CapAttachReplace, CapAttachResync, CapSessionRestart, CapAttachScrollback, CapAttachSizeOwner, CapAttachField, CapTerminalColors}
+	return []string{CapSessionUID, CapAttachReplace, CapAttachResync, CapSessionRestart, CapAttachScrollback, CapAttachSizeOwner, CapAttachField, CapTerminalColors, CapAttachFrames}
 }
 
 // AttachFeatures is the attach-stream features a client may ask for given

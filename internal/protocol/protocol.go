@@ -58,7 +58,10 @@ type Request struct {
 	AttachSnapshot   *struct{}
 	// AttachField (CapAttachField), on an attach stream, asks where the
 	// program's input field is; the worker answers with Field.
-	AttachField     *struct{}
+	AttachField *struct{}
+	// AttachFrameAck (CapAttachFrames) acknowledges a Frame; the next is
+	// built once it arrives.
+	AttachFrameAck  *FrameAck
 	SendInput       *SendInput
 	GetSession      *SessionRef
 	ListSessions    *struct{}
@@ -271,6 +274,79 @@ type ScreenRow struct {
 	VT    []byte
 }
 
+// Frame (CapAttachFrames) carries the screen as rows instead of the raw
+// output: the rows that changed since the last frame, as the VT bytes
+// libghostty's formatter writes for each (each row self-contained, from a
+// default pen), with the cursor, the state that affects how the terminal
+// behaves, and the input field. A client paints each row by absolute
+// position and acknowledges the frame; the worker builds the next once the
+// acknowledgement arrives and the screen has changed again, so a slow link
+// gets fewer frames and never a stale one.
+type Frame struct {
+	Seq uint32
+	// Full is a frame with every row (after an attach, a resize, a switch
+	// between the primary and alternate screens, or when asked for with
+	// AttachSnapshot); the client repaints from it alone.
+	Full bool
+	// Alternate is whether the alternate screen is active.
+	Alternate   bool
+	Cols, Lines uint16
+	// Scrolled is how many rows the primary screen pushed into scrollback
+	// since the last frame: the client scrolls its own terminal by that
+	// many before painting, so they land in its native scrollback.
+	Scrolled uint16
+	// History holds the final contents of the last rows that scrolled
+	// off (at most a screen's worth, the most recent), which the client
+	// paints over its top rows before scrolling: a row may change and
+	// scroll away between two frames, and its last state is what belongs
+	// in the scrollback. Shorter than Scrolled only in a Full frame, when
+	// more than a screen scrolled off; the rest go as they were.
+	History [][]byte
+	// The cursor's position. Its visibility is a mode (in Prefix).
+	CursorRow, CursorCol uint16
+	// CursorShape is the DECSCUSR shape (1-6), or 0 for the terminal's
+	// default.
+	CursorShape uint8
+	// Prefix is the terminal's modes and tab stops as the formatter writes
+	// them (ending with CUP home), when they changed since the last frame;
+	// empty otherwise. The client turns off the modes that disappeared.
+	Prefix []byte
+	// Keyboard is the keyboard state (modifyOtherKeys, kitty keyboard
+	// flags), when it changed; empty otherwise.
+	Keyboard []byte
+	// Colors are the palette entries and default colours a program
+	// changed, when they changed; empty otherwise.
+	Colors []byte
+	// Effects are bytes to relay as they are: bells and desktop
+	// notifications since the last frame.
+	Effects []byte
+	// Field is the input field, when asked for (FrameAck.Field); nil
+	// otherwise.
+	Field *Field
+	// Rows are the rows that changed, by index; every row in a Full frame.
+	// A blank row has empty VT.
+	Rows []FrameRow
+}
+
+// FrameRow is one row of a Frame.
+type FrameRow struct {
+	Index uint16
+	VT    []byte
+}
+
+// FrameAck acknowledges Frame Seq. Field asks for the input field in the
+// frames that follow.
+type FrameAck struct {
+	Seq   uint32
+	Field bool
+}
+
+// FrameWindow is how many frames a worker sends unacknowledged: it builds
+// frame N only after reading the ack of frame N-FrameWindow or a later
+// one. Requests are read in order, so frame N shows the input a client
+// sent before that ack, which its local echo relies on.
+const FrameWindow = 2
+
 // HasFeature reports whether the attach stream asked for capability c.
 func (a *AttachSession) HasFeature(c string) bool { return slices.Contains(a.Features, c) }
 
@@ -353,9 +429,12 @@ type Response struct {
 	// stream: the size owner or the session's size changed.
 	AttachSizeOwner *SizeOwnership
 	// Field (CapAttachField) answers AttachField on an attach stream.
-	Field  *Field
-	Event  *session.Event
-	Events *[]session.Event
+	Field *Field
+	// AttachFrame (CapAttachFrames) is the screen as rows, in place of
+	// PtyOutput; see Frame.
+	AttachFrame *Frame
+	Event       *session.Event
+	Events      *[]session.Event
 	// HandedOff answers HandoffSession (CapWorkerHandoff).
 	HandedOff *HandedOff
 	// SessionRestarting (CapSessionRestart) ends an attach stream whose
@@ -445,6 +524,7 @@ const (
 	kAttachTakeSizeRequest kind = 50
 	kAttachLeaveRequest    kind = 51
 	kAttachFieldRequest    kind = 52
+	kAttachFrameAckRequest kind = 53
 
 	kDaemonInfoResponse     kind = 101
 	kCreateSessionResponse  kind = 102
@@ -480,6 +560,8 @@ const (
 	kAttachSizeOwnerResponse kind = 151
 	// The input field (CapAttachField).
 	kFieldResponse kind = 152
+	// kAttachFrameResponse is a Frame (CapAttachFrames).
+	kAttachFrameResponse kind = 153
 
 	// Worker handoff (kinds 160-169).
 	kHandedOffResponse         kind = 160
@@ -769,6 +851,10 @@ func encodeRequest(req *Request, f Features) (kind, []byte, error) {
 		return kAttachLeaveRequest, nil, nil
 	case req.AttachField != nil:
 		return kAttachFieldRequest, nil, nil
+	case req.AttachFrameAck != nil:
+		e.u32(req.AttachFrameAck.Seq)
+		e.bool(req.AttachFrameAck.Field)
+		return kAttachFrameAckRequest, e.buf, e.err
 	case req.DetachSession != nil:
 		e.str(req.DetachSession.SessionID)
 		e.bool(req.DetachSession.All)
@@ -910,6 +996,8 @@ func decodeRequest(k kind, payload []byte, f Features) (*Request, error) {
 		req.AttachLeave = Empty
 	case kAttachFieldRequest:
 		req.AttachField = Empty
+	case kAttachFrameAckRequest:
+		req.AttachFrameAck = &FrameAck{Seq: d.u32(), Field: d.bool()}
 	case kDetachSessionRequest:
 		req.DetachSession = &DetachSession{SessionID: d.str(), All: d.bool()}
 	case kDetachAttachmentRequest:
@@ -1108,6 +1196,9 @@ func encodeResponse(resp *Response, f Features) (kind, []byte, error) {
 	case resp.Field != nil:
 		e.field(resp.Field)
 		return kFieldResponse, e.buf, e.err
+	case resp.AttachFrame != nil:
+		e.frame(resp.AttachFrame)
+		return kAttachFrameResponse, e.buf, e.err
 	case resp.Event != nil:
 		e.event(resp.Event)
 		return kEventResponse, e.buf, e.err
@@ -1245,6 +1336,8 @@ func decodeResponse(k kind, payload []byte, f Features) (*Response, error) {
 		resp.AttachSizeOwner = &o
 	case kFieldResponse:
 		resp.Field = d.field()
+	case kAttachFrameResponse:
+		resp.AttachFrame = d.frame()
 	case kEventResponse:
 		ev := d.event()
 		resp.Event = &ev
@@ -1372,6 +1465,35 @@ func (e *encoder) field(f *Field) {
 	for _, r := range f.Chrome {
 		e.u16(r.Index)
 		e.bytes(r.VT)
+	}
+}
+
+func (e *encoder) frame(f *Frame) {
+	e.u32(f.Seq)
+	e.bool(f.Full)
+	e.bool(f.Alternate)
+	e.u16(f.Cols)
+	e.u16(f.Lines)
+	e.u16(f.Scrolled)
+	e.u16(f.CursorRow)
+	e.u16(f.CursorCol)
+	e.u8(f.CursorShape)
+	e.bytes(f.Prefix)
+	e.bytes(f.Keyboard)
+	e.bytes(f.Colors)
+	e.bytes(f.Effects)
+	e.bool(f.Field != nil)
+	if f.Field != nil {
+		e.field(f.Field)
+	}
+	e.length(len(f.Rows))
+	for _, r := range f.Rows {
+		e.u16(r.Index)
+		e.bytes(r.VT)
+	}
+	e.length(len(f.History))
+	for _, h := range f.History {
+		e.bytes(h)
 	}
 }
 
@@ -1721,6 +1843,39 @@ func (d *decoder) field() *Field {
 		f.Chrome = append(f.Chrome, ScreenRow{Index: d.u16(), VT: d.bytes()})
 	}
 	return f
+}
+
+// frame decodes a Frame; empty byte fields and row lists decode to nil.
+func (d *decoder) frame() *Frame {
+	f := &Frame{Seq: d.u32(), Full: d.bool(), Alternate: d.bool(), Cols: d.u16(), Lines: d.u16(), Scrolled: d.u16(), CursorRow: d.u16(), CursorCol: d.u16(), CursorShape: d.u8()}
+	f.Prefix, f.Keyboard, f.Colors, f.Effects = d.optBytes(), d.optBytes(), d.optBytes(), d.optBytes()
+	if d.bool() {
+		f.Field = d.field()
+	}
+	n := d.length()
+	if n > 0 && d.err == nil {
+		f.Rows = make([]FrameRow, 0, min(n, 1024))
+	}
+	for i := 0; i < n && d.err == nil; i++ {
+		f.Rows = append(f.Rows, FrameRow{Index: d.u16(), VT: d.optBytes()})
+	}
+	n = d.length()
+	if n > 0 && d.err == nil {
+		f.History = make([][]byte, 0, min(n, 1024))
+	}
+	for i := 0; i < n && d.err == nil; i++ {
+		f.History = append(f.History, d.optBytes())
+	}
+	return f
+}
+
+// optBytes is bytes with an empty string decoded as nil.
+func (d *decoder) optBytes() []byte {
+	b := d.bytes()
+	if len(b) == 0 {
+		return nil
+	}
+	return b
 }
 
 func (d *decoder) colors() *TerminalColors {

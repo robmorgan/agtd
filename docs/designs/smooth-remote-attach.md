@@ -1,6 +1,6 @@
 # Design: a remote attach that feels local
 
-Status: revision 3 (2026-10-19); Phases 1 and 2 built the same day on branch `native-echo`
+Status: revision 3 (2026-10-19); Phases 1 and 2 built the same day on branch `native-echo` (merged as PR #59), Phase 0 measured on 2026-10-20 (PR #62, BENCHMARKS.md "Remote interaction"), Phase 3 built on 2026-10-20 on branch `attach-frames` (ARCHITECTURE.md "Screen frames"); Phase 4 remains
 (ARCHITECTURE.md, "The Input Field And Local Echo"); Phases 0, 3 and 4 remain.
 Scope: `agt attach` to a remote daemon, with typing that is echoed locally but looks exactly like
 typing into the agent's own input box, for Claude Code, Codex and pi alike, and with output that
@@ -196,7 +196,11 @@ Claude-Code-assisted days.
 ### Phase 0: measure (1-2 days)
 
 Numbers first, on the link that matters (the Mac to `sfo`, about 300 ms; `omarchy` over
-Tailscale), before and after each phase.
+Tailscale), before and after each phase. Done on 2026-10-20: the numbers and what follows from
+them are in BENCHMARKS.md under "Remote interaction". In short: a key's echo takes 264 ms on
+`sfo` (mosh's round trip there is 206 ms), its confirmation by the field 547 ms, Claude Code
+redraws 172 B per key, a 200 KB burst and a streaming answer need no resync, and a 20 s black
+hole costs 15 s to notice and 0.7 s to recover from.
 
 * `agt bench echo [HOST/]SESSION` (a hidden developer command, pure Go, reusing the echo markers
   in `internal/bench/measure.go`): attaches to a session running `cat`, types markers and reports
@@ -372,7 +376,8 @@ older worker serves raw output, and raw keys, to a newer CLI.
    differs on any agent is moved to the unpredicted list.
 2. **The flush window.** Phase 0 measures what one agent redraw costs on the wire and on the
    devbox; 50 ms is the default unless Claude Code's per-key rendering turns out heavy, in which
-   case 100 ms. Either way the echo is instant.
+   case 100 ms. Either way the echo is instant. Settled: 172 B per key on `sfo`, 69 B locally;
+   50 ms stays.
 3. **Chunks taken for pastes.** With a 50 ms window a fast typist's keys arrive a few at a time;
    does any agent treat an unbracketed chunk of several characters as a paste (Claude Code has a
    heuristic for that)? Test 10-character bursts; the window shrinks, or batches are cut at a

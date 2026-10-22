@@ -489,7 +489,13 @@ size (`size-owner`), and the size each one has.
 Attach clears the visible screen and repaints from the daemon's retained terminal state; if the
 restored session was using the alternate screen, replay restores that state naturally. It also
 copies the session's most recent 1,000 rows of scrollback into your terminal, so you can scroll
-back through them natively; `agt history` has the rest. `[attach] scrollback_rows` in
+back through them natively; `agt history` has the rest. From a remote daemon the screen then
+arrives as frames rather than the raw output: the worker sends the rows that changed, the client
+paints them in place and acknowledges, and a slow link gets fewer, fresher frames instead of
+dropped output and a flashing resync; rows that scroll off still land in your terminal's own
+scrollback, and the local echo keeps the screen moving behind your typing. `[attach] mode`
+chooses: `auto` (frames from a remote daemon, the raw output locally), `frames` or `raw`.
+`[attach] scrollback_rows` in
 `config.toml` changes how many (`-1` for all of it, `0` for the screen only). When the client
 reconnects by itself, or repaints after the overlay closes or after falling behind, it sends only
 the screen, since your terminal already has the scrollback. A client

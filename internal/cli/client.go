@@ -29,6 +29,9 @@ type client struct {
 	paths *paths.AppPaths
 	// host is the remote daemon, or nil for the local one.
 	host *transport.Host
+	// attachMode forces how the screen reaches the terminal ("frames" or
+	// "raw") over [attach] mode; empty means the config decides.
+	attachMode string
 
 	mu   sync.Mutex
 	quic *transport.QUICClient

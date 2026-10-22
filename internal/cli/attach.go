@@ -15,6 +15,7 @@ import (
 
 	"agtd.sh/internal/config"
 	"agtd.sh/internal/protocol"
+	"agtd.sh/internal/screen"
 	"agtd.sh/internal/session"
 	"agtd.sh/internal/transport"
 )
@@ -249,6 +250,9 @@ func (c *client) connectAttach(ctx context.Context, id string, prev attachIdenti
 	if attach.HasFeature(protocol.CapTerminalColors) {
 		attach.Colors = terminalColors()
 	}
+	if !c.wantsFrames() {
+		attach.Features = slices.DeleteFunc(attach.Features, func(f string) bool { return f == protocol.CapAttachFrames })
+	}
 	req := &protocol.Request{AttachSession: attach}
 	if err := protocol.WriteRequest(s, req); err != nil {
 		s.Close()
@@ -338,11 +342,15 @@ func (c *client) attachOnce(id, uid string, titled *bool) (res attachResult, err
 	var parser attachParser
 	snapshot := attached.Snapshot
 	ech := c.newEchoFor(attached)
+	painter := newPainterFor(attached)
+	if ech != nil {
+		ech.frames = painter != nil
+	}
 	writeOut([]byte(attachEnterSequence))
 	for {
 		writeOut(attachStartupBytes(snapshot))
 		ech.repainted()
-		res, err := c.runAttachment(id, stream, keys, &parser, winch, quit, sizeOwnership(attached), ech)
+		res, err := c.runAttachment(id, stream, keys, &parser, winch, quit, sizeOwnership(attached), ech, painter)
 		if err == nil || !c.reconnectable(err) {
 			return res, err
 		}
@@ -355,6 +363,7 @@ func (c *client) attachOnce(id, uid string, titled *bool) (res attachResult, err
 		}
 		ident.update(attached)
 		snapshot = attached.Snapshot
+		painter = newPainterFor(attached)
 		// An overlay that was open when the connection dropped may have
 		// hidden the cursor.
 		writeOut([]byte("\x1b[?25h"))
@@ -363,6 +372,7 @@ func (c *client) attachOnce(id, uid string, titled *bool) (res attachResult, err
 		switch {
 		case ech == nil:
 		case attached.HasFeature(protocol.CapAttachField):
+			ech.frames = painter != nil
 			ech.reattached()
 		default:
 			// The new worker does not report the field (a handoff to
@@ -389,6 +399,36 @@ func (c *client) newEchoFor(attached *protocol.Attached) *echo {
 		return nil
 	}
 	return newEcho(echoConfig{flushAfter: cfg.Composer.EchoFlushAfter()})
+}
+
+// wantsFrames is whether the screen should arrive as frames
+// (attach-frames) rather than raw output: [attach] mode, or the mode set
+// on the client (agt bench echo --mode). "auto" is frames from a remote
+// daemon, where a round trip is worth saving, and raw output from the
+// local one, where the relay is cheaper.
+func (c *client) wantsFrames() bool {
+	mode := c.attachMode
+	if mode == "" {
+		if cfg, err := config.Load(c.paths.Config); err == nil {
+			mode = cfg.Attach.AttachMode()
+		}
+	}
+	switch mode {
+	case "frames":
+		return true
+	case "raw":
+		return false
+	}
+	return c.host != nil
+}
+
+// newPainterFor is the screen painter for an attachment, nil unless the
+// screen arrives as frames (CapAttachFrames).
+func newPainterFor(attached *protocol.Attached) *screen.Painter {
+	if !attached.HasFeature(protocol.CapAttachFrames) {
+		return nil
+	}
+	return screen.New()
 }
 
 // sizeOwnership is the attachment's size ownership as it attached, nil when
@@ -418,7 +458,7 @@ func (c *client) attachScrollbackRows() int {
 // date from AttachSizeOwner frames for the overlay. ech is the local echo
 // of typing (nil for none): typed bytes go through it, and so do the
 // worker's answers about the input field.
-func (c *client) runAttachment(id string, stream *attachStream, keys <-chan []byte, parser *attachParser, winch, quit <-chan os.Signal, size *protocol.SizeOwnership, ech *echo) (attachResult, error) {
+func (c *client) runAttachment(id string, stream *attachStream, keys <-chan []byte, parser *attachParser, winch, quit <-chan os.Signal, size *protocol.SizeOwnership, ech *echo, painter *screen.Painter) (attachResult, error) {
 	var ov *overlay
 	redraw := false
 	// sendInput writes typed bytes to the stream, through the echo when
@@ -461,7 +501,7 @@ func (c *client) runAttachment(id string, stream *attachStream, keys <-chan []by
 			}
 			redraw = true
 			if ov != nil {
-				res, closed, err := c.overlayInput(ov, chunk, stream, size, ech)
+				res, closed, err := c.overlayInput(ov, chunk, stream, size, ech, painter)
 				if err != nil || res != nil {
 					return deref(res), err
 				}
@@ -527,7 +567,7 @@ func (c *client) runAttachment(id string, stream *attachStream, keys <-chan []by
 				return attachResult{}, err
 			}
 		case f := <-stream.frames:
-			res, done, err := handleFrame(f, ov != nil, size, ech, stream)
+			res, done, err := handleFrame(f, ov != nil, size, ech, stream, painter)
 			if err != nil || done {
 				return res, err
 			}
@@ -695,12 +735,17 @@ func deref(r *attachResult) attachResult {
 // closes. So is it while the echo holds keys the agent has not been seen to
 // draw (echo.go). Size ownership notes update size; the worker's answers
 // about the input field go to the echo.
-func handleFrame(f frame, overlayOpen bool, size *protocol.SizeOwnership, ech *echo, stream *attachStream) (attachResult, bool, error) {
+func handleFrame(f frame, overlayOpen bool, size *protocol.SizeOwnership, ech *echo, stream *attachStream, painter *screen.Painter) (attachResult, bool, error) {
 	switch {
 	case f.err != nil:
 		return attachResult{}, true, f.err
 	case f.resp == nil:
 		return attachResult{}, true, errAttachDropped
+	case f.resp.AttachFrame != nil:
+		if painter == nil {
+			return attachResult{}, true, errors.New("unexpected screen frame")
+		}
+		return attachResult{}, false, paintFrame(f.resp.AttachFrame, painter, ech, stream, overlayOpen)
 	case f.resp.EndOfStream != nil:
 		return attachResult{outcome: outcomeDetached}, true, nil
 	case f.resp.SessionRestarting != nil:
@@ -774,9 +819,44 @@ func noteSizeOwner(size *protocol.SizeOwnership, note protocol.SizeOwnership, ec
 	*size = note
 }
 
+// paintFrame paints a screen frame: the field in it reconciles the echo,
+// whose predicted rows go over the frame while keys are still in flight,
+// then the frame is acknowledged, asking for the field in the next ones
+// while there is an echo. Keys a field proves missing after a reattach
+// are sent again.
+func paintFrame(fr *protocol.Frame, painter *screen.Painter, ech *echo, stream *attachStream, overlayOpen bool) error {
+	var send, overlay []byte
+	if ech != nil {
+		if fr.Field != nil {
+			send, _ = ech.frameField(fr.Field, fr.Seq)
+		}
+		overlay = ech.overlay()
+	}
+	if paint := painter.Apply(fr, overlay); !overlayOpen {
+		writeOut(paint)
+	}
+	if len(send) > 0 {
+		if err := stream.send(&protocol.Request{AttachInput: &protocol.Bytes{Data: send}}); err != nil {
+			return err
+		}
+	}
+	return ackFrame(stream, fr.Seq, ech)
+}
+
+// ackFrame acknowledges frame seq, asking for the field in the next ones
+// while there is an echo, which notes the ack: the frames that follow it
+// show the keys sent before it.
+func ackFrame(stream *attachStream, seq uint32, ech *echo) error {
+	if err := stream.send(&protocol.Request{AttachFrameAck: &protocol.FrameAck{Seq: seq, Field: ech != nil}}); err != nil {
+		return err
+	}
+	ech.frameAcked(seq)
+	return nil
+}
+
 // overlayInput feeds input to the open overlay. closed reports that it
 // closed and the screen was restored.
-func (c *client) overlayInput(ov *overlay, chunk []byte, stream *attachStream, size *protocol.SizeOwnership, ech *echo) (res *attachResult, closed bool, err error) {
+func (c *client) overlayInput(ov *overlay, chunk []byte, stream *attachStream, size *protocol.SizeOwnership, ech *echo, painter *screen.Painter) (res *attachResult, closed bool, err error) {
 	for _, ev := range ov.keys.push(chunk) {
 		out, err := ov.handle(ev)
 		if err != nil {
@@ -792,7 +872,7 @@ func (c *client) overlayInput(ov *overlay, chunk []byte, stream *attachStream, s
 					return nil, false, err
 				}
 			}
-			restored, ended, err := restoreSnapshot(stream, size, ech)
+			restored, ended, err := restoreSnapshot(stream, size, ech, painter)
 			if err != nil {
 				return nil, false, err
 			}
@@ -814,7 +894,7 @@ func (c *client) overlayInput(ov *overlay, chunk []byte, stream *attachStream, s
 // skipping output that arrives first. Input waits (bounded, in the stdin
 // channel) until it is done. A snapshot the echo asked for before the
 // overlay opened is answered first, and is not the one wanted.
-func restoreSnapshot(stream *attachStream, size *protocol.SizeOwnership, ech *echo) ([]byte, *protocol.SessionEnded, error) {
+func restoreSnapshot(stream *attachStream, size *protocol.SizeOwnership, ech *echo, painter *screen.Painter) ([]byte, *protocol.SessionEnded, error) {
 	if err := stream.send(&protocol.Request{AttachSnapshot: protocol.Empty}); err != nil {
 		return nil, nil, err
 	}
@@ -824,6 +904,23 @@ func restoreSnapshot(stream *attachStream, size *protocol.SizeOwnership, ech *ec
 			return nil, nil, f.err
 		case f.resp == nil:
 			return nil, nil, errAttachDropped
+		case f.resp.AttachFrame != nil:
+			// Under frames the snapshot is a full frame; one in flight
+			// before the request is acknowledged and superseded.
+			fr := f.resp.AttachFrame
+			if painter == nil {
+				return nil, nil, errors.New("unexpected screen frame")
+			}
+			if ech != nil && fr.Field != nil {
+				ech.frameField(fr.Field, fr.Seq)
+			}
+			if err := ackFrame(stream, fr.Seq, ech); err != nil {
+				return nil, nil, err
+			}
+			if fr.Full {
+				painter.Reset()
+				return painter.Apply(fr, nil), nil, nil
+			}
 		case f.resp.SessionRestarting != nil:
 			return nil, nil, errSessionRestarting
 		case f.resp.AttachSnapshot != nil:

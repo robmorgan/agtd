@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -70,7 +71,9 @@ func mustAttachOn(t *testing.T, stream transport.Stream, id string, req protocol
 	return c, resp.Attached
 }
 
-var allAttachFeatures = protocol.AttachCapabilities()
+// allAttachFeatures are the attach features of the raw output stream: every
+// capability short of frames, which replace that stream.
+var allAttachFeatures = slices.DeleteFunc(protocol.AttachCapabilities(), func(c string) bool { return c == protocol.CapAttachFrames })
 
 func TestSessionUIDsIdentifyIncarnations(t *testing.T) {
 	h := newHarness(t)

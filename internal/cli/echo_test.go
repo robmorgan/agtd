@@ -674,7 +674,7 @@ func TestEchoReattachForgetsTheLostSnapshot(t *testing.T) {
 	stream := &attachStream{s: discardStream{}, frames: make(chan frame, 1)}
 	stream.frames <- frame{resp: &protocol.Response{AttachSnapshot: &protocol.Bytes{Data: []byte("NEW")}}}
 	close(stream.frames)
-	if got, _, err := restoreSnapshot(stream, nil, e); err != nil || string(got) != "NEW" {
+	if got, _, err := restoreSnapshot(stream, nil, e, nil); err != nil || string(got) != "NEW" {
 		t.Fatalf("restored %q, %v", got, err)
 	}
 }
@@ -987,13 +987,13 @@ func TestEchoSizeOwnerResizes(t *testing.T) {
 	e := newEcho(echoConfig{flushAfter: echoFlushAfter})
 	size := &protocol.SizeOwnership{Geometry: protocol.Geometry{Cols: 120, Rows: 40}}
 	e.probe()
-	handleFrame(note(120, 40), false, size, e, nil)
+	handleFrame(note(120, 40), false, size, e, nil, nil)
 	e.fieldAnswer(claudeField([]string{""}))
 	if e.field == nil {
 		t.Fatal("a note that kept the size made the field stale")
 	}
 	e.probe()
-	handleFrame(note(100, 30), false, size, e, nil)
+	handleFrame(note(100, 30), false, size, e, nil, nil)
 	e.fieldAnswer(claudeField([]string{""}))
 	if e.field != nil || size.Geometry.Cols != 100 {
 		t.Fatalf("a new size: field %v, size %+v", e.field != nil, size.Geometry)
@@ -1157,4 +1157,154 @@ func TestEchoDropsTheFocusReportsARepaintCauses(t *testing.T) {
 	}
 	var none *echo
 	none.repainted() // no echo: nothing to note
+}
+
+// framesEcho is an echo whose screen arrives as frames, with a field seen
+// in frame 1 and acknowledged.
+func framesEcho(t *testing.T, rows []string) (*echo, time.Time) {
+	t.Helper()
+	e, now := fixedClockEcho(echoFlushAfter)
+	e.frames = true
+	e.frameField(claudeField(rows), 1)
+	e.frameAcked(1)
+	if !e.active() {
+		t.Fatal("the first frame's field did not start the echo")
+	}
+	return e, now
+}
+
+// frame feeds the echo frame seq carrying a field with rows, and
+// acknowledges it, as paintFrame does.
+func frameWith(e *echo, seq uint32, rows []string) (send []byte) {
+	send, _ = e.frameField(claudeField(rows), seq)
+	e.frameAcked(seq)
+	return send
+}
+
+// Under frames the field comes in every frame, not in answer to a probe.
+// The worker builds frame N only after reading the ack of frame
+// N-FrameWindow, so frame N proves the keys sent before that ack. A frame
+// before then may show some of the keys or none; it confirms nothing and
+// drops nothing.
+func TestEchoFramesConfirmOnlyWhatTheyProve(t *testing.T) {
+	// Value: protects=keys an earlier frame may already show are not
+	// taken for an unpredicted edit; fails_when=frameField treats a
+	// frame like a probe answer (asked only at probe time) or confirms
+	// keys sent after the ack it was built on; why_new=attach-frames and
+	// the asked rule landed separately; seam=none; no_claim=the worker's
+	// window itself (worker tests).
+	e, now := framesEcho(t, []string{""})
+	typeKeys(e, "abc")
+	if send, _ := e.tick(now.Add(time.Second)); string(send) != "abc" {
+		t.Fatalf("batch %q", send)
+	}
+	// Frames 2 and 3 may have been built before the keys arrived.
+	for seq, rows := range map[uint32][]string{2: {"a"}, 3: {"abc"}} {
+		frameWith(e, seq, rows)
+		if e.unconfirmed() != 3 || e.dirty || e.paused {
+			t.Fatalf("frame %d %q: unconfirmed %d, dirty %v, paused %v", seq, rows, e.unconfirmed(), e.dirty, e.paused)
+		}
+	}
+	if e.probeDue.IsZero() {
+		t.Fatal("an unproven field did not ask for another")
+	}
+	// Frame 4 was built after the ack of frame 2, sent after the keys.
+	frameWith(e, 4, []string{"ab"})
+	if e.unconfirmed() != 1 {
+		t.Fatalf("frame 4: unconfirmed %d", e.unconfirmed())
+	}
+	frameWith(e, 5, []string{"abc"})
+	if e.unconfirmed() != 0 || e.holding() {
+		t.Fatalf("frame 5: unconfirmed %d", e.unconfirmed())
+	}
+	// A proven field that equals no prediction is the agent's word.
+	typeKeys(e, "d")
+	e.tick(now.Add(2 * time.Second))
+	frameWith(e, 8, []string{"xyz"})
+	if e.unconfirmed() != 0 || e.field.Rows[0] != "xyz" {
+		t.Fatalf("an unpredicted field: unconfirmed %d, field %q", e.unconfirmed(), e.field.Rows)
+	}
+}
+
+// A frame built before an unpredicted key or a resize reached the worker
+// shows a field that may be gone: it neither resumes the echo nor starts
+// it, and the field is asked for until a later frame shows it.
+func TestEchoFramesIgnoreAFieldFromBeforeAPauseOrResize(t *testing.T) {
+	e, now := framesEcho(t, []string{"ab"})
+	frameWith(e, 2, []string{"ab"})
+	if send, _ := e.input([]byte("\r")); string(send) != "\r" || !e.paused {
+		t.Fatalf("enter: send %q, paused %v", send, e.paused)
+	}
+	e.tick(now.Add(time.Second)) // the probe
+	for _, seq := range []uint32{3, 4} {
+		frameWith(e, seq, []string{"ab"})
+		if !e.paused {
+			t.Fatalf("frame %d from before the enter resumed the echo", seq)
+		}
+		if e.probeDue.IsZero() && !e.probing {
+			t.Fatalf("frame %d: no field asked for", seq)
+		}
+	}
+	frameWith(e, 5, []string{""})
+	if e.paused || len(e.field.Rows) != 1 || e.field.Rows[0] != "" {
+		t.Fatalf("frame 5: paused %v, field %q", e.paused, e.field.Rows)
+	}
+
+	e.resized()
+	frameWith(e, 7, []string{""})
+	if e.field != nil {
+		t.Fatal("a frame from before the resize gave the echo a field")
+	}
+	frameWith(e, 8, []string{""})
+	if e.field == nil {
+		t.Fatal("a frame after the resize was ignored")
+	}
+}
+
+// After a reattach the new attachment's frames count from 1, and each
+// shows what reached the agent on the lost one: the first field settles
+// the resend. The keys resent then are proven only by a frame past the
+// window, as any key is.
+func TestEchoFramesSettleTheResendAfterAReattach(t *testing.T) {
+	e, now := framesEcho(t, []string{""})
+	frameWith(e, 2, []string{""})
+	typeKeys(e, "abc")
+	e.tick(now.Add(time.Second))
+	e.reattached()
+	// Only "a" arrived: "bc" is resent.
+	if send := frameWith(e, 1, []string{"a"}); string(send) != "bc" {
+		t.Fatalf("resent %q", send)
+	}
+	// They went before the ack of frame 1: frame 2 may predate them,
+	// frame 3 cannot.
+	frameWith(e, 2, []string{"abc"})
+	if e.unconfirmed() != 2 {
+		t.Fatalf("a frame from before the resend confirmed it: unconfirmed %d", e.unconfirmed())
+	}
+	frameWith(e, 3, []string{"abc"})
+	if e.unconfirmed() != 0 {
+		t.Fatalf("frame 3: unconfirmed %d", e.unconfirmed())
+	}
+
+	// Keys typed before the field answers wait behind the resent ones and
+	// go unpredicted, pausing the echo; a frame from before they arrived
+	// does not resume it.
+	e, now = framesEcho(t, []string{""})
+	typeKeys(e, "ab")
+	e.tick(now.Add(time.Second))
+	e.reattached()
+	if send, _ := typeKeys(e, "c"); send != nil {
+		t.Fatalf("a key overtook the resend: %q", send)
+	}
+	if send := frameWith(e, 1, []string{"a"}); string(send) != "bc" || !e.paused {
+		t.Fatalf("resent %q, paused %v", send, e.paused)
+	}
+	frameWith(e, 2, []string{"a"})
+	if !e.paused {
+		t.Fatal("a frame from before the held keys resumed the echo")
+	}
+	frameWith(e, 3, []string{"abc"})
+	if e.paused || e.field.Rows[0] != "abc" {
+		t.Fatalf("frame 3: paused %v, field %q", e.paused, e.field.Rows)
+	}
 }
