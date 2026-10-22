@@ -316,14 +316,20 @@ download_release() {
 # Like download_release it runs in a command substitution, where macOS's
 # bash 3.2 does not apply set -e, so failures are checked by hand.
 build_from_source() {
-  ensure_base_packages
   local src
-  src="$(source_dir)"
-  [[ -n "${src}" ]] || die "no source to build"
-  ensure_go "$(go_wanted "${src}")"
-  ensure_zig
-  step "Building"
-  make -C "${src}" build ZIG="${ZIG}" >&2 || die "the build failed"
+  # Only the bin directory may reach stdout, which the caller captures: the
+  # package manager, the toolchain downloads and make all talk on stderr.
+  # (apt's dpkg output once landed in that path on a fresh box, and the copy
+  # into bindir failed while the old binaries stayed.)
+  {
+    ensure_base_packages
+    src="$(source_dir)"
+    [[ -n "${src}" ]] || die "no source to build"
+    ensure_go "$(go_wanted "${src}")"
+    ensure_zig
+    step "Building"
+    make -C "${src}" build ZIG="${ZIG}" || die "the build failed"
+  } >&2
   echo "${src}/bin"
 }
 
@@ -465,7 +471,7 @@ install_binary() {
     note "${name}: unchanged"
     return 1
   fi
-  install -m 0755 "${dir}/${name}" "${bindir}/${name}"
+  install -m 0755 "${dir}/${name}" "${bindir}/${name}" || die "could not install ${name} into ${bindir}"
   note "${name}: installed"
 }
 
