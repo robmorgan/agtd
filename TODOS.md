@@ -16,6 +16,24 @@ section draws the boundary, but terminology may still mislead.
 
 ## Attach
 
+### Terminal queries are dropped while the local echo holds output
+
+**What:** While `agt attach` holds output for unconfirmed predicted keys
+(internal/cli/attach.go, handleFrame), forward the terminal queries in it, or
+have the worker answer them as it does OSC 10/11.
+**Why:** A query the agent writes then (cursor position `CSI 6 n`, device
+attributes, kitty `CSI ? u`, DECRQM) never reaches the terminal, so its reply
+never comes; a program that waits for one (crossterm reads the cursor
+position) stalls until its timeout.
+**Context:** Found reviewing the native echo (PR #59) fixes. The echo itself
+forwards every reply it sees unchanged; the gap is that held output is dropped
+whole and the snapshot repaint does not replay queries. Options: scan dropped
+output for query sequences and write those, or answer CPR/DA in the worker
+(internal/worker/colors.go is the model).
+**Effort:** M
+**Priority:** P2
+**Depends on:** None
+
 ### Drop key releases whose press agt consumed
 
 **What:** Keep `agt attach` from forwarding the kitty release event of a key
@@ -99,19 +117,36 @@ echo-mouse-passthrough, but a scroll can still hide a permission prompt.
 **Priority:** P3
 **Depends on:** None
 
-### Keep the echo paused when input pauses it during a field probe
+### Stamp frames with the input they show
 
-**What:** In internal/cli/echo.go, remember that an unpredicted key or a click
-arrived after the field was asked for, and have `fieldAnswer` stay paused and
-ask again instead of resuming on the answer asked before it.
+**What:** Have each `AttachFrame` carry how much of the attachment's input
+the worker had read when it built the frame (an input sequence number or
+byte count), and have the local echo confirm keys against that instead of
+deriving it from the frame window (`frameField` in internal/cli/echo.go).
 
-**Why:** The answer describes the field before the key, so prediction resumes
-on stale text and the next keys can be drawn in the wrong place until a later
-probe corrects them. Enter has always done this; clicks join it now that they
-reach the echo.
+**Why:** Today the echo proves what a frame shows from ordering: the worker
+reads input and `FrameAck`s in order on one stream and builds frame N only
+after the ack of frame N-`protocol.FrameWindow`. That holds over a QUIC
+stream, but breaks if frames or acks move to unreliable QUIC datagrams
+(mosh-style, a lost frame replaced by the next instead of retransmitted).
+A stamp states it outright: no ignored "unproven" fields and no re-probing
+to get past the window, so keys confirm a frame or two sooner.
 
-**Effort:** S
+**Context:** Raised merging attach-frames (#66) into echo-review (#68). It
+is a new field in `Frame`, so a capability and golden-frame updates; keep
+the window rule for workers without it. Only needed before frames go
+unreliable; input itself stays on a reliable ordered stream.
+
+**Effort:** M
 **Priority:** P3
 **Depends on:** None
 
 ## Completed
+
+### Keep the echo paused when input pauses it during a field probe
+
+**What:** Have `fieldAnswer` stay paused and ask again when an unpredicted key
+or a click arrived after the field was asked for.
+
+**Completed:** echo-review (2026-10-22): a pause or resize makes the
+outstanding field stale (`epoch` in internal/cli/echo.go).

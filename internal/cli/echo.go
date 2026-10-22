@@ -37,20 +37,40 @@ import (
 // so the agent's own rendering, identical in the field, appears in one step.
 //
 // The echo keeps the states it predicted, oldest first, each with the key
-// that produced it. An observed field that equals one of them confirms the
-// keys up to it; the rest are replayed over the observed field, since the
-// agent may have placed the cursor or wrapped a word differently. A field
-// that equals none means the agent did something unpredicted (a popup took
-// a key, a different wrap), so the observed field is adopted and the
-// predictions dropped: one visible correction, as mosh makes.
+// that produced it. An observed field that equals one of them, text and
+// cursor, confirms the keys up to it, provided the key had been sent when
+// the field was asked for (the worker reads the field before any input
+// sent after the ask, so a later state can only match by coincidence); the rest are replayed over the
+// observed field, since the agent may have placed the cursor or wrapped a
+// word differently. A field that equals none means the agent did something
+// unpredicted (a popup took a key, a different wrap), so the observed field
+// is adopted and the predictions dropped: one visible correction, as mosh
+// makes. A field asked for before an unpredicted key or a resize describes
+// a field that may be gone, so it is ignored and the field asked for again.
+//
+// Keys the echo does not know (function keys, mouse reports, the terminal's
+// replies to the agent's queries) are sent as they came, unpredicted; key
+// releases change nothing in the field and go with the keys around them.
+//
+// After a reattach, keys sent on the lost connection may not have reached
+// the agent. The next field says which of them it drew; the rest are sent
+// again, before the keys that were still batched and any typed meanwhile,
+// which wait for that answer. A key that reached the agent but that it had
+// not drawn by then (it waits fieldSettle for output to settle) is sent
+// twice: the worker does not acknowledge input, so the field is the only
+// evidence.
 
 const (
-	// echoFlushAfter is the default for [composer] flush_after: how long
-	// predicted keys wait for company before they go to the agent.
-	echoFlushAfter = 50 * time.Millisecond
 	// echoProbeAfter is how long after the last flush (or the last
 	// output, when idle) the field is asked for.
 	echoProbeAfter = 150 * time.Millisecond
+	// echoIncompleteAfter is how long an incomplete escape sequence or
+	// paste waits for the rest before it goes as it is.
+	echoIncompleteAfter = 50 * time.Millisecond
+	// echoHeldMax bounds the keys held while a resend is owed; past it
+	// the echo gives up the resend and sends them, as when the overlay
+	// opens.
+	echoHeldMax = pasteMax
 	// echoMaxStates bounds the unconfirmed predictions; past it the echo
 	// drops them and lets keys through raw, so an agent that stopped
 	// reading never pins a stale drawing.
@@ -359,6 +379,23 @@ type echoState struct {
 	rows       []string
 	cRow, cCol int
 	key        keyEvent
+	// sent: the key has gone to the agent, not just into the batch.
+	// asked: it had gone when the field was last asked for, so the field
+	// can show it.
+	sent, asked bool
+	// seenFrom: under frames, the first frame whose field can show the
+	// key (protocol.FrameWindow past the last ack sent before it).
+	seenFrom uint32
+}
+
+// at reports whether the field shows this state: its text and its cursor.
+func (st echoState) at(f *protocol.Field) bool {
+	return equalRows(st.rows, f.Rows) && st.cRow == int(f.Row)-int(f.Top) && st.cCol == int(f.Col)-int(f.TextCol)
+}
+
+// sameField reports whether two fields show the same text and cursor.
+func sameField(a, b *protocol.Field) bool {
+	return equalRows(a.Rows, b.Rows) && int(a.Row)-int(a.Top) == int(b.Row)-int(b.Top) && int(a.Col)-int(a.TextCol) == int(b.Col)-int(b.TextCol)
 }
 
 type echoConfig struct {
@@ -385,10 +422,16 @@ type echo struct {
 	// pending is the batch of keys not yet sent; flushDue when it goes.
 	pending  []byte
 	flushDue time.Time
+	// decodeDue is when what the decoder holds (an incomplete sequence,
+	// a paste without its end yet) goes as it is.
+	decodeDue time.Time
 	// probeDue is when the field is asked for next; probing while an ask
 	// is outstanding. quietDue is the ask after output goes quiet.
 	probeDue, quietDue time.Time
 	probing            bool
+	// epoch counts the unpredicted keys and resizes, after which a field
+	// asked for earlier is stale; probeEpoch is the epoch of the last ask.
+	epoch, probeEpoch int
 	// snapshotDue: an AttachSnapshot was asked for along with the field,
 	// to repaint once the field confirms the keys.
 	snapshotDue bool
@@ -407,9 +450,15 @@ type echo struct {
 	// predicted rows are painted over each frame (overlay), and a probe
 	// asks for the field only, never a snapshot.
 	frames bool
+	// ackSeq is the last frame acknowledged, and staleThrough the last
+	// frame whose field predates an unpredicted key or a resize: under
+	// frames the field is in every frame, not an answer to a probe.
+	ackSeq, staleThrough uint32
 	// resend: after a reattach, the keys the next field proves missing
-	// are sent again.
+	// are sent again; until it answers, every key waits in pending
+	// unpredicted (held), so that none overtakes them.
 	resend bool
+	held   bool
 	// focus is the last focus report sent to the agent, and focusUntil
 	// the end of the window after a repaint. Some terminals (Ghostty)
 	// report the focus whenever focus reporting is turned on, and a
@@ -424,9 +473,6 @@ type echo struct {
 }
 
 func newEcho(cfg echoConfig) *echo {
-	if cfg.flushAfter <= 0 {
-		cfg.flushAfter = echoFlushAfter
-	}
 	e := &echo{cfg: cfg, now: time.Now, timer: time.NewTimer(time.Hour)}
 	e.keys.forwardAll = true
 	e.timer.Stop()
@@ -464,51 +510,80 @@ func (e *echo) output(n int) {
 }
 
 // input takes typed bytes (hotkeys already removed). It returns what to
-// send now and what to draw.
+// send now and what to draw: the drawing after the last key, which also
+// makes any scrolling the keys before it called for.
 func (e *echo) input(data []byte) (send, paint []byte) {
+	drawn := false
 	for _, ev := range e.keys.push(data) {
-		if ev.focus {
-			if r := string(ev.raw); r != e.focus || !e.now().Before(e.focusUntil) {
-				e.focus = r
-			} else {
-				continue
-			}
-		}
-		if ev.code == keyPassive {
-			// A wheel scroll, mouse motion, a focus change, a key
-			// release or a query reply edits no text, so the drawing
-			// stands and the field need not be asked for. It goes in
-			// order behind the keys still batched, or at once.
-			if e.flushDue.IsZero() {
-				send = append(send, ev.raw...)
-			} else {
-				e.pending = append(e.pending, ev.raw...)
-			}
-			continue
-		}
-		if !e.active() || len(e.states) >= echoMaxStates {
-			e.pending = append(e.pending, ev.raw...)
-			send = append(send, e.flush()...)
-			continue
-		}
-		if !e.predict(ev) {
-			// Unpredicted: it goes now, with everything before it,
-			// and the drawing stops meaning anything.
-			e.pending = append(e.pending, ev.raw...)
-			send = append(send, e.flush()...)
-			e.pause()
-			continue
-		}
-		lay := layout(e.text, e.field)
-		e.states = append(e.states, echoState{rows: lay.texts(), cRow: lay.cRow, cCol: lay.cCol, key: ev})
-		e.pending = append(e.pending, ev.raw...)
-		if e.flushDue.IsZero() {
-			e.flushDue = e.now().Add(e.cfg.flushAfter)
-		}
-		paint = e.paint(lay)
+		s, d := e.key(ev)
+		send = append(send, s...)
+		drawn = drawn || d
 	}
+	if drawn && len(e.states) > 0 {
+		paint = e.paint(layout(e.text, e.field))
+	}
+	e.noteHeld()
 	e.schedule()
 	return send, paint
+}
+
+// key takes one key: it is held back (a repeated focus report), held for a
+// resend, sent, or predicted and batched. It returns what to send now and whether the text changed.
+func (e *echo) key(ev keyEvent) (send []byte, drawn bool) {
+	if ev.focus {
+		if r := string(ev.raw); r == e.focus && e.now().Before(e.focusUntil) {
+			return nil, false
+		}
+		e.focus = string(ev.raw)
+	}
+	if e.resend {
+		e.pending = append(e.pending, ev.raw...)
+		e.held = true
+		if len(e.pending) > echoHeldMax {
+			// Too much to hold for an answer that is not coming soon:
+			// the resend is given up, and everything goes in order.
+			e.resend = false
+			return e.resumeHeld(), false
+		}
+		return nil, false
+	}
+	if ev.code == keyPassive {
+		// A wheel scroll, mouse motion, a focus change, a key
+		// release or a query reply edits no text, so the drawing
+		// stands and the field need not be asked for. It goes in
+		// order behind the keys still batched, or at once.
+		if e.flushDue.IsZero() {
+			return ev.raw, false
+		}
+		e.pending = append(e.pending, ev.raw...)
+		return nil, false
+	}
+	if !e.active() || len(e.states) >= echoMaxStates {
+		e.pending = append(e.pending, ev.raw...)
+		return e.flush(), false
+	}
+	if !e.predict(ev) {
+		// Unpredicted: it goes now, with everything before it, and
+		// the drawing stops meaning anything.
+		e.pending = append(e.pending, ev.raw...)
+		send = e.flush()
+		e.pause()
+		return send, false
+	}
+	lay := layout(e.text, e.field)
+	e.states = append(e.states, echoState{rows: lay.texts(), cRow: lay.cRow, cCol: lay.cCol, key: ev})
+	return e.queue(ev.raw), true
+}
+
+// noteHeld arms the expiry of what the decoder holds: bytes that wait for
+// the rest of a sequence or a paste go as they are if nothing follows them
+// for echoIncompleteAfter.
+func (e *echo) noteHeld() {
+	if e.keys.held() {
+		e.decodeDue = e.now().Add(echoIncompleteAfter)
+	} else {
+		e.decodeDue = time.Time{}
+	}
 }
 
 // predict applies a key to the text if it is one every editor handles the
@@ -542,6 +617,8 @@ func (e *echo) predict(ev keyEvent) bool {
 // flows, and its own rendering takes over from the drawing.
 func (e *echo) pause() {
 	e.paused = true
+	e.epoch++
+	e.staleThrough = e.ackSeq + protocol.FrameWindow
 	e.states = nil
 	if e.painted {
 		e.dirty = true
@@ -549,13 +626,36 @@ func (e *echo) pause() {
 	e.probeDue = e.now().Add(echoProbeAfter)
 }
 
+// queue adds a predicted key to the batch, which goes after flushAfter, or
+// at once when there is no batching.
+func (e *echo) queue(raw []byte) (send []byte) {
+	e.pending = append(e.pending, raw...)
+	if e.cfg.flushAfter <= 0 {
+		return e.flush()
+	}
+	if e.flushDue.IsZero() {
+		e.flushDue = e.now().Add(e.cfg.flushAfter)
+	}
+	return nil
+}
+
 // flush returns the pending keys, clearing them, and arranges for the
-// field to be asked for after them.
+// field to be asked for after them. While a resend is owed it returns
+// nothing: the keys wait for the field that settles it.
 func (e *echo) flush() []byte {
+	e.flushDue = time.Time{}
+	if e.resend {
+		return nil
+	}
 	out := e.pending
 	e.pending = nil
-	e.flushDue = time.Time{}
 	if len(out) > 0 {
+		for i := range e.states {
+			if !e.states[i].sent {
+				e.states[i].sent = true
+				e.states[i].seenFrom = e.ackSeq + protocol.FrameWindow + 1
+			}
+		}
 		e.probeDue = e.now().Add(echoProbeAfter)
 	}
 	return out
@@ -565,6 +665,14 @@ func (e *echo) flush() []byte {
 func (e *echo) tick(now time.Time) (send []byte, reqs []*protocol.Request) {
 	if !e.flushDue.IsZero() && !now.Before(e.flushDue) {
 		send = e.flush()
+	}
+	if !e.decodeDue.IsZero() && !now.Before(e.decodeDue) {
+		// Expired bytes are never keys the echo predicts.
+		for _, ev := range e.keys.expire() {
+			s, _ := e.key(ev)
+			send = append(send, s...)
+		}
+		e.noteHeld()
 	}
 	if !e.probing {
 		due := !e.probeDue.IsZero() && !now.Before(e.probeDue)
@@ -581,6 +689,10 @@ func (e *echo) tick(now time.Time) (send []byte, reqs []*protocol.Request) {
 // once the field confirms the keys.
 func (e *echo) probe() []*protocol.Request {
 	e.probing = true
+	e.probeEpoch = e.epoch
+	for i := range e.states {
+		e.states[i].asked = e.states[i].sent
+	}
 	e.probeDue, e.quietDue = time.Time{}, time.Time{}
 	reqs := []*protocol.Request{{AttachField: protocol.Empty}}
 	if !e.frames && (e.dropped > 0 || e.dirty || e.painted) {
@@ -602,8 +714,12 @@ func (e *echo) overlay() []byte {
 // schedule arms the timer for the earliest due time.
 func (e *echo) schedule() {
 	var due time.Time
-	for _, t := range []time.Time{e.flushDue, e.probeDue, e.quietDue} {
-		if t.IsZero() || (e.probing && t != e.flushDue) {
+	times := []time.Time{e.flushDue, e.decodeDue}
+	if !e.probing {
+		times = append(times, e.probeDue, e.quietDue)
+	}
+	for _, t := range times {
+		if t.IsZero() {
 			continue
 		}
 		if due.IsZero() || t.Before(due) {
@@ -625,6 +741,60 @@ func (e *echo) schedule() {
 // a reattach, the ones the field proves missing) and what to draw.
 func (e *echo) fieldAnswer(f *protocol.Field) (send, paint []byte) {
 	e.probing = false
+	if e.probeEpoch != e.epoch {
+		// Asked for before an unpredicted key or a resize: the field it
+		// describes may be gone. pause and resized asked for another.
+		e.probeEpoch = e.epoch
+		e.schedule()
+		return nil, nil
+	}
+	return e.reconcile(f)
+}
+
+// frameField takes the field in frame seq. The worker built that frame
+// after reading the ack of frame seq-protocol.FrameWindow, so it shows
+// the keys sent before that ack: those can confirm a prediction, and a
+// field from before an unpredicted key or a resize is ignored.
+//
+// A frame may also show keys it is not proven to: one built before that
+// ack but after the keys arrived. A field that equals only such a state
+// proves nothing either way, so it is ignored too. Either way the field
+// is asked for again, and each ask makes a frame, so one past both bounds
+// follows.
+func (e *echo) frameField(f *protocol.Field, seq uint32) (send, paint []byte) {
+	e.probing = false
+	ignore := seq <= e.staleThrough
+	if !ignore {
+		proven, unproven := false, false
+		for i := range e.states {
+			st := &e.states[i]
+			st.asked = st.sent && seq >= st.seenFrom
+			if st.at(f) {
+				proven = proven || st.asked
+				unproven = unproven || (st.sent && !st.asked)
+			}
+		}
+		ignore = unproven && !proven
+	}
+	if ignore {
+		if e.probeDue.IsZero() {
+			e.probeDue = e.now().Add(echoProbeAfter)
+		}
+		e.schedule()
+		return nil, nil
+	}
+	return e.reconcile(f)
+}
+
+// frameAcked notes that frame seq was acknowledged.
+func (e *echo) frameAcked(seq uint32) {
+	if e != nil {
+		e.ackSeq = seq
+	}
+}
+
+// reconcile takes a field that can show the keys marked asked.
+func (e *echo) reconcile(f *protocol.Field) (send, paint []byte) {
 	e.paused = false
 	e.offset = 0
 	resend := e.resend
@@ -632,15 +802,19 @@ func (e *echo) fieldAnswer(f *protocol.Field) (send, paint []byte) {
 	if !f.Found {
 		e.field = nil
 		e.states = nil
+		if resend {
+			send = e.resumeHeld()
+		}
 		e.schedule()
-		return nil, nil
+		return send, nil
 	}
 	// Which prediction has the agent reached? The states were replayed
-	// from the previous field, so that field's rows are the state before
-	// the oldest of them.
+	// from the previous field, so that field is the state before the
+	// oldest of them. Text alone is not enough: Left and Right change
+	// only the cursor.
 	matched := -1
 	for i := len(e.states) - 1; i >= 0; i-- {
-		if equalRows(e.states[i].rows, f.Rows) {
+		if e.states[i].asked && e.states[i].at(f) {
 			matched = i
 			break
 		}
@@ -649,7 +823,7 @@ func (e *echo) fieldAnswer(f *protocol.Field) (send, paint []byte) {
 	switch {
 	case matched >= 0:
 		remaining = e.states[matched+1:]
-	case len(e.states) > 0 && e.field != nil && equalRows(e.field.Rows, f.Rows):
+	case len(e.states) > 0 && e.field != nil && sameField(e.field, f):
 		remaining = e.states
 	default:
 		// Nothing predicted matches what the agent drew: take the
@@ -669,10 +843,17 @@ func (e *echo) fieldAnswer(f *protocol.Field) (send, paint []byte) {
 			break
 		}
 		lay := layout(e.text, e.field)
-		e.states = append(e.states, echoState{rows: lay.texts(), cRow: lay.cRow, cCol: lay.cCol, key: st.key})
-		if resend {
+		next := echoState{rows: lay.texts(), cRow: lay.cRow, cCol: lay.cCol, key: st.key, sent: st.sent, seenFrom: st.seenFrom}
+		if resend && st.sent {
+			// Sent on the lost connection, and not drawn: it never
+			// arrived. Those still batched go below, after it.
 			send = append(send, st.key.raw...)
+			next.seenFrom = e.ackSeq + protocol.FrameWindow + 1
 		}
+		e.states = append(e.states, next)
+	}
+	if resend {
+		send = append(send, e.resumeHeld()...)
 	}
 	if len(e.states) > 0 {
 		paint = e.paint(layout(e.text, e.field))
@@ -680,6 +861,19 @@ func (e *echo) fieldAnswer(f *protocol.Field) (send, paint []byte) {
 	}
 	e.schedule()
 	return send, paint
+}
+
+// resumeHeld sends the keys held for a resend, which were not predicted:
+// if any were typed while it was owed, the drawing no longer shows the
+// field, so it pauses until the field is seen again.
+func (e *echo) resumeHeld() []byte {
+	held := e.held
+	e.held = false
+	send := e.flush()
+	if held {
+		e.pause()
+	}
+	return send
 }
 
 func equalRows(a, b []string) bool {
@@ -719,8 +913,16 @@ func (e *echo) repainted() {
 }
 
 // suspend ends the echo for now (the overlay opens, the attachment ends):
-// pending keys go, predictions are dropped.
+// pending keys go, with what the decoder holds, and predictions are
+// dropped.
 func (e *echo) suspend() (send []byte) {
+	// Keys a reattach left unconfirmed are not sent again: the field
+	// that would say which never arrived.
+	e.resend, e.held = false, false
+	// What the decoder holds goes too, rather than in front of the next
+	// key typed after the overlay, which has a decoder of its own.
+	e.pending = append(e.pending, e.keys.reset()...)
+	e.noteHeld()
 	send = e.flush()
 	e.states = nil
 	e.paused = false
@@ -732,6 +934,8 @@ func (e *echo) suspend() (send []byte) {
 
 // resized: the field moved; ask again once the agent has redrawn.
 func (e *echo) resized() {
+	e.epoch++
+	e.staleThrough = e.ackSeq + protocol.FrameWindow
 	e.field = nil
 	e.states = nil
 	e.painted = false
@@ -742,15 +946,26 @@ func (e *echo) resized() {
 
 // reattached: the screen was repainted from the new attachment's snapshot;
 // the field is asked for at once, and the keys it proves missing are sent
-// again.
+// again. Whatever was asked of the lost attachment will not be answered. A
+// resend still owed from an earlier reattach stays owed, with the keys held
+// for it.
 func (e *echo) reattached() {
-	e.resend = len(e.states) > 0
+	e.resend = e.resend || len(e.states) > 0
+	if e.resend {
+		e.flushDue = time.Time{}
+	}
 	// A focus report sent before the stream was lost may never have
 	// arrived: the next one goes, whatever it repeats.
 	e.focus = ""
 	e.painted, e.dropped, e.dirty, e.offset = false, 0, false, 0
 	e.probeDue = e.now()
-	e.probing = false
+	e.probing, e.snapshotDue = false, false
+	// The new attachment's frames count from 1, and each shows whatever
+	// reached the agent on the lost one.
+	e.ackSeq, e.staleThrough = 0, 0
+	for i := range e.states {
+		e.states[i].seenFrom = 0
+	}
 	e.schedule()
 }
 

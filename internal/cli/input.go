@@ -295,12 +295,36 @@ type keyEvent struct {
 // queries in CSI form (OSC and DCS replies read as keys). As with
 // most terminal libraries, an ESC that ends a read is the Esc key; any
 // other incomplete sequence waits for the next read.
+//
+// What it holds is bounded. An incomplete sequence longer than
+// keySequenceMax is not a key, and goes as it is. A bracketed paste is held
+// until its end marker, up to pasteMax; a longer one is forwarded as it
+// arrives, in keyUnknown events, holding back only what may be the start of
+// its end marker, and the end marker is looked for once in each byte. So
+// the overlay and the picker, which get no keyUnknown events, ignore a
+// paste longer than pasteMax (a session name or a query never is). The
+// local echo calls expire when nothing completes what is held, and reset
+// when the attachment or the overlay takes over.
 type keyDecoder struct {
 	pending []byte
 	// forwardAll also returns keyUnknown and keyPassive events; the
 	// picker and the overlay have no use for them.
 	forwardAll bool
+	// paste is the bracketed paste being read, from its start marker (or,
+	// once streaming, what is left of it after the last event); scanned
+	// is how much of it is known to hold no end marker.
+	paste     []byte
+	scanned   int
+	streaming bool
 }
+
+const (
+	// keySequenceMax bounds an incomplete escape sequence: the longest
+	// key a terminal sends (kitty CSI-u with every field) is far shorter.
+	keySequenceMax = 256
+	// pasteMax bounds the bracketed paste held for one event.
+	pasteMax = 64 << 10
+)
 
 var (
 	pasteStart = []byte("\x1b[200~")
@@ -308,33 +332,126 @@ var (
 )
 
 func (d *keyDecoder) push(chunk []byte) []keyEvent {
-	b := append(d.pending, chunk...)
-	d.pending = nil
+	b := chunk
+	if len(d.pending) > 0 {
+		b = append(d.pending, chunk...)
+		d.pending = nil
+	}
 	var events []keyEvent
 	for len(b) > 0 {
-		if bytes.HasPrefix(b, pasteStart) {
-			end := bytes.Index(b, pasteEnd)
-			if end < 0 {
-				d.pending = append([]byte(nil), b...)
-				break
+		if d.paste != nil {
+			var ev keyEvent
+			var ok bool
+			ev, ok, b = d.readPaste(b)
+			if ok && d.wants(ev) {
+				events = append(events, ev)
 			}
-			n := end + len(pasteEnd)
-			events = append(events, keyEvent{isPaste: true, paste: string(b[len(pasteStart):end]), raw: append([]byte(nil), b[:n]...)})
-			b = b[n:]
+			continue
+		}
+		if bytes.HasPrefix(b, pasteStart) {
+			d.paste = append(make([]byte, 0, len(pasteStart)+len(b)), pasteStart...)
+			d.scanned = len(pasteStart)
+			b = b[len(pasteStart):]
 			continue
 		}
 		ev, n := decodeKey(b)
 		if n == 0 {
-			d.pending = append([]byte(nil), b...)
-			break
+			if len(b) <= keySequenceMax {
+				d.pending = append([]byte(nil), b...)
+				break
+			}
+			// Too long to be a key: it goes as it is.
+			ev, n = keyEvent{code: keyUnknown}, len(b)
 		}
 		ev.raw = append([]byte(nil), b[:n]...)
-		if ev.code != keyNone && (d.forwardAll || (ev.code != keyUnknown && ev.code != keyPassive)) {
+		if ev.code != keyNone && d.wants(ev) {
 			events = append(events, ev)
 		}
 		b = b[n:]
 	}
 	return events
+}
+
+// wants reports whether this decoder returns ev: keyUnknown and keyPassive
+// events only with forwardAll.
+func (d *keyDecoder) wants(ev keyEvent) bool {
+	return d.forwardAll || (ev.code != keyUnknown && ev.code != keyPassive)
+}
+
+// readPaste adds b to the paste being read. It returns the event that ends
+// the paste, or the part of a long one that can go, and what follows the
+// end marker in b.
+func (d *keyDecoder) readPaste(b []byte) (ev keyEvent, ok bool, rest []byte) {
+	before := len(d.paste)
+	d.paste = append(d.paste, b...)
+	from := max(d.scanned-(len(pasteEnd)-1), 0)
+	if i := bytes.Index(d.paste[from:], pasteEnd); i >= 0 {
+		end := from + i + len(pasteEnd)
+		ev.raw = d.paste[:end]
+		if d.streaming {
+			ev.code = keyUnknown
+		} else {
+			ev.isPaste = true
+			ev.paste = string(ev.raw[len(pasteStart) : end-len(pasteEnd)])
+		}
+		rest = b[end-before:]
+		d.paste, d.scanned, d.streaming = nil, 0, false
+		return ev, true, rest
+	}
+	d.scanned = len(d.paste)
+	if d.streaming || len(d.paste) > pasteMax {
+		return d.streamPaste()
+	}
+	return keyEvent{}, false, nil
+}
+
+// streamPaste gives up holding the paste for one event: what is held goes
+// on as it is, but for what may be the start of the end marker.
+func (d *keyDecoder) streamPaste() (ev keyEvent, ok bool, rest []byte) {
+	d.streaming = true
+	keep := len(pasteEnd) - 1
+	if len(d.paste) <= keep {
+		return keyEvent{}, false, nil
+	}
+	ev.code = keyUnknown
+	ev.raw = append([]byte(nil), d.paste[:len(d.paste)-keep]...)
+	d.paste = append(make([]byte, 0, keep), d.paste[len(d.paste)-keep:]...)
+	d.scanned = len(d.paste)
+	return ev, true, nil
+}
+
+// held reports whether the decoder holds bytes, or is inside a paste, so
+// that expire has something to give up.
+func (d *keyDecoder) held() bool {
+	return len(d.pending) > 0 || d.paste != nil
+}
+
+// expire gives up on what is held because nothing followed it: an
+// incomplete sequence goes as it is (Alt-[ in a legacy terminal is ESC [,
+// which waits for a final byte that never comes), and a paste whose end has
+// not come is forwarded as it arrives from then on. A paste already
+// forwarded that way is given up for good: what may have been the start of
+// its end marker goes too, and what follows is decoded as keys.
+func (d *keyDecoder) expire() []keyEvent {
+	if d.paste != nil && !d.streaming {
+		if ev, ok, _ := d.streamPaste(); ok {
+			return []keyEvent{ev}
+		}
+		return nil
+	}
+	if raw := d.reset(); len(raw) > 0 {
+		return []keyEvent{{code: keyUnknown, raw: raw}}
+	}
+	return nil
+}
+
+// reset gives up everything held, an incomplete sequence or a paste (its
+// start marker included, if none of it has gone), returning its bytes, and
+// leaves the decoder as new.
+func (d *keyDecoder) reset() []byte {
+	raw := append(d.pending, d.paste...)
+	d.pending, d.paste, d.scanned, d.streaming = nil, nil, 0, false
+	return raw
 }
 
 // decodeKey decodes the key at the start of b, returning how many bytes it
@@ -520,7 +637,9 @@ func decodeCSI(b []byte) (keyEvent, int) {
 		case 127, 8:
 			code = keyBackspace
 		default:
-			if cp < 0x20 || cp > utf8.MaxRune {
+			if cp < 0x20 || cp > utf8.MaxRune || cp >= kittyFunctionalFirst && cp <= kittyFunctionalLast {
+				// Not text: a functional key (keypad, media, a
+				// modifier on its own).
 				return keyEvent{code: keyUnknown}, n
 			}
 			r := rune(cp)
@@ -537,6 +656,13 @@ func decodeCSI(b []byte) (keyEvent, int) {
 	}
 	return keyEvent{code: code, mods: mods}, n
 }
+
+// The kitty keyboard protocol numbers its functional keys from the Unicode
+// private use area.
+const (
+	kittyFunctionalFirst = 57344
+	kittyFunctionalLast  = 63743
+)
 
 // mouseKey classifies a mouse report by its button value: wheel scrolls
 // (64 and up) and motion (32 added) edit nothing; a click may (it can move

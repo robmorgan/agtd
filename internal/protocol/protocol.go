@@ -341,6 +341,12 @@ type FrameAck struct {
 	Field bool
 }
 
+// FrameWindow is how many frames a worker sends unacknowledged: it builds
+// frame N only after reading the ack of frame N-FrameWindow or a later
+// one. Requests are read in order, so frame N shows the input a client
+// sent before that ack, which its local echo relies on.
+const FrameWindow = 2
+
 // HasFeature reports whether the attach stream asked for capability c.
 func (a *AttachSession) HasFeature(c string) bool { return slices.Contains(a.Features, c) }
 

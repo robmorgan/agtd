@@ -1027,22 +1027,32 @@ and Codex but nothing in pi, and Ctrl-Enter submits in Claude Code, is a newline
 nothing in pi, so neither is predicted). Any other key (Enter, Tab, Esc, Ctrl-C, Up, Down, a
 mouse click, ...) goes at once, with the batch before it, and the echo pauses until the field is
 seen again, so the agent's own menus, completions and submit work as they always did, one round
-trip late. Input that edits no text (a wheel scroll, mouse motion, a focus change, a key
-release, the terminal's CSI reply to a query the agent sent) goes on in order behind the batch,
-or at once with none, without pausing: Claude Code, Codex and pi's fullscreen mode turn on SGR
-mouse reporting on the alternate screen and scroll their transcript on the wheel while the input
-box stays where it is, and the worker leaves query replies to an attached client terminal (OSC
-and DCS replies still decode as keys and pause the echo, though their bytes reach the agent). A
-focus report that repeats the last one sent within half a second of a repaint is held back: a
-repaint turns focus reporting back on (twice for a fullscreen agent), and Ghostty answers that
-with the focus even when it did not change; a change always goes, and so does a repeat at any
-other time. A scroll made while typed keys are unconfirmed shows with the repaint once they are
-(output is held until then, below). The drawing is a prediction; the agent is the authority. The
-CLI keeps the states it predicted, each with its key, and an observed field that equals one of
-them confirms the keys up to it; the keys after it are replayed over the observed field (the
-agent may have wrapped or placed the cursor differently), and a field that equals none means the
-agent did something unpredicted, so its field is adopted and the predictions dropped: one
-visible correction. At most 512 predictions are kept; past that the echo lets keys through raw.
+trip late; a field asked for before such a key is stale when it arrives, so it is ignored and
+asked for again (so is one asked for before a resize, whether from SIGWINCH or a new session size
+in a size ownership note). Input that edits no text (a wheel scroll, mouse motion, a focus
+change, a key release, the terminal's CSI reply to a query the agent sent) goes on in order
+behind the batch, or at once with none, without pausing: Claude Code, Codex and pi's fullscreen
+mode turn on SGR mouse reporting on the alternate screen and scroll their transcript on the wheel
+while the input box stays where it is, and the worker leaves query replies to an attached client
+terminal (OSC and DCS replies still decode as keys and pause the echo, though their bytes reach
+the agent). A focus report that repeats the last one sent within half a second of a repaint is
+held back: a repaint turns focus reporting back on (twice for a fullscreen agent), and Ghostty
+answers that with the focus even when it did not change; a change always goes, and so does a
+repeat at any other time. Apart from those repeats the echo never drops or rewrites a byte. A
+scroll made while typed keys are unconfirmed shows with the repaint once they are (output is held
+until then, below). What the decoder holds is bounded: an incomplete sequence goes as it is after
+256 bytes or 50 ms with nothing following (Alt-[ in a legacy terminal is a lone ESC [), a
+bracketed paste over 64 KiB, or whose end is late, is forwarded as it arrives, unpredicted, and
+given up for good after another 50 ms without its end, and opening the overlay sends whatever the
+decoder holds. The overlay and the picker ignore a paste over 64 KiB. The drawing is a
+prediction; the agent is the authority. The CLI keeps the states it predicted, each with its key,
+and an observed field that equals one of them, text and cursor (Left and Right change only the
+cursor), confirms the keys up to it, provided that key had been sent when the field was asked for
+(the worker reads the field before any input sent after the request, so a later state can only
+match by coincidence); the keys after it are replayed over the observed field (the agent may have
+wrapped or placed the cursor differently), and a field that equals none means the agent did
+something unpredicted, so its field is adopted and the predictions dropped: one visible
+correction. At most 512 predictions are kept; past that the echo lets keys through raw.
 
 **Holding and repainting.** While keys are unconfirmed the attachment's output is dropped by the
 CLI (the agent's own redraw of the field would fight the drawing), and counted. The field is then
@@ -1053,7 +1063,15 @@ visible compromise: while keys are in flight the screen behind the drawing is st
 a round trip after each pause in typing. Nothing is buffered for it: dropped output is gone, and
 the snapshot is the recovery, as for a lagging client. After a lost connection the CLI reattaches
 as before, then asks for the field: the keys it proves missing are sent again, and keys it does
-not account for are dropped, never resent on a guess.
+not account for are dropped, never resent on a guess. Keys still batched when the connection
+went, and keys typed before the field answers (scrolls and focus reports too), wait for it and
+follow the resent ones, so each goes once and in order; a second reattach before the answer keeps the resend owed, and past 64 KiB
+of held keys the resend is given up and they go at once. A resize before the answer drops the
+predictions it would be checked against, so keys lost with the connection are then not resent;
+nor are they when the overlay opens first, or when the new worker does not report the field
+(the keys still batched go at once then). The field is the only evidence (the worker does not acknowledge input):
+a key that reached the PTY before the cut but that the agent had not drawn when the field was
+read (the worker waits for output to settle, at most 200 ms) is sent twice.
 
 **Growth.** When the drawing needs more rows than the agent has, the rows the box pushes move
 with it (the rule above it on the alternate screen, the rule and status rows below it on the
@@ -1103,6 +1121,14 @@ has an echo) and either the program has settled (`fieldSettle`) or the client ty
 500 ms, so keys typed during a streaming answer are still confirmed. The echo composes over frames:
 while keys are unconfirmed its predicted rows are painted after each frame's rows, and the frame's
 field reconciles the queue, so output is never held and the screen behind the typing keeps moving.
+A frame's field is not an answer to a probe, so what it proves comes from the window: the worker
+reads requests in order and builds frame N only after reading the ack of frame N-2
+(`protocol.FrameWindow`), so frame N shows every key the client sent before that ack. Only those
+keys can be confirmed by it. A field that equals only a later prediction may or may not show it
+and is ignored, and so is a frame built before an unpredicted key or a resize could reach the
+worker; the field is then asked for again, and each ask makes a frame, so a frame past both bounds
+follows. A reattach's new frames count from 1 and show whatever reached the agent on the lost
+attachment, so the first field settles the resend.
 A frame client's state is not handed over: after a worker handoff or a daemon restart the client
 reattaches and starts from a full frame. The recorded streams in `internal/worker/testdata` are
 replayed frame by frame through the painter into a second libghostty terminal and compared cell

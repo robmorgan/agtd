@@ -34,7 +34,8 @@ const (
 	// would make a change that lands just after a frame went wait a whole
 	// round trip (a shell echoes a typed word in several writes); two lets
 	// it follow at once, and a client still falls behind by at most two.
-	frameWindow = 2
+	// The CLI's local echo relies on it (protocol.FrameWindow).
+	frameWindow = protocol.FrameWindow
 	// frameMaxHistory bounds the scrolled rows a frame carries the final
 	// contents of; a burst that scrolled more between two frames leaves
 	// the client's scrollback with the rest as they were last seen (or

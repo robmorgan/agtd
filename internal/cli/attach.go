@@ -375,6 +375,13 @@ func (c *client) attachOnce(id, uid string, titled *bool) (res attachResult, err
 			ech.frames = painter != nil
 			ech.reattached()
 		default:
+			// The new worker does not report the field (a handoff to
+			// an older one): the keys the echo still holds were never
+			// sent, and go now, unpredicted. If this stream has failed
+			// too, they are lost with it, as keys sent on it would be.
+			if held := ech.suspend(); len(held) > 0 {
+				_ = stream.send(&protocol.Request{AttachInput: &protocol.Bytes{Data: held}})
+			}
 			ech = nil
 		}
 	}
@@ -766,9 +773,7 @@ func handleFrame(f frame, overlayOpen bool, size *protocol.SizeOwnership, ech *e
 		}
 		return attachResult{}, false, nil
 	case f.resp.AttachSizeOwner != nil:
-		if size != nil {
-			*size = *f.resp.AttachSizeOwner
-		}
+		noteSizeOwner(size, *f.resp.AttachSizeOwner, ech)
 		return attachResult{}, false, nil
 	case f.resp.Field != nil:
 		if ech == nil {
@@ -800,6 +805,20 @@ func handleFrame(f frame, overlayOpen bool, size *protocol.SizeOwnership, ech *e
 	return attachResult{}, true, fmt.Errorf("unexpected response: %s", describeResponse(f.resp))
 }
 
+// noteSizeOwner records a size ownership note (size is nil when it is not
+// tracked). A new session size (another attachment took it, or this one
+// did from the overlay) moves the agent's field as a SIGWINCH does, so the
+// echo hears of it.
+func noteSizeOwner(size *protocol.SizeOwnership, note protocol.SizeOwnership, ech *echo) {
+	if size == nil {
+		return
+	}
+	if ech != nil && (size.Geometry.Cols != note.Geometry.Cols || size.Geometry.Rows != note.Geometry.Rows) {
+		ech.resized()
+	}
+	*size = note
+}
+
 // paintFrame paints a screen frame: the field in it reconciles the echo,
 // whose predicted rows go over the frame while keys are still in flight,
 // then the frame is acknowledged, asking for the field in the next ones
@@ -809,7 +828,7 @@ func paintFrame(fr *protocol.Frame, painter *screen.Painter, ech *echo, stream *
 	var send, overlay []byte
 	if ech != nil {
 		if fr.Field != nil {
-			send, _ = ech.fieldAnswer(fr.Field)
+			send, _ = ech.frameField(fr.Field, fr.Seq)
 		}
 		overlay = ech.overlay()
 	}
@@ -821,7 +840,18 @@ func paintFrame(fr *protocol.Frame, painter *screen.Painter, ech *echo, stream *
 			return err
 		}
 	}
-	return stream.send(&protocol.Request{AttachFrameAck: &protocol.FrameAck{Seq: fr.Seq, Field: ech != nil}})
+	return ackFrame(stream, fr.Seq, ech)
+}
+
+// ackFrame acknowledges frame seq, asking for the field in the next ones
+// while there is an echo, which notes the ack: the frames that follow it
+// show the keys sent before it.
+func ackFrame(stream *attachStream, seq uint32, ech *echo) error {
+	if err := stream.send(&protocol.Request{AttachFrameAck: &protocol.FrameAck{Seq: seq, Field: ech != nil}}); err != nil {
+		return err
+	}
+	ech.frameAcked(seq)
+	return nil
 }
 
 // overlayInput feeds input to the open overlay. closed reports that it
@@ -882,9 +912,9 @@ func restoreSnapshot(stream *attachStream, size *protocol.SizeOwnership, ech *ec
 				return nil, nil, errors.New("unexpected screen frame")
 			}
 			if ech != nil && fr.Field != nil {
-				ech.fieldAnswer(fr.Field)
+				ech.frameField(fr.Field, fr.Seq)
 			}
-			if err := stream.send(&protocol.Request{AttachFrameAck: &protocol.FrameAck{Seq: fr.Seq, Field: ech != nil}}); err != nil {
+			if err := ackFrame(stream, fr.Seq, ech); err != nil {
 				return nil, nil, err
 			}
 			if fr.Full {
@@ -906,9 +936,7 @@ func restoreSnapshot(stream *attachStream, size *protocol.SizeOwnership, ech *ec
 		case f.resp.PtyOutput != nil, f.resp.AttachResync != nil:
 			// Superseded by the snapshot asked for.
 		case f.resp.AttachSizeOwner != nil:
-			if size != nil {
-				*size = *f.resp.AttachSizeOwner
-			}
+			noteSizeOwner(size, *f.resp.AttachSizeOwner, ech)
 		case f.resp.SessionEnded != nil:
 			return nil, f.resp.SessionEnded, nil
 		case f.resp.EndOfStream != nil:
