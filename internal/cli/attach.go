@@ -325,8 +325,12 @@ func (c *client) attachOnce(id, uid string, titled *bool) (res attachResult, err
 	if err != nil {
 		return attachResult{}, fmt.Errorf("failed to set raw terminal mode: %w", err)
 	}
+	var painter *screen.Painter
 	defer func() {
 		raw.restore()
+		if painter != nil {
+			writeOut(painter.Leave())
+		}
 		writeOut([]byte(attachRestoreSequence))
 		if err == nil && res.outcome == outcomeDetached {
 			writeOut([]byte(attachDetachSequence))
@@ -345,7 +349,7 @@ func (c *client) attachOnce(id, uid string, titled *bool) (res attachResult, err
 	var parser attachParser
 	snapshot := attached.Snapshot
 	ech := c.newEchoFor(attached)
-	painter := newPainterFor(attached)
+	painter = c.newPainterFor(attached)
 	if ech != nil {
 		ech.frames = painter != nil
 	}
@@ -366,7 +370,7 @@ func (c *client) attachOnce(id, uid string, titled *bool) (res attachResult, err
 		}
 		ident.update(attached)
 		snapshot = attached.Snapshot
-		painter = newPainterFor(attached)
+		painter = c.newPainterFor(attached)
 		// An overlay that was open when the connection dropped may have
 		// hidden the cursor.
 		writeOut([]byte("\x1b[?25h"))
@@ -427,12 +431,20 @@ func (c *client) wantsFrames() bool {
 
 // newPainterFor is the screen painter for an attachment, nil unless the
 // screen arrives as frames (CapAttachFrames).
-func newPainterFor(attached *protocol.Attached) *screen.Painter {
+func (c *client) newPainterFor(attached *protocol.Attached) *screen.Painter {
 	if !attached.HasFeature(protocol.CapAttachFrames) {
 		return nil
 	}
-	return screen.New()
+	p := screen.New()
+	if cfg, err := config.Load(c.paths.Config); err == nil && cfg.Attach.AltScrollback {
+		p.SetAltScrollback(altScrollbackRows)
+	}
+	return p
 }
+
+// altScrollbackRows bounds the transcript record of [attach]
+// alt_scrollback.
+const altScrollbackRows = 10000
 
 // sizeOwnership is the attachment's size ownership as it attached, nil when
 // the worker does not track it.
@@ -843,14 +855,14 @@ func paintFrame(fr *protocol.Frame, painter *screen.Painter, ech *echo, stream *
 			return err
 		}
 	}
-	return ackFrame(stream, fr.Seq, ech)
+	return ackFrame(stream, fr.Seq, ech, painter)
 }
 
 // ackFrame acknowledges frame seq, asking for the field in the next ones
 // while there is an echo, which notes the ack: the frames that follow it
 // show the keys sent before it.
-func ackFrame(stream *attachStream, seq uint32, ech *echo) error {
-	if err := stream.send(&protocol.Request{AttachFrameAck: &protocol.FrameAck{Seq: seq, Field: ech != nil}}); err != nil {
+func ackFrame(stream *attachStream, seq uint32, ech *echo, painter *screen.Painter) error {
+	if err := stream.send(&protocol.Request{AttachFrameAck: &protocol.FrameAck{Seq: seq, Field: ech != nil || (painter != nil && painter.AltScrollback())}}); err != nil {
 		return err
 	}
 	ech.frameAcked(seq)
@@ -943,7 +955,7 @@ func restoreSnapshot(stream *attachStream, size *protocol.SizeOwnership, ech *ec
 			if ech != nil && fr.Field != nil {
 				ech.frameField(fr.Field, fr.Seq)
 			}
-			if err := ackFrame(stream, fr.Seq, ech); err != nil {
+			if err := ackFrame(stream, fr.Seq, ech, painter); err != nil {
 				return nil, nil, err
 			}
 			if fr.Full {

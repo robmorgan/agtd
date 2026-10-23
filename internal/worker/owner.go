@@ -54,6 +54,10 @@ type ownerState struct {
 	// lastOutputAt is when the PTY last produced output, for frames that
 	// carry the field only once it has settled.
 	lastOutputAt time.Time
+	// syncSince is when the program opened the synchronized-output block
+	// it is in (mode 2026), zero outside one: frames wait for its end
+	// (frameSyncHold).
+	syncSince time.Time
 	// owner is the goroutine this state belongs to, for timers that need
 	// to get back onto it.
 	owner *owner

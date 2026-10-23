@@ -1,6 +1,7 @@
 package screen
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -139,5 +140,41 @@ func TestResetSetsMouseModesAgain(t *testing.T) {
 	out := string(p.Apply(&protocol.Frame{Seq: 2, Full: true, Cols: 4, Lines: 1, Prefix: prefix}, nil))
 	if !strings.Contains(out, "\x1b[?1000h") || !strings.Contains(out, "\x1b[?1006h") || strings.Contains(out, "?1049h") {
 		t.Fatalf("after Reset: %q", out)
+	}
+}
+
+// Under alt scrollback the alternate screen is never entered, rows leaving
+// the top of the transcript are scrolled into the scrollback, and detach
+// leaves the cursor under the screen.
+func TestPainterAltScrollback(t *testing.T) {
+	p := New()
+	p.SetAltScrollback(100)
+	if p.Leave() != nil {
+		t.Fatal("Leave before any frame")
+	}
+	screen := func(top int) []protocol.FrameRow {
+		var rows []protocol.FrameRow
+		for y := range 9 {
+			rows = append(rows, protocol.FrameRow{Index: uint16(y), VT: []byte(fmt.Sprintf("row %02d", top+y))})
+		}
+		return append(rows, protocol.FrameRow{Index: 9, VT: []byte("> ")})
+	}
+	out := string(p.Apply(&protocol.Frame{Seq: 1, Full: true, Alternate: true, Cols: 10, Lines: 10, Prefix: []byte("\x1b[?1049h\x1b[?2004h\x1b[H"), Rows: screen(0)}, nil))
+	if strings.Contains(out, "1049") || !strings.Contains(out, "?2004h") {
+		t.Fatalf("first frame: %q", out)
+	}
+	// The transcript moves up two rows: rows 00 and 01 are painted at the
+	// top and scrolled off with line feeds, then every row is repainted.
+	out = string(p.Apply(&protocol.Frame{Seq: 2, Alternate: true, Cols: 10, Lines: 10, Rows: screen(2)[:9]}, nil))
+	if !strings.Contains(out, "\x1b[1;1H\x1b[0m\x1b[Krow 00\x1b[2;1H\x1b[0m\x1b[Krow 01\x1b[10;1H\n\n\x1b[1;1H") || !strings.Contains(out, "\x1b[10;1H\x1b[0m\x1b[K> ") {
+		t.Fatalf("shift: %q", out)
+	}
+	if string(p.Leave()) != "\x1b[10;1H\r\n" {
+		t.Fatalf("Leave %q", p.Leave())
+	}
+	// Back on the primary screen nothing is recorded or switched.
+	out = string(p.Apply(&protocol.Frame{Seq: 3, Full: true, Cols: 10, Lines: 10, Prefix: []byte("\x1b[H"), Rows: []protocol.FrameRow{{Index: 0, VT: []byte("$ ")}}}, nil))
+	if strings.Contains(out, "1049") || p.Leave() != nil {
+		t.Fatalf("primary: %q, Leave %q", out, p.Leave())
 	}
 }

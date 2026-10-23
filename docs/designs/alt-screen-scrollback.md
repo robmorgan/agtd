@@ -4,7 +4,13 @@ Status: revision 3 (2026-10-23). Phase 1 is built on branch `alt-scrollback`: th
 fixture, the matcher and record (`internal/screen/transcript.go`), and the replay test; its results
 are in "Phase 1 results" and change decisions 1 to 4. Revision 2 added decisions 11 and 12 (the
 client keeps a cursor, not a copy of the rows; the agent's viewport is not predicted) and open
-question 9. It answers the question whether a
+question 9. Phase 2's client prototype is built on the same branch: `[attach] alt_scrollback`
+(off by default) makes the painter stay on the primary screen and scroll recorded rows into the
+terminal's scrollback, and the worker now holds a frame while a synchronized-output block is open
+(at most 150 ms, `frameSyncHold`), since a frame inside one shows half a repaint, to every frame
+client and not only this one. `TestFramesAltScrollbackClaudeScroll` replays the fixture through the
+worker's frames and the painter into a client terminal: its own scrollback holds every row once, in
+order, at four paces. It answers the question whether a
 client-side framebuffer could predict the rows of a Claude Code session and give near-native
 scrollback while the screen keeps coming from the worker as frames: yes, and the record belongs in
 the worker, with the client's framebuffer doing the painting it already does.
@@ -408,7 +414,11 @@ setting follows only if a real session needs more than 10,000 rows.
 2. **Client prototype** (1-2 days, no protocol change): under `[attach] alt_scrollback`, the CLI
    infers the scroll from consecutive alternate frames with the matcher and feeds the painter a
    synthetic `Scrolled`/`History`; the painter stops mirroring the alternate screen; the detach
-   and repaint seams. Use it on sfo with a real Claude Code for a day. Decide whether to go on.
+   and repaint seams. Built 2026-10-23: the painter does it (`SetAltScrollback`), the CLI asks
+   for the field in its acks so the record stops above the input box, and detach leaves the
+   cursor under the screen. Not done: the repaint without a clear (decision 5), the reattach cursor
+   (decision 11), and limiting it to profiled programs (decision 4), which the client cannot tell
+   without the worker. Use it on sfo with a real Claude Code for a day. Decide whether to go on.
 3. **The worker record** (about a week): the ring, the per-feed diff, the profile flag, the
    capability and `Frame.AltScrollback`, attach seeding, history, handoff, stats, the bench. The
    client takes the worker's counts when the capability is offered and drops its own inference;

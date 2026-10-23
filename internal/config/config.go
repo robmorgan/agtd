@@ -44,6 +44,13 @@ type AttachConfig struct {
 	// from a remote daemon, the raw output from the local one), "frames"
 	// or "raw". Unset means auto. See ARCHITECTURE.md, "Screen frames".
 	Mode string `toml:"mode"`
+	// AltScrollback, under frames, keeps the terminal on the primary
+	// screen while an agent runs on the alternate one and pushes the rows
+	// that leave the top of its transcript into the terminal's own
+	// scrollback. A prototype, off unless set: it applies to every
+	// program on the alternate screen. See
+	// docs/designs/alt-screen-scrollback.md.
+	AltScrollback bool `toml:"alt_scrollback"`
 }
 
 // AttachMode is Mode with its default applied.
@@ -167,6 +174,11 @@ scrollback_rows = 1000
 # How the screen reaches the terminal: "auto" (screen frames from a remote
 # daemon, the raw output from the local one), "frames" or "raw".
 mode = "auto"
+# Under frames, keep the terminal on the primary screen while an agent runs
+# on the alternate one (Claude Code, Codex), and push the rows that leave
+# the top of its transcript into this terminal's own scrollback. A
+# prototype: it applies to every program on the alternate screen.
+alt_scrollback = false
 
 # Typing in "agt attach" is drawn in the agent's own input field at once
 # and sent as typed, batched for at most flush_after ("0" sends every key

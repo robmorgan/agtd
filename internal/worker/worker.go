@@ -886,18 +886,32 @@ func (rt *runtime) serveAttach(conn transport.Stream, reader *bufio.Reader, req 
 	if att.sub != nil {
 		outputCh = att.sub.ch
 	}
-	sendFrame := func() error {
+	// sendFrame builds and sends a frame, unless the program is inside a
+	// synchronized-output block and hold is set: then it waits for the
+	// block's end (which is output, so a wake) or frameSyncHold.
+	sendFrame := func(hold bool) error {
 		var f *protocol.Frame
+		var wait time.Duration
 		if err := rt.owner.doAtGround(func(s *ownerState) error {
 			a := s.attachments[att.attachID]
 			if a == nil || a.frames != att.frames {
 				return errors.New("the attachment has ended")
 			}
+			now := time.Now()
+			if wait = s.frameHold(now); hold && wait > 0 {
+				return nil
+			}
 			var err error
-			f, err = s.buildFrame(a, time.Now())
+			f, err = s.buildFrame(a, now)
 			return err
 		}); err != nil {
 			return err
+		}
+		if f == nil {
+			if frameTimer == nil {
+				frameTimer = time.After(wait)
+			}
+			return nil
 		}
 		sentSeq, lastFrame = f.Seq, time.Now()
 		return protocol.WriteResponse(conn, &protocol.Response{AttachFrame: f})
@@ -912,7 +926,7 @@ func (rt *runtime) serveAttach(conn transport.Stream, reader *bufio.Reader, req 
 			}
 			return nil
 		}
-		return sendFrame()
+		return sendFrame(true)
 	}
 	if frames {
 		frameWake = att.frames.wake
@@ -990,7 +1004,7 @@ loop:
 				// The final screen, whether or not the last frame was
 				// acknowledged: the stream ends after it.
 				if att.frames.dirty.Load() {
-					if err := sendFrame(); err != nil {
+					if err := sendFrame(false); err != nil {
 						return err
 					}
 				}

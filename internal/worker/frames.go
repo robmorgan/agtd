@@ -45,6 +45,12 @@ const (
 	// carry the input field even while output is still flowing, so keys
 	// typed during a streaming answer are confirmed.
 	frameFieldAfterInput = 500 * time.Millisecond
+	// frameSyncHold is the longest a frame waits for the program to end a
+	// synchronized-output block (mode 2026): a frame built inside one
+	// shows half a repaint, and the scrollback a client builds from
+	// frames (docs/designs/alt-screen-scrollback.md) reads it as a jump.
+	// A program that leaves the mode set has its screen sent anyway.
+	frameSyncHold = 150 * time.Millisecond
 )
 
 // frameState is what one frame client has been sent.
@@ -103,8 +109,16 @@ func (st *frameState) changed() {
 	}
 }
 
-// noteFrameOutput marks every frame client's screen changed.
+// noteFrameOutput marks every frame client's screen changed, and notes
+// whether the program is inside a synchronized-output block.
 func (s *ownerState) noteFrameOutput() {
+	if syncing, err := s.terminal.term.Mode(libghostty.ModeSyncOutput); err == nil && syncing {
+		if s.syncSince.IsZero() {
+			s.syncSince = time.Now()
+		}
+	} else {
+		s.syncSince = time.Time{}
+	}
 	for _, a := range s.attachments {
 		if a.frames != nil {
 			a.frames.changed()
@@ -130,6 +144,15 @@ func (s *ownerState) frameEffects(fx terminalEffects) {
 			a.frames.effects = append(a.frames.effects, b...)
 		}
 	}
+}
+
+// frameHold is how much longer a frame should wait for the program's
+// synchronized-output block to end; 0 to build it now.
+func (s *ownerState) frameHold(now time.Time) time.Duration {
+	if s.syncSince.IsZero() {
+		return 0
+	}
+	return max(0, frameSyncHold-now.Sub(s.syncSince))
 }
 
 // buildFrame builds the next frame for a: every row when something made

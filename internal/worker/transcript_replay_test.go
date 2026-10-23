@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"agtd.sh/internal/screen"
 	"go.mitchellh.com/libghostty"
@@ -182,4 +183,102 @@ var vtEscape = regexp.MustCompile(`\x1b(\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(\x07|
 // plainRow is a row's text without its escape sequences.
 func plainRow(row []byte) string {
 	return strings.TrimRight(vtEscape.ReplaceAllString(screen.RowKey(row), ""), " ")
+}
+
+// The client prototype end to end: the claude-scroll stream through the
+// worker's frames and a painter with alt scrollback into a client terminal,
+// which never enters the alternate screen and whose own scrollback ends up
+// holding every transcript row once, in order, at three frame paces.
+func TestFramesAltScrollbackClaudeScroll(t *testing.T) {
+	var data []byte
+	for _, st := range loadStreams(t) {
+		if st.name == "claude-scroll" {
+			data = st.data
+		}
+	}
+	if data == nil {
+		t.Skip("no claude-scroll stream")
+	}
+	repaints := splitAfter(data, []byte("\x1b[?2026l"))
+	for _, c := range []struct {
+		name   string
+		pieces [][]byte
+	}{
+		{"every repaint", repaints},
+		{"every 4 repaints", group(repaints, 4)},
+		{"16 KiB reads", readLooks(data, 16384)},
+		{"2 KiB reads", readLooks(data, 2048)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newFrameRig(t, streamCols, streamRows)
+			r.p.SetAltScrollback(10000)
+			for _, p := range c.pieces {
+				r.feed(string(p))
+				// The CLI asks for the field in its acks; the rig's
+				// output never settles, so ask outright.
+				r.a.frames.askField = true
+				// The handler holds a frame while a synchronized
+				// block is open (frameSyncHold).
+				if r.s.frameHold(time.Now()) > 0 {
+					continue
+				}
+				r.frame()
+				if must(r.client.ActiveScreen()) != libghostty.ScreenPrimary {
+					t.Fatal("the client entered the alternate screen")
+				}
+			}
+			text := formatContent(r.client, libghostty.FormatterFormatPlain, true)
+			seen := map[int]int{}
+			last, order := 0, true
+			for _, line := range strings.Split(text, "\n") {
+				var n int
+				if i := strings.Index(line, "shell row "); i >= 0 && !strings.Contains(line, "seq") {
+					if _, err := fmt.Sscanf(line[i:], "shell row %d", &n); err == nil {
+						seen[n]++
+						if n < last {
+							order = false
+						}
+						last = n
+					}
+				}
+			}
+			var missing, dup []int
+			for n := 1; n <= 120; n++ {
+				switch {
+				case seen[n] == 0:
+					missing = append(missing, n)
+				case seen[n] > 1:
+					dup = append(dup, n)
+				}
+			}
+			t.Logf("client scrollback %d rows: missing %v, duplicated %v, in order %v", must(r.client.ScrollbackRows()), missing, dup, order)
+			if dir := os.Getenv("TRANSCRIPT_DUMP"); dir != "" {
+				os.WriteFile(dir+"/client-"+strings.ReplaceAll(c.name, " ", "-")+".txt", []byte(text), 0o644)
+			}
+			if len(missing) > 0 || len(dup) > 0 || !order {
+				t.Errorf("missing %v, duplicated %v, in order %v", missing, dup, order)
+			}
+		})
+	}
+}
+
+// A frame waits for the end of a synchronized-output block, at most
+// frameSyncHold after it opened.
+func TestFrameHoldsForSyncOutput(t *testing.T) {
+	r := newFrameRig(t, 20, 4)
+	now := time.Now()
+	if h := r.s.frameHold(now); h != 0 {
+		t.Fatalf("hold %v outside a block", h)
+	}
+	r.feed("\x1b[?2026hhalf a re")
+	if h := r.s.frameHold(time.Now()); h <= 0 || h > frameSyncHold {
+		t.Fatalf("hold %v inside a block", h)
+	}
+	if h := r.s.frameHold(time.Now().Add(frameSyncHold)); h != 0 {
+		t.Fatalf("hold %v past the cap", h)
+	}
+	r.feed("paint\x1b[?2026l")
+	if h := r.s.frameHold(time.Now()); h != 0 {
+		t.Fatalf("hold %v after the block", h)
+	}
 }

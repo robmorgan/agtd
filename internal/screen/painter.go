@@ -42,7 +42,89 @@ type Painter struct {
 	seq   uint32
 	// painted is whether any frame was painted yet.
 	painted bool
+
+	// altScrollback keeps the terminal on the primary screen while the
+	// program is on the alternate one, and pushes the rows that leave the
+	// top of its transcript into the terminal's own scrollback (see
+	// SetAltScrollback). alt is the record of them, nil while the program
+	// is on the primary screen; altEnd is how many rows from the top are
+	// its transcript, from the last field seen (0: unknown).
+	altScrollback bool
+	altMax        int
+	alt           *Transcript
+	altEnd        int
 }
+
+// SetAltScrollback turns on scrollback for programs on the alternate
+// screen, keeping at most max rows of their transcript
+// (docs/designs/alt-screen-scrollback.md, the client prototype): the
+// alternate screen is never entered, its frames are painted on the
+// primary screen, and the rows a Transcript finds leaving the top are
+// scrolled into the terminal's scrollback as a primary screen's would be.
+func (p *Painter) SetAltScrollback(max int) { p.altScrollback, p.altMax = true, max }
+
+// AltScrollback reports whether the scrollback is on (SetAltScrollback).
+func (p *Painter) AltScrollback() bool { return p.altScrollback }
+
+// Leave is what to write before restoring the terminal at detach: under
+// alt scrollback, while the program is on the alternate screen, its screen
+// stays as a primary screen program's output would, so the cursor goes
+// under it. Nil otherwise.
+func (p *Painter) Leave() []byte {
+	if p.alt == nil || p.lines == 0 {
+		return nil
+	}
+	return []byte(cup(p.lines-1, 0) + "\r\n")
+}
+
+// altFrame turns an alternate screen frame into one painted on the
+// primary screen: the screen it shows goes through the transcript record,
+// and the rows recorded become a scroll (Scrolled, History) with every
+// row repainted after it, since the terminal's rows moved. A look inside
+// a synchronized-output block, at half a repaint, is skipped.
+func (p *Painter) altFrame(f *protocol.Frame) *protocol.Frame {
+	if !f.Alternate {
+		p.alt, p.altEnd = nil, 0
+		return f
+	}
+	lines := int(f.Lines)
+	cur := make([][]byte, lines)
+	if !f.Full && lines == p.lines && int(f.Cols) == p.cols && len(p.rows) == lines {
+		copy(cur, p.rows)
+	}
+	for _, r := range f.Rows {
+		if int(r.Index) < lines {
+			cur[r.Index] = r.VT
+		}
+	}
+	if fl := f.Field; fl != nil && fl.Found && fl.Alternate && fl.BoxTop > 0 {
+		p.altEnd = int(fl.BoxTop) - 1
+	}
+	if p.alt == nil {
+		p.alt = NewTranscript(p.altMax)
+	}
+	modes := p.modes
+	if len(f.Prefix) > 0 {
+		modes = parseModes(f.Prefix)
+	}
+	if modes["?2026"] {
+		return f
+	}
+	out := p.alt.Update(cur, p.altEnd)
+	if len(out) == 0 {
+		return f
+	}
+	g := *f
+	g.Scrolled, g.History = uint16(min(len(out), 65535)), out
+	g.Rows = make([]protocol.FrameRow, lines)
+	for y := range cur {
+		g.Rows[y] = protocol.FrameRow{Index: uint16(y), VT: cur[y]}
+	}
+	return &g
+}
+
+// altModes are the modes that switch to the alternate screen.
+var altModes = []string{"?47", "?1047", "?1049"}
 
 // New makes a painter for a terminal that has just been cleared.
 func New() *Painter { return &Painter{} }
@@ -82,6 +164,9 @@ func (p *Painter) Row(y int) []byte {
 // drag the cursor back a few cells on every frame while typing. A full
 // frame, or one of another size, starts the row cache afresh.
 func (p *Painter) Apply(f *protocol.Frame, overlay []byte) []byte {
+	if p.altScrollback {
+		f = p.altFrame(f)
+	}
 	var b bytes.Buffer
 	b.WriteString(syncBegin)
 	cols, lines := int(f.Cols), int(f.Lines)
@@ -92,6 +177,11 @@ func (p *Painter) Apply(f *protocol.Frame, overlay []byte) []byte {
 	p.cols, p.lines = cols, lines
 	if len(f.Prefix) > 0 {
 		modes, rest := splitPrefix(f.Prefix)
+		if p.altScrollback {
+			for _, m := range altModes {
+				delete(modes, m)
+			}
+		}
 		for _, m := range sortedModes(p.modes) {
 			if _, still := modes[m]; !still {
 				b.WriteString(defaultMode(m, p.modes[m]))
