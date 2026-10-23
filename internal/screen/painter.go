@@ -49,10 +49,18 @@ func New() *Painter { return &Painter{} }
 
 // Reset forgets the rows painted, for a terminal that was cleared; the
 // modes and the cursor shape the terminal still has are remembered, so
-// only their changes are written.
+// only their changes are written. The mouse modes are forgotten: a repaint
+// turns them off first (attachRepaintSequence), so the next frame must set
+// them again.
 func (p *Painter) Reset() {
 	p.rows, p.seq, p.painted = nil, 0, false
+	for _, m := range mouseModes {
+		delete(p.modes, m)
+	}
 }
+
+// mouseModes are the modes a repaint turns off, in every encoding.
+var mouseModes = []string{"?9", "?1000", "?1002", "?1003", "?1005", "?1006", "?1015", "?1016"}
 
 // Seq is the sequence number of the last frame painted (0 for none).
 func (p *Painter) Seq() uint32 { return p.seq }

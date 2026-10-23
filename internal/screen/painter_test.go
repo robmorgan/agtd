@@ -130,3 +130,14 @@ func TestParseModes(t *testing.T) {
 		t.Fatalf("split %v %q", modes, rest)
 	}
 }
+
+func TestResetSetsMouseModesAgain(t *testing.T) {
+	p := New()
+	prefix := []byte("\x1b[?1000h\x1b[?1006h\x1b[?1049h\x1b[H")
+	p.Apply(&protocol.Frame{Seq: 1, Full: true, Cols: 4, Lines: 1, Prefix: prefix}, nil)
+	p.Reset()
+	out := string(p.Apply(&protocol.Frame{Seq: 2, Full: true, Cols: 4, Lines: 1, Prefix: prefix}, nil))
+	if !strings.Contains(out, "\x1b[?1000h") || !strings.Contains(out, "\x1b[?1006h") || strings.Contains(out, "?1049h") {
+		t.Fatalf("after Reset: %q", out)
+	}
+}
