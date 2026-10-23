@@ -56,6 +56,8 @@ type step struct {
 	// this name, in NAME.marks.json beside the stream: a test replays the
 	// stream up to a mark to see the screen as it was then.
 	mark string
+	// within, if set, is how long to wait for want (30s otherwise).
+	within time.Duration
 }
 
 type scenario struct {
@@ -206,6 +208,52 @@ func scenarios() []scenario {
 			}, append(fieldSteps, step{send: "\x03", pause: 300 * time.Millisecond}, step{send: "\x03", pause: 2 * time.Second})...),
 		},
 		{
+			// Claude Code's transcript scrolling on the alternate screen
+			// (docs/designs/alt-screen-scrollback.md): rows of known,
+			// unique text from bash mode until the viewport has
+			// overflowed several times, the wheel up and down, the box
+			// growing and shrinking, a click on the transcript, /clear.
+			// Nothing is sent to the model.
+			name:  "claude-scroll",
+			argv:  []string{"claude"},
+			env:   userEnv(),
+			setup: setupEmpty,
+			steps: append(append(append([]step{}, scrollStart...), scrollShellSteps...),
+				step{send: wheel(64, 10), pause: 2 * time.Second, mark: "wheel-up"},
+				step{send: wheel(65, 10), pause: 2 * time.Second, mark: "wheel-down"},
+				step{send: wheel(64, 30), pause: 2 * time.Second, mark: "wheel-far-up"},
+				step{send: "\x1b[<0;20;12M\x1b[<0;20;12m", pause: 2 * time.Second, mark: "clicked"},
+				step{send: wheel(65, 40), pause: 2 * time.Second, mark: "wheel-far-down"},
+				step{send: "first typed line\x1b\rsecond typed line\x1b\rthird typed line", pause: 1500 * time.Millisecond, mark: "typed"},
+				step{send: strings.Repeat("\x7f", 60), pause: 1500 * time.Millisecond, mark: "untyped"},
+				step{send: "/clear", pause: time.Second},
+				step{send: "\r", pause: 3 * time.Second, mark: "cleared"},
+				step{send: "\x03", pause: 300 * time.Millisecond},
+				step{send: "\x03", pause: 2 * time.Second},
+			),
+		},
+		{
+			// The same transcript, then one prompt to the model whose
+			// answer streams 200 known rows, with the wheel used while it
+			// streams. It uses the recording user's account: record it
+			// only with their consent.
+			name:  "claude-scroll-stream",
+			argv:  []string{"claude"},
+			env:   userEnv(),
+			setup: setupEmpty,
+			steps: append(append(append([]step{}, scrollStart...), scrollShellSteps[:8]...),
+				step{send: scrollPrompt, pause: 300 * time.Millisecond},
+				step{send: "\r"},
+				step{want: "model row 060", within: 3 * time.Minute, send: wheel(64, 6), pause: 6 * time.Second, mark: "scrolled-streaming"},
+				step{send: wheel(65, 12), pause: time.Second},
+				step{want: "model row 200", within: 3 * time.Minute, pause: 8 * time.Second, mark: "answered"},
+				step{send: wheel(64, 8), pause: 2 * time.Second, mark: "answer-wheel-up"},
+				step{send: wheel(65, 16), pause: 2 * time.Second, mark: "answer-wheel-down"},
+				step{send: "\x03", pause: 300 * time.Millisecond},
+				step{send: "\x03", pause: 2 * time.Second},
+			),
+		},
+		{
 			// Codex's input field, the same way.
 			name:  "codex-field",
 			argv:  []string{"codex", "-c", "check_for_update_on_startup=false"},
@@ -304,6 +352,40 @@ var (
 		{send: fieldClear, pause: 1200 * time.Millisecond},
 	}
 )
+
+// scrollStart starts Claude Code and answers its first-run dialogs.
+var scrollStart = []step{
+	{want: "❯", pause: 2 * time.Second},
+	{only: "Keep xhigh", send: "\r", pause: 3 * time.Second},
+	{only: "trust this folder", send: "\x1b[B", pause: 500 * time.Millisecond},
+	{only: "trust this folder", send: "\r", pause: 4 * time.Second},
+	{want: "Try \"", pause: time.Second, mark: "idle"},
+}
+
+// scrollShellSteps fill Claude Code's transcript from bash mode with rows
+// that are unique, ordered and known ("shell row 001" to "shell row 120"),
+// a batch of 30 at a time, marked after each.
+var scrollShellSteps = func() []step {
+	var steps []step
+	for b := range 4 {
+		first, last := b*30+1, b*30+30
+		steps = append(steps,
+			step{send: "!", pause: 500 * time.Millisecond},
+			step{send: fmt.Sprintf("seq -f 'shell row %%03g' %d %d", first, last), pause: 300 * time.Millisecond},
+			step{send: "\r"},
+			step{want: fmt.Sprintf("shell row %03d", last), pause: 2 * time.Second, mark: fmt.Sprintf("shell-%d", b+1)})
+	}
+	return steps
+}()
+
+// scrollPrompt asks the model for 200 rows of known text.
+const scrollPrompt = "Reply with exactly 200 lines and nothing else, no code block: line k is the words model row followed by k as three digits, so the first line is model row 001 and the last is model row 200."
+
+// wheel is n SGR mouse wheel reports (button 64 up, 65 down) at row 12,
+// column 20, over the transcript.
+func wheel(button, n int) string {
+	return strings.Repeat(fmt.Sprintf("\x1b[<%d;20;12M", button), n)
+}
 
 func setupEmpty(string) error { return nil }
 
@@ -559,7 +641,11 @@ func record(sc scenario) ([]byte, map[string]int, error) {
 	for _, s := range sc.steps {
 		if s.want != "" {
 			wants := strings.Split(s.want, "|")
-			ok := pump(time.Now().Add(30*time.Second), func() bool {
+			within := 30 * time.Second
+			if s.within > 0 {
+				within = s.within
+			}
+			ok := pump(time.Now().Add(within), func() bool {
 				text := screen()
 				for _, w := range wants {
 					if strings.Contains(text, w) {
