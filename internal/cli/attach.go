@@ -253,7 +253,9 @@ func (c *client) connectAttach(ctx context.Context, id string, prev attachIdenti
 		attach.Colors = terminalColors()
 	}
 	if !c.wantsFrames() {
-		attach.Features = slices.DeleteFunc(attach.Features, func(f string) bool { return f == protocol.CapAttachFrames })
+		attach.Features = slices.DeleteFunc(attach.Features, func(f string) bool {
+			return f == protocol.CapAttachFrames || f == protocol.CapAttachFrameWindow
+		})
 	}
 	req := &protocol.Request{AttachSession: attach}
 	if err := protocol.WriteRequest(s, req); err != nil {
@@ -843,7 +845,7 @@ func paintFrame(fr *protocol.Frame, painter *screen.Painter, ech *echo, stream *
 	var send, overlay []byte
 	if ech != nil {
 		if fr.Field != nil {
-			send, _ = ech.frameField(fr.Field, fr.Seq)
+			send, _ = ech.frameField(fr.Field, frameAckedBy(fr))
 		}
 		overlay = ech.overlay()
 	}
@@ -953,7 +955,7 @@ func restoreSnapshot(stream *attachStream, size *protocol.SizeOwnership, ech *ec
 				return nil, nil, errors.New("unexpected screen frame")
 			}
 			if ech != nil && fr.Field != nil {
-				ech.frameField(fr.Field, fr.Seq)
+				ech.frameField(fr.Field, frameAckedBy(fr))
 			}
 			if err := ackFrame(stream, fr.Seq, ech, painter); err != nil {
 				return nil, nil, err

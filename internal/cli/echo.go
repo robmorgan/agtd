@@ -392,8 +392,9 @@ type echoState struct {
 	// asked: it had gone when the field was last asked for, so the field
 	// can show it.
 	sent, asked bool
-	// seenFrom: under frames, the first frame whose field can show the
-	// key (protocol.FrameWindow past the last ack sent before it).
+	// seenFrom: under frames, the first ack a frame must have been built
+	// after for its field to show the key (the one after the last ack
+	// sent before it).
 	seenFrom uint32
 }
 
@@ -459,10 +460,11 @@ type echo struct {
 	// predicted rows are painted over each frame (overlay), and a probe
 	// asks for the field only, never a snapshot.
 	frames bool
-	// ackSeq is the last frame acknowledged, and staleThrough the last
-	// frame whose field predates an unpredicted key or a resize: under
-	// frames the field is in every frame, not an answer to a probe.
-	ackSeq, staleThrough uint32
+	// ackSeq is the last frame acknowledged, and staleBefore the first
+	// ack a frame must have been built after for its field not to predate
+	// an unpredicted key or a resize: under frames the field is in every
+	// frame, not an answer to a probe.
+	ackSeq, staleBefore uint32
 	// resend: after a reattach, the keys the next field proves missing
 	// are sent again; until it answers, every key waits in pending
 	// unpredicted (held), so that none overtakes them.
@@ -670,7 +672,7 @@ func (e *echo) submits() bool {
 func (e *echo) pause() {
 	e.paused = true
 	e.epoch++
-	e.staleThrough = e.ackSeq + protocol.FrameWindow
+	e.staleBefore = e.ackSeq + 1
 	e.states = nil
 	if e.painted {
 		e.dirty = true
@@ -705,7 +707,7 @@ func (e *echo) flush() []byte {
 		for i := range e.states {
 			if !e.states[i].sent {
 				e.states[i].sent = true
-				e.states[i].seenFrom = e.ackSeq + protocol.FrameWindow + 1
+				e.states[i].seenFrom = e.ackSeq + 1
 			}
 		}
 		e.probeDue = e.now().Add(echoProbeAfter)
@@ -805,24 +807,24 @@ func (e *echo) fieldAnswer(f *protocol.Field) (send, paint []byte) {
 	return e.reconcile(f)
 }
 
-// frameField takes the field in frame seq. The worker built that frame
-// after reading the ack of frame seq-protocol.FrameWindow, so it shows
-// the keys sent before that ack: those can confirm a prediction, and a
-// field from before an unpredicted key or a resize is ignored.
+// frameField takes the field in a frame the worker built after reading
+// the ack of frame acked (frameAckedBy), so it shows the keys sent before
+// that ack: those can confirm a prediction, and a field from before an
+// unpredicted key or a resize is ignored.
 //
 // A frame may also show keys it is not proven to: one built before that
 // ack but after the keys arrived. A field that equals only such a state
 // proves nothing either way, so it is ignored too. Either way the field
 // is asked for again, and each ask makes a frame, so one past both bounds
 // follows.
-func (e *echo) frameField(f *protocol.Field, seq uint32) (send, paint []byte) {
+func (e *echo) frameField(f *protocol.Field, acked uint32) (send, paint []byte) {
 	e.probing = false
-	ignore := seq <= e.staleThrough
+	ignore := acked < e.staleBefore
 	if !ignore {
 		proven, unproven := false, false
 		for i := range e.states {
 			st := &e.states[i]
-			st.asked = st.sent && seq >= st.seenFrom
+			st.asked = st.sent && acked >= st.seenFrom
 			if st.at(f) {
 				proven = proven || st.asked
 				unproven = unproven || (st.sent && !st.asked)
@@ -838,6 +840,17 @@ func (e *echo) frameField(f *protocol.Field, seq uint32) (send, paint []byte) {
 		return nil, nil
 	}
 	return e.reconcile(f)
+}
+
+// frameAckedBy is the last ack the worker had read when it built f: the
+// frame says so under CapAttachFrameWindow; otherwise the window is
+// protocol.FrameWindow, so it read the ack of f.Seq-FrameWindow or a later
+// one.
+func frameAckedBy(f *protocol.Frame) uint32 {
+	if f.HasAcked {
+		return f.Acked
+	}
+	return f.Seq - min(f.Seq, protocol.FrameWindow)
 }
 
 // frameAcked notes that frame seq was acknowledged.
@@ -902,7 +915,7 @@ func (e *echo) reconcile(f *protocol.Field) (send, paint []byte) {
 			// Sent on the lost connection, and not drawn: it never
 			// arrived. Those still batched go below, after it.
 			send = append(send, st.key.raw...)
-			next.seenFrom = e.ackSeq + protocol.FrameWindow + 1
+			next.seenFrom = e.ackSeq + 1
 		}
 		e.states = append(e.states, next)
 	}
@@ -989,7 +1002,7 @@ func (e *echo) suspend() (send []byte) {
 // resized: the field moved; ask again once the agent has redrawn.
 func (e *echo) resized() {
 	e.epoch++
-	e.staleThrough = e.ackSeq + protocol.FrameWindow
+	e.staleBefore = e.ackSeq + 1
 	e.field = nil
 	e.states = nil
 	e.painted = false
@@ -1016,7 +1029,7 @@ func (e *echo) reattached() {
 	e.probing, e.snapshotDue = false, false
 	// The new attachment's frames count from 1, and each shows whatever
 	// reached the agent on the lost one.
-	e.ackSeq, e.staleThrough = 0, 0
+	e.ackSeq, e.staleBefore = 0, 0
 	for i := range e.states {
 		e.states[i].seenFrom = 0
 	}

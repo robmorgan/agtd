@@ -790,6 +790,12 @@ func (rt *runtime) serveAttach(conn transport.Stream, reader *bufio.Reader, req 
 	// A client that asked for CapAttachFrames gets the screen as frames
 	// instead of the raw output (frames.go).
 	frames := slices.Contains(features, protocol.CapAttachFrames)
+	// One that also asked for CapAttachFrameWindow gets a window sized
+	// from the round trip, and frames that say which ack they follow.
+	var rtt *frameRTT
+	if frames && slices.Contains(features, protocol.CapAttachFrameWindow) {
+		rtt = &frameRTT{}
+	}
 	// A client that asked for CapAttachCompose may send a whole prompt to
 	// encode for the program (compose.go).
 	composes := slices.Contains(features, protocol.CapAttachCompose)
@@ -914,10 +920,18 @@ func (rt *runtime) serveAttach(conn transport.Stream, reader *bufio.Reader, req 
 			return nil
 		}
 		sentSeq, lastFrame = f.Seq, time.Now()
+		if rtt != nil {
+			f.Acked, f.HasAcked = ackedSeq, true
+			rtt.sent(f.Seq, lastFrame)
+		}
 		return protocol.WriteResponse(conn, &protocol.Response{AttachFrame: f})
 	}
 	maybeFrame := func() error {
-		if !frames || sentSeq-ackedSeq >= frameWindow || !att.frames.dirty.Load() {
+		window := uint32(frameWindow)
+		if rtt != nil {
+			window = rtt.window()
+		}
+		if !frames || sentSeq-ackedSeq >= window || !att.frames.dirty.Load() {
 			return nil
 		}
 		if wait := frameFloor - time.Since(lastFrame); wait > 0 {
@@ -1082,6 +1096,9 @@ loop:
 			case in.req.AttachFrameAck != nil && frames:
 				if seq := in.req.AttachFrameAck.Seq; seq > ackedSeq && seq <= sentSeq {
 					ackedSeq = seq
+					if rtt != nil {
+						rtt.acked(seq, time.Now())
+					}
 				}
 				att.frames.wantField.Store(in.req.AttachFrameAck.Field)
 				if err := maybeFrame(); err != nil {

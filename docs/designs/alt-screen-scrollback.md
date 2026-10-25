@@ -1,6 +1,9 @@
 # Design: native scrollback for agents on the alternate screen
 
-Status: revision 3 (2026-10-23). Phase 1 is built on branch `alt-scrollback`: the `claude-scroll`
+Status: revision 4 (2026-10-25). After the prototype's first day on sfo, 199 ms away, the plain
+wheel and streaming answers felt far from a local Claude Code: decision 12 now predicts wheel
+scrolling of the transcript locally and lets the frames reconcile it, decision 11 keeps a bounded
+copy for that, and decision 13 sizes the frame window from the round trip. Revision 3 (2026-10-23): Phase 1 is built on branch `alt-scrollback`: the `claude-scroll`
 fixture, the matcher and record (`internal/screen/transcript.go`), and the replay test; its results
 are in "Phase 1 results" and change decisions 1 to 4. Revision 2 added decisions 11 and 12 (the
 client keeps a cursor, not a copy of the rows; the agent's viewport is not predicted) and open
@@ -292,24 +295,31 @@ logged out on the recording machine.
     Whether frames should become the local default is a separate decision this feature adds a
     reason to; BENCHMARKS.md "Screen frames against raw output" has the local numbers.
 
-11. **The client keeps a cursor, not a copy of the rows.** The terminal's own scrollback is the
-    client-side record, and it is write-once: nothing agt could do with a second copy (render on
-    demand, insert above, correct) is possible against it, since no terminal reports where the user
-    has scrolled to and rows can only ever be added at the bottom. What the client keeps is the
-    count of record rows it has pushed. A reattach asks for the rows since that count
-    (`AttachSession.SinceRow`, below) instead of the zero rows it asks for today (`reattach` in
-    `internal/cli/attach.go`, "the terminal already holds the scrollback the first attach
-    seeded"), so rows that scrolled off during an outage reach the terminal once, after the
-    reconnect, and nothing is pushed twice. The same gap exists for the primary screen's history
-    today; closing it the same way needs a count that does not fall at the scrollback's cap, so it
-    is a follow-up, not part of this plan.
+11. **The client keeps a cursor, and a bounded copy for prediction.** The terminal's own
+    scrollback is the client-side record that the user reads, and it is write-once: no terminal
+    reports where the user has scrolled to, and rows can only ever be added at the bottom, so
+    nothing pushed there is ever corrected. The client keeps the count of record rows it has
+    pushed. A reattach asks for the rows since that count (`AttachSession.SinceRow`, below)
+    instead of the zero rows it asks for today (`reattach` in `internal/cli/attach.go`, "the
+    terminal already holds the scrollback the first attach seeded"), so rows that scrolled off
+    during an outage reach the terminal once, after the reconnect, and nothing is pushed twice.
+    The same gap exists for the primary screen's history today; closing it the same way needs a
+    count that does not fall at the scrollback's cap, so it is a follow-up, not part of this plan.
 
-12. **The agent's viewport is not predicted, and agt draws no scroll view of its own.** The client
-    could render a wheel tick locally and let the next frame correct it, as the echo does for
-    typing, since it sees the mouse reports and holds the rows. Three ways to render the same
-    record were weighed:
+    Revised 2026-10-25: the client also keeps the last `altPredictRows` (2000) record rows in
+    memory, under a megabyte, as the source for decision 12's prediction. It is a cache for
+    drawing a guess, never a second record: the terminal's scrollback and the worker's ring stay
+    the records.
 
-    | | Terminal-native (this plan) | A local view by agt | Predict the agent, reconcile |
+12. **Wheel scrolling of the agent's transcript is predicted locally, and the frame reconciles
+    it.** Revised 2026-10-25, after a day on sfo (199 ms away): with the agent's viewport a round
+    trip away, the plain wheel felt nothing like a local Claude Code, and the user's goal is a
+    local framebuffer that answers at once while the worker's frames stay the authority. The
+    first revision rejected this; the record the prototype builds removes its main obstacle, since
+    the client now holds the rows above the viewport. Three ways to render the record were
+    weighed:
+
+    | | Terminal-native | A local view by agt | Predict the agent, reconcile (now chosen for the wheel) |
     |---|---|---|---|
     | Latency | none, with the terminal's own smooth scrolling | one write of a screen per tick | none until a correction |
     | Correctness | exact, nothing to replace | exact, nothing to replace | a guess per agent and release, corrections visible as the text jumping |
@@ -317,14 +327,49 @@ logged out on the recording machine.
     | After detach | the transcript stays in the terminal | gone | gone |
     | Costs | the seed before the first frame, write-once rows, the wheel taken from the agent | chrome of agt's own, a scroll position the agent does not know about | all of the above plus a confidence model like mosh's |
 
-    The echo predicts the user's own typing, a known quantity; this would predict the program
-    (rows per tick, coalescing, clamping, what happens when output arrives while scrolled, whether
-    older messages render identically when they return), and a wrong guess moves the paragraph
-    being read. The local view is tmux's copy mode: exact and fast, and the one design where
-    fetching older rows from the worker on demand makes sense, but it is a viewport agt owns, with
-    search and selection to build, against the rule that agt draws nothing the agent did not draw.
-    It stays a possible fallback for terminals without usable scrollback. The native path gives
-    zero latency and exactness for free and sends no bytes to scroll.
+    The three are not exclusive. Native scrollback stays (shift-wheel, decision 9) and keeps the
+    whole transcript; prediction covers the plain wheel, which the agent owns. How it works:
+
+    * **The guess.** A wheel report inside the transcript region (above `Field.BoxTop`) is sent
+      to the agent as today, and the painter at once shifts the transcript rows by the expected
+      step, filling the uncovered rows from the copy (down) or from the rows the agent last
+      showed (up). The input box and the rows below it are left alone. Nothing is guessed for a
+      wheel outside the region, for clicks, or for keys.
+    * **The step.** Claude Code's rows per tick is learned, not assumed: the shift matcher
+      (`Shift`) measures each authoritative frame that follows a tick against the frame before
+      it, and the client keeps the last measured step (3 until measured). Several ticks before a
+      frame arrives add up.
+    * **Reconcile.** The worker's frames stay the screen's authority. Each frame is painted as it
+      is today; the guess is only what the terminal shows between a tick and the frame that
+      answers it. A frame built before the tick reached the worker (its `Acked` is below the
+      ack sent after the tick, decision 13) does not answer it, so the guess is re-applied over
+      it instead of jumping back. A frame that answers it and differs is a correction: the guess
+      was wrong and the step is relearned from it.
+    * **Confidence.** After two corrections in a row, guessing stops until a guess would have
+      been right twice (the echo's pause, `internal/cli/echo.go`, has the same shape). It also
+      stops while the frame does not look like the transcript (no `Field`, a dialog open), at the
+      top of the copy, and inside a synchronized-output block.
+
+    What a wrong guess costs is one visible jump to the agent's real viewport, a round trip after
+    the tick. The open risk is how Claude Code draws a scrolled-up view (a "new messages" marker,
+    rewrapping); the `claude-scroll` fixture measures it: every predicted screen is compared with
+    the frame that answers it, and the target is no corrections there.
+
+    A local view of agt's own (tmux's copy mode) stays rejected: a viewport the agent does not know
+    about, with search and selection to build, against the rule that agt draws nothing the agent
+    did not draw. The guess draws only what the agent is about to draw.
+
+13. **The frame window follows the round trip.** At most two frames were in flight
+    (`protocol.FrameWindow`), so a link with round trip R got at most 2/R frames a second: 10 on
+    sfo, and a streaming answer advanced in visible steps. A client that asks for
+    `attach-frame-window` gets a window the worker sizes from the round trip it measures between
+    sending a frame and reading its ack: `ceil(minRTT / 16ms) + 1`, between 2 and 16, so frames
+    can come about every 16 ms on any link. It uses the minimum round trip of the last 10 s, not
+    the smoothed one: queueing delay raises the smoothed one, and a window grown from it would
+    queue more (bufferbloat feeding itself). Each frame then carries `Acked`, the last ack the
+    worker had read when it built the frame, since the local echo can no longer derive it as
+    `Seq - FrameWindow`; the frame shows the input the client sent before that ack. Against an
+    older worker or client the window stays 2.
 
 ## Protocol additions (under one capability; golden frames and fuzz for it)
 
@@ -423,6 +468,9 @@ setting follows only if a real session needs more than 10,000 rows.
    capability and `Frame.AltScrollback`, attach seeding, history, handoff, stats, the bench. The
    client takes the worker's counts when the capability is offered and drops its own inference;
    against an older worker it mirrors the alternate screen as today.
+3a. **Frame window and wheel prediction** (decisions 12 and 13, revised 2026-10-25): the
+   `attach-frame-window` capability, `Frame.Acked` and the worker's RTT-sized window first, then
+   the client's prediction of the plain wheel, measured over the `claude-scroll` fixture.
 4. **Finishing**: the "Release mouse" overlay item if the first days of use want it; the local
    frames default decision; BENCHMARKS.md numbers; ARCHITECTURE.md "Screen frames" gains a
    subsection, README and ROADMAP a line.

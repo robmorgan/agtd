@@ -1165,7 +1165,7 @@ func framesEcho(t *testing.T, rows []string) (*echo, time.Time) {
 	t.Helper()
 	e, now := fixedClockEcho(echoFlushAfter)
 	e.frames = true
-	e.frameField(claudeField(rows), 1)
+	e.frameField(claudeField(rows), frameAckedBy(&protocol.Frame{Seq: 1}))
 	e.frameAcked(1)
 	if !e.active() {
 		t.Fatal("the first frame's field did not start the echo")
@@ -1173,11 +1173,18 @@ func framesEcho(t *testing.T, rows []string) (*echo, time.Time) {
 	return e, now
 }
 
-// frame feeds the echo frame seq carrying a field with rows, and
-// acknowledges it, as paintFrame does.
+// frame feeds the echo frame seq carrying a field with rows, from a
+// worker with a window of protocol.FrameWindow, and acknowledges it, as
+// paintFrame does.
 func frameWith(e *echo, seq uint32, rows []string) (send []byte) {
-	send, _ = e.frameField(claudeField(rows), seq)
-	e.frameAcked(seq)
+	return frameAfter(e, &protocol.Frame{Seq: seq}, rows)
+}
+
+// frameAfter is frameWith for a frame that may say which ack it was
+// built after (CapAttachFrameWindow).
+func frameAfter(e *echo, f *protocol.Frame, rows []string) (send []byte) {
+	send, _ = e.frameField(claudeField(rows), frameAckedBy(f))
+	e.frameAcked(f.Seq)
 	return send
 }
 
@@ -1223,6 +1230,40 @@ func TestEchoFramesConfirmOnlyWhatTheyProve(t *testing.T) {
 	frameWith(e, 8, []string{"xyz"})
 	if e.unconfirmed() != 0 || e.field.Rows[0] != "xyz" {
 		t.Fatalf("an unpredicted field: unconfirmed %d, field %q", e.unconfirmed(), e.field.Rows)
+	}
+}
+
+// With CapAttachFrameWindow the window can be wide, so a frame's number
+// no longer says which ack it was built after: the frame does (Acked).
+// A frame built before the ack that followed the keys proves nothing,
+// however far its number is past that ack.
+func TestEchoFramesProveByTheirAck(t *testing.T) {
+	// Value: protects=a wide window does not let a frame built before the
+	// keys arrived confirm or drop them; fails_when=frameField goes back
+	// to deriving the ack from Seq-FrameWindow; why_new=the window
+	// follows the round trip; seam=none; no_claim=the worker's window
+	// sizing (worker tests).
+	e, now := framesEcho(t, []string{""})
+	typeKeys(e, "abc")
+	if send, _ := e.tick(now.Add(time.Second)); string(send) != "abc" {
+		t.Fatalf("batch %q", send)
+	}
+	// The keys went after the ack of frame 1. Frames 2 to 9 were built
+	// with only that ack read, so what they show of the keys may or may
+	// not be all of them; a window of 2 would take 4 to 9 as proof.
+	for seq := uint32(2); seq <= 9; seq++ {
+		rows := []string{"a"}
+		if seq%2 == 1 {
+			rows = []string{"abc"}
+		}
+		frameAfter(e, &protocol.Frame{Seq: seq, Acked: 1, HasAcked: true}, rows)
+		if e.unconfirmed() != 3 || e.paused {
+			t.Fatalf("frame %d: unconfirmed %d, paused %v", seq, e.unconfirmed(), e.paused)
+		}
+	}
+	frameAfter(e, &protocol.Frame{Seq: 10, Acked: 2, HasAcked: true}, []string{"abc"})
+	if e.unconfirmed() != 0 {
+		t.Fatalf("frame 10 built after ack 2: unconfirmed %d", e.unconfirmed())
 	}
 }
 

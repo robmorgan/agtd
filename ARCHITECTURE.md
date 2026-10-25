@@ -1126,7 +1126,12 @@ least 4 ms after the last, on the owner goroutine at a sequence boundary. At mos
 in flight per attachment (one would make a change landing just after a frame wait a whole round
 trip, and a shell echoes a typed word in several writes): a slow link gets fewer, fresher frames,
 never a queue of stale output and never a drop, and the worker keeps one screen's worth of row
-cache per attachment and nothing else. `agt
+cache per attachment and nothing else. Two in flight allow two frames per round trip, 10 a second
+at 200 ms, so a client that asks for `attach-frame-window` gets a window the worker sizes from
+the minimum round trip it measures between a frame and its ack over the last 10 s: one frame per
+16 ms of it, plus one, between 2 and 16 (`frameRTT` in `internal/worker/frames.go`). The minimum
+and not the mean, since queueing delay raises the mean and a window grown from it would queue
+more. `agt
 attach` asks for frames from a remote daemon and takes the raw output from the local one (`[attach]
 mode`, "auto"; "frames" or "raw" force it), and `agt bench echo --mode` measures either.
 
@@ -1146,9 +1151,11 @@ has an echo) and either the program has settled (`fieldSettle`) or the client ty
 500 ms, so keys typed during a streaming answer are still confirmed. The echo composes over frames:
 while keys are unconfirmed its predicted rows are painted after each frame's rows, and the frame's
 field reconciles the queue, so output is never held and the screen behind the typing keeps moving.
-A frame's field is not an answer to a probe, so what it proves comes from the window: the worker
-reads requests in order and builds frame N only after reading the ack of frame N-2
-(`protocol.FrameWindow`), so frame N shows every key the client sent before that ack. Only those
+A frame's field is not an answer to a probe, so what it proves comes from the ack it was built
+after: the worker reads requests in order, and under `attach-frame-window` each frame carries
+`Acked`, the last ack the worker had read when it built it; without it the window is 2, so frame N
+was built after reading the ack of frame N-2 (`protocol.FrameWindow`). Either way the frame shows
+every key the client sent before that ack. Only those
 keys can be confirmed by it. A field that equals only a later prediction may or may not show it
 and is ignored, and so is a frame built before an unpredicted key or a resize could reach the
 worker; the field is then asked for again, and each ask makes a frame, so a frame past both bounds
@@ -1215,7 +1222,8 @@ repaints from a snapshot anyway. If output keeps arriving faster than the client
 a resync each time it drains, which keeps it as current as its link allows. A frame client
 (`attach-frames`, see "Screen frames") has no queue to overflow: it is sent one frame at a time
 and the next is built from the screen as it is once all but the newest are acknowledged, so it
-falls behind by at most two frames and is never dropped or resynced; one that stops reading
+falls behind by at most its window (2, or up to 16 under `attach-frame-window`) and is never
+dropped or resynced; one that stops reading
 altogether leaves the worker blocked writing a frame to it with nothing queued behind, and is
 released when its connection goes (`TestStalledFrameClientIsBounded`: 67 MB through the PTY with
 the worker's heap flat). A raw client that stalls
