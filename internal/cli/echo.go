@@ -808,7 +808,7 @@ func (e *echo) fieldAnswer(f *protocol.Field) (send, paint []byte) {
 }
 
 // frameField takes the field in a frame the worker built after reading
-// the ack of frame acked (frameAckedBy), so it shows the keys sent before
+// the ack of frame acked (Frame.AckedBy), so it shows the keys sent before
 // that ack: those can confirm a prediction, and a field from before an
 // unpredicted key or a resize is ignored.
 //
@@ -840,17 +840,6 @@ func (e *echo) frameField(f *protocol.Field, acked uint32) (send, paint []byte) 
 		return nil, nil
 	}
 	return e.reconcile(f)
-}
-
-// frameAckedBy is the last ack the worker had read when it built f: the
-// frame says so under CapAttachFrameWindow; otherwise the window is
-// protocol.FrameWindow, so it read the ack of f.Seq-FrameWindow or a later
-// one.
-func frameAckedBy(f *protocol.Frame) uint32 {
-	if f.HasAcked {
-		return f.Acked
-	}
-	return f.Seq - min(f.Seq, protocol.FrameWindow)
 }
 
 // frameAcked notes that frame seq was acknowledged.

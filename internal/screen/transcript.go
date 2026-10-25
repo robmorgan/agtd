@@ -47,6 +47,12 @@ func NewTranscript(max int) *Transcript { return &Transcript{max: max} }
 // Recorded is how many rows were ever recorded.
 func (t *Transcript) Recorded() int64 { return t.mark }
 
+// Pos is the logical number of the last screen's top row.
+func (t *Transcript) Pos() int64 { return t.pos }
+
+// Oldest is the logical number of the oldest row the record still holds.
+func (t *Transcript) Oldest() int64 { return t.dropped }
+
 // Rows returns the recorded rows from logical row from on, as many as the
 // record still holds.
 func (t *Transcript) Rows(from int64) [][]byte {

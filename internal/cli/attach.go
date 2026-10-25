@@ -440,6 +440,9 @@ func (c *client) newPainterFor(attached *protocol.Attached) *screen.Painter {
 	p := screen.New()
 	if cfg, err := config.Load(c.paths.Config); err == nil && cfg.Attach.AltScrollback {
 		p.SetAltScrollback(altScrollbackRows)
+		if cfg.Attach.WheelPredicted() {
+			p.SetPredictScroll(c.latency())
+		}
 	}
 	return p
 }
@@ -502,6 +505,26 @@ func (c *client) runAttachment(id string, stream *attachStream, keys <-chan []by
 		}
 		return nil
 	}
+	// The wheel prediction's timer takes back a guess the agent has not
+	// answered (screen/predict.go); it is set after anything that may
+	// have drawn or answered one.
+	predictTimer := time.NewTimer(time.Hour)
+	predictTimer.Stop()
+	defer predictTimer.Stop()
+	schedulePredict := func() {
+		if painter == nil {
+			return
+		}
+		if !predictTimer.Stop() {
+			select {
+			case <-predictTimer.C:
+			default:
+			}
+		}
+		if due := painter.PredictDue(); !due.IsZero() {
+			predictTimer.Reset(max(time.Until(due), 0))
+		}
+	}
 	for {
 		// The overlay is drawn over the session's screen, which nothing
 		// else writes to while it is open, so it only changes after input
@@ -530,6 +553,10 @@ func (c *client) runAttachment(id string, stream *attachStream, keys <-chan []by
 			for _, action := range parser.push(chunk) {
 				switch action.kind {
 				case actionData:
+					if painter != nil {
+						writeOut(painter.Wheel(action.data))
+						schedulePredict()
+					}
 					if err := sendInput(action.data); err != nil {
 						return attachResult{}, err
 					}
@@ -588,6 +615,12 @@ func (c *client) runAttachment(id string, stream *attachStream, keys <-chan []by
 			if err != nil || done {
 				return res, err
 			}
+			schedulePredict()
+		case <-predictTimer.C:
+			if paint := painter.PredictExpire(); ov == nil {
+				writeOut(paint)
+			}
+			schedulePredict()
 		}
 	}
 }
@@ -845,7 +878,7 @@ func paintFrame(fr *protocol.Frame, painter *screen.Painter, ech *echo, stream *
 	var send, overlay []byte
 	if ech != nil {
 		if fr.Field != nil {
-			send, _ = ech.frameField(fr.Field, frameAckedBy(fr))
+			send, _ = ech.frameField(fr.Field, fr.AckedBy())
 		}
 		overlay = ech.overlay()
 	}
@@ -955,7 +988,7 @@ func restoreSnapshot(stream *attachStream, size *protocol.SizeOwnership, ech *ec
 				return nil, nil, errors.New("unexpected screen frame")
 			}
 			if ech != nil && fr.Field != nil {
-				ech.frameField(fr.Field, frameAckedBy(fr))
+				ech.frameField(fr.Field, fr.AckedBy())
 			}
 			if err := ackFrame(stream, fr.Seq, ech, painter); err != nil {
 				return nil, nil, err

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"agtd.sh/internal/protocol"
 )
@@ -53,6 +54,12 @@ type Painter struct {
 	altMax        int
 	alt           *Transcript
 	altEnd        int
+	// pr is the wheel prediction (predict.go), and shown what the
+	// terminal shows when a guess is drawn over the agent's screen (nil
+	// when it shows rows as they are).
+	pr    wheelPredict
+	shown [][]byte
+	clock func() time.Time
 }
 
 // SetAltScrollback turns on scrollback for programs on the alternate
@@ -84,6 +91,9 @@ func (p *Painter) Leave() []byte {
 // a synchronized-output block, at half a repaint, is skipped.
 func (p *Painter) altFrame(f *protocol.Frame) *protocol.Frame {
 	if !f.Alternate {
+		if p.alt != nil {
+			p.resetPredict()
+		}
 		p.alt, p.altEnd = nil, 0
 		return f
 	}
@@ -110,7 +120,9 @@ func (p *Painter) altFrame(f *protocol.Frame) *protocol.Frame {
 	if modes["?2026"] {
 		return f
 	}
+	pos, jumps := p.alt.Pos(), p.alt.Jumps
 	out := p.alt.Update(cur, p.altEnd)
+	p.observe(cur, p.alt.Pos()-pos, p.alt.Jumps != jumps, f)
 	if len(out) == 0 {
 		return f
 	}
@@ -136,6 +148,7 @@ func New() *Painter { return &Painter{} }
 // them again.
 func (p *Painter) Reset() {
 	p.rows, p.seq, p.painted = nil, 0, false
+	p.resetPredict()
 	for _, m := range mouseModes {
 		delete(p.modes, m)
 	}
@@ -173,6 +186,15 @@ func (p *Painter) Apply(f *protocol.Frame, overlay []byte) []byte {
 	resized := p.painted && (cols != p.cols || lines != p.lines)
 	if f.Full || resized || len(p.rows) != lines {
 		p.rows = make([][]byte, lines)
+		if p.shown != nil || resized {
+			p.resetPredict()
+		}
+	}
+	// written are the rows this frame writes, while a guess is drawn
+	// over the rows it leaves.
+	var written []bool
+	if p.shown != nil {
+		written = make([]bool, lines)
 	}
 	p.cols, p.lines = cols, lines
 	if len(f.Prefix) > 0 {
@@ -220,6 +242,12 @@ func (p *Painter) Apply(f *protocol.Frame, overlay []byte) []byte {
 		if k >= lines || f.Full {
 			p.rows = make([][]byte, lines)
 		} else {
+			if p.shown != nil {
+				copy(p.shown, p.shown[k:])
+				for i := lines - k; i < lines; i++ {
+					p.shown[i] = nil
+				}
+			}
 			copy(p.rows, p.rows[k:])
 			for i := lines - k; i < lines; i++ {
 				p.rows[i] = nil
@@ -234,6 +262,12 @@ func (p *Painter) Apply(f *protocol.Frame, overlay []byte) []byte {
 		b.WriteString(cup(y, 0) + rowStart)
 		b.Write(r.VT)
 		p.rows[y] = r.VT
+		if written != nil {
+			written[y] = true
+		}
+	}
+	if p.shown != nil || p.pr.debt != 0 || p.pr.settled {
+		p.reconcileShown(&b, written)
 	}
 	b.Write(f.Keyboard)
 	b.Write(f.Colors)

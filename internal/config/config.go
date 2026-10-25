@@ -51,7 +51,14 @@ type AttachConfig struct {
 	// program on the alternate screen. See
 	// docs/designs/alt-screen-scrollback.md.
 	AltScrollback bool `toml:"alt_scrollback"`
+	// PredictWheel, under AltScrollback, draws a wheel tick over the
+	// agent's transcript at once, and lets the agent's frames correct it.
+	// Unset means on.
+	PredictWheel *bool `toml:"predict_wheel"`
 }
+
+// WheelPredicted is PredictWheel with its default applied.
+func (a AttachConfig) WheelPredicted() bool { return a.PredictWheel == nil || *a.PredictWheel }
 
 // AttachMode is Mode with its default applied.
 func (a AttachConfig) AttachMode() string {
@@ -179,6 +186,9 @@ mode = "auto"
 # the top of its transcript into this terminal's own scrollback. A
 # prototype: it applies to every program on the alternate screen.
 alt_scrollback = false
+# Under alt_scrollback, the wheel over the agent's transcript scrolls it at
+# once, and the agent's own screen corrects the guess when it arrives.
+#predict_wheel = true
 
 # Typing in "agt attach" is drawn in the agent's own input field at once
 # and sent as typed, batched for at most flush_after ("0" sends every key

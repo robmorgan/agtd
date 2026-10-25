@@ -1165,7 +1165,7 @@ func framesEcho(t *testing.T, rows []string) (*echo, time.Time) {
 	t.Helper()
 	e, now := fixedClockEcho(echoFlushAfter)
 	e.frames = true
-	e.frameField(claudeField(rows), frameAckedBy(&protocol.Frame{Seq: 1}))
+	e.frameField(claudeField(rows), (&protocol.Frame{Seq: 1}).AckedBy())
 	e.frameAcked(1)
 	if !e.active() {
 		t.Fatal("the first frame's field did not start the echo")
@@ -1183,7 +1183,7 @@ func frameWith(e *echo, seq uint32, rows []string) (send []byte) {
 // frameAfter is frameWith for a frame that may say which ack it was
 // built after (CapAttachFrameWindow).
 func frameAfter(e *echo, f *protocol.Frame, rows []string) (send []byte) {
-	send, _ = e.frameField(claudeField(rows), frameAckedBy(f))
+	send, _ = e.frameField(claudeField(rows), f.AckedBy())
 	e.frameAcked(f.Seq)
 	return send
 }

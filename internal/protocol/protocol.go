@@ -338,6 +338,16 @@ type Frame struct {
 	Rows []FrameRow
 }
 
+// AckedBy is the last ack the worker had read when it built f: Acked
+// under CapAttachFrameWindow, otherwise derived from the fixed window,
+// FrameWindow (it read the ack of Seq-FrameWindow or a later one).
+func (f *Frame) AckedBy() uint32 {
+	if f.HasAcked {
+		return f.Acked
+	}
+	return f.Seq - min(f.Seq, FrameWindow)
+}
+
 // FrameRow is one row of a Frame.
 type FrameRow struct {
 	Index uint16

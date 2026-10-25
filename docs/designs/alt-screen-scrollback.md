@@ -353,7 +353,24 @@ logged out on the recording machine.
     What a wrong guess costs is one visible jump to the agent's real viewport, a round trip after
     the tick. The open risk is how Claude Code draws a scrolled-up view (a "new messages" marker,
     rewrapping); the `claude-scroll` fixture measures it: every predicted screen is compared with
-    the frame that answers it, and the target is no corrections there.
+    the frame that answers it.
+
+    Built 2026-10-25 (`internal/screen/predict.go`, `[attach] predict_wheel`, on under
+    `alt_scrollback`). Over the fixture's 79 wheel ticks, one repaint each
+    (`TestFramesPredictWheelClaudeScroll`): 78 guessed, 1 taken back (Claude Code moved two rows
+    for one tick), and 58 of about 2,650 rows drawn corrected by the frame that answered, all at
+    the top edge; four ticks to a frame: 75 guessed, 1 taken back, 37 rows. Claude Code moved one
+    row per tick. What the fixture showed about its scrolled view:
+
+    * It draws a "Jump to bottom (click) ↓" over the transcript's last row while scrolled up. The
+      guess learns it as chrome (a row moved from the agent's screen that came out wrong in two
+      guesses in a row is pinned) and leaves it as drawn.
+    * Its view scrolled back is not the transcript as it streamed: a finished tool's output is
+      collapsed ("… +27 lines"), and the top row is often left blank. So the rows the record holds
+      are a different rendering from the one scrolled back to, and the guess fills a row from the
+      rows as last seen in the agent's own view first (`seen`, a bounded copy of 2,000 rows each
+      side, decision 11), the record only for rows not seen yet. The top row or two of a tick into
+      unseen territory are the corrections above.
 
     A local view of agt's own (tmux's copy mode) stays rejected: a viewport the agent does not know
     about, with search and selection to build, against the rule that agt draws nothing the agent
