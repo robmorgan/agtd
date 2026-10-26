@@ -82,6 +82,29 @@ func TestRequestTokenGoldenFrames(t *testing.T) {
 	}
 }
 
+// A kill or remove can name the incarnation it means (CapKillExpectUID):
+// the UID follows the token.
+func TestKillExpectUIDGoldenFrames(t *testing.T) {
+	assertGoldenWith(t, featuresOf(CapRequestTokens, CapKillExpectUID), &Request{KillSession: &KillSession{SessionID: "ab", Remove: true, Token: "t", ExpectUID: "u"}}, nil, []byte{
+		0x50, 0x44, 0x47, 0x41, 0x01, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x11, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x61, 0x62, 0x01,
+		0x01, 0x00, 0x00, 0x00, 't', // token
+		0x01, 0x00, 0x00, 0x00, 'u', // expected uid
+	})
+	assertGoldenWith(t, featuresOf(CapKillExpectUID), &Request{KillSession: &KillSession{SessionID: "ab", ExpectUID: "u"}}, nil, []byte{
+		0x50, 0x44, 0x47, 0x41, 0x01, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x0c, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x61, 0x62, 0x00,
+		0x01, 0x00, 0x00, 0x00, 'u', // expected uid
+	})
+	// Without the capability the UID is not sent, and the frame is the one
+	// an older peer reads.
+	var buf bytes.Buffer
+	WriteRequest(&buf, &Request{KillSession: &KillSession{SessionID: "ab", ExpectUID: "u"}})
+	if bytes.Contains(buf.Bytes()[16:], []byte("u")) {
+		t.Fatalf("uid sent without the capability: % x", buf.Bytes())
+	}
+}
+
 func TestSessionUIDGoldenFrames(t *testing.T) {
 	f := featuresOf(CapSessionUID)
 	assertGoldenWith(t, f, nil, &Response{CreateSession: &session.CreateResult{SessionID: "ab", UID: "u", Cwd: "/w", Status: session.StatusRunning, Mode: session.ModePlan}}, []byte{
@@ -192,6 +215,12 @@ func TestRequestTokensAndDigests(t *testing.T) {
 	other, _ := (&Request{KillSession: &KillSession{SessionID: "b", Remove: true}}).Digest()
 	if other == before {
 		t.Fatal("different requests share a digest")
+	}
+	// A kill of another incarnation is another request, even on a
+	// connection that did not negotiate ExpectUID.
+	newer, _ := (&Request{KillSession: &KillSession{SessionID: "a", Remove: true, ExpectUID: "2"}}).Digest()
+	if newer == before {
+		t.Fatal("kills of different incarnations share a digest")
 	}
 	for _, req := range []*Request{{ListSessions: Empty}, {SendInput: &SendInput{}}, {AttachSession: &AttachSession{}}} {
 		if req.TokenSlot() != nil {

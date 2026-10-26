@@ -461,14 +461,19 @@ func (s *Server) waitWorkerReady(id string, cmd *exec.Cmd, exited <-chan struct{
 
 // killSession stops a live session through its worker, which stops the
 // agent's process group gracefully, and with remove deletes its record and
-// logs.
-func (s *Server) killSession(id string, remove bool) (*protocol.KillSessionResult, error) {
+// logs. A non-empty expectUID must be the session's current incarnation.
+func (s *Server) killSession(id string, remove bool, expectUID string) (*protocol.KillSessionResult, error) {
 	rec, err := s.getSession(id)
 	if err != nil {
 		return nil, err
 	}
 	if rec == nil {
 		return nil, fmt.Errorf("session `%s` not found", id)
+	}
+	if expectUID != "" && rec.UID != expectUID {
+		// The inbox says the same for a daemon without this check
+		// (checkIncarnation in internal/cli/inbox.go).
+		return nil, fmt.Errorf("session `%s` is not the session you chose: it was removed and a new session was started under the same name", id)
 	}
 	state, probeErr := s.workerState(id)
 	if rec.Status == session.StatusRunning && state == workerUnknown {

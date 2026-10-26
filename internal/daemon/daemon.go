@@ -632,7 +632,7 @@ func (s *Server) respond(req *protocol.Request, f protocol.Features) (resp *prot
 	case req.KillSession != nil:
 		k := req.KillSession
 		return once(func() *protocol.Response {
-			result, err := s.killSession(k.SessionID, k.Remove)
+			result, err := s.killSession(k.SessionID, k.Remove, k.ExpectUID)
 			if err != nil {
 				return protocol.ErrorResponsef("%v", err)
 			}
