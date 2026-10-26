@@ -27,7 +27,8 @@ reattach hours later seeds that scrollback with the transcript so far.
 
 A Claude Code session has no scrollback, locally or remotely. Claude Code 2.1.302 and Codex
 0.160.0 run on the alternate screen (`smooth-remote-attach.md`, "What the three agents actually
-draw"); pi does in its full-screen mode. Claude Code's first bytes are
+draw"); so does pi 1.x in its full-screen mode, its default (`tuiMode`; pi 0.7x printed inline on
+the primary screen). Claude Code's first bytes are
 
 ```text
 ESC 7  ESC [r  ESC 8  ESC [?25h  ESC [?2004h  ESC [?2031h  ESC [?1004h  OSC 0;✳ Claude Code
