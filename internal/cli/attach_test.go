@@ -97,7 +97,7 @@ func TestFormatSessionEnd(t *testing.T) {
 }
 
 func TestOverlayKeys(t *testing.T) {
-	o := newOverlay(testClient(t), "alpha", nil)
+	o := newOverlay(testClient(t), "alpha", nil, nil)
 	if out, err := o.handle(keyEvent{code: keyChar, r: 'y', mods: modCtrl}); err != nil || out.kind != overlayStay {
 		t.Fatalf("ctrl-y: %+v %v", out, err)
 	}
@@ -134,7 +134,7 @@ func TestOverlayKeys(t *testing.T) {
 }
 
 func TestOverlayDraws(t *testing.T) {
-	o := newOverlay(testClient(t), "alpha", nil)
+	o := newOverlay(testClient(t), "alpha", nil, nil)
 	o.sessions = []session.Record{demo("alpha"), demo("beta")}
 	body := o.body(60, 20)
 	if got := stripANSI(body[1].render(60, o.theme)); !strings.HasPrefix(got, " Commands ") || !strings.Contains(got, "/alpha  ") || strings.Contains(got, "╱") {
@@ -204,15 +204,15 @@ func TestOverlayTakeSize(t *testing.T) {
 		}
 		return out
 	}
-	if got := titles(newOverlay(testClient(t), "alpha", nil)); slices.Contains(got, takeSizeItem.title) {
+	if got := titles(newOverlay(testClient(t), "alpha", nil, nil)); slices.Contains(got, takeSizeItem.title) {
 		t.Fatalf("take-size offered without size ownership: %v", got)
 	}
 	owner := &protocol.SizeOwnership{Owner: true, OwnerID: "attach-1"}
-	if got := titles(newOverlay(testClient(t), "alpha", owner)); slices.Contains(got, takeSizeItem.title) {
+	if got := titles(newOverlay(testClient(t), "alpha", owner, nil)); slices.Contains(got, takeSizeItem.title) {
 		t.Fatalf("take-size offered to the owner: %v", got)
 	}
 	pending := &protocol.SizeOwnership{OwnerID: "attach-1", Geometry: protocol.Geometry{Cols: 100, Rows: 30}}
-	o := newOverlay(testClient(t), "alpha", pending)
+	o := newOverlay(testClient(t), "alpha", pending, nil)
 	for _, r := range "take" {
 		o.handle(char(r))
 	}

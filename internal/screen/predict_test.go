@@ -303,3 +303,26 @@ func TestWheelTicks(t *testing.T) {
 		}
 	}
 }
+
+// The backdrop is the screen as shown, a guess included, while the
+// terminal is on its primary screen, and nothing on the alternate one.
+func TestBackdrop(t *testing.T) {
+	if New().Backdrop() != nil {
+		t.Fatal("a backdrop before anything was painted")
+	}
+	r := started(t)
+	b := r.p.Backdrop()
+	if !bytes.Contains(b, []byte("line 20")) || !bytes.Contains(b, []byte("status")) {
+		t.Fatalf("backdrop %q", b)
+	}
+	r.p.Wheel(wheelUp())
+	if b := r.p.Backdrop(); !bytes.Contains(b, []byte("line 19")) {
+		t.Fatalf("backdrop under a guess %q", b)
+	}
+	p := New()
+	p.Apply(&protocol.Frame{Seq: 1, Full: true, Alternate: true, Cols: 20, Lines: 2, Prefix: []byte("\x1b[?1049h"),
+		Rows: []protocol.FrameRow{{Index: 0, VT: []byte("x")}}}, nil)
+	if b := p.Backdrop(); b != nil {
+		t.Fatalf("a backdrop on the alternate screen: %q", b)
+	}
+}

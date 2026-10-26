@@ -480,6 +480,13 @@ func (c *client) attachScrollbackRows() int {
 // worker's answers about the input field.
 func (c *client) runAttachment(id string, stream *attachStream, keys <-chan []byte, parser *attachParser, winch, quit <-chan os.Signal, size *protocol.SizeOwnership, ech *echo, painter *screen.Painter) (attachResult, error) {
 	var ov *overlay
+	// An attachment that ends with the overlay open (a switch, the
+	// session's end) leaves the alternate screen the overlay drew on.
+	defer func() {
+		if ov != nil {
+			writeOut(ov.leave())
+		}
+	}()
 	redraw := false
 	// sendInput writes typed bytes to the stream, through the echo when
 	// there is one (which may hold them back for a moment, and draw).
@@ -567,7 +574,11 @@ func (c *client) runAttachment(id string, stream *attachStream, keys <-chan []by
 					if err := flushEcho(); err != nil {
 						return attachResult{}, err
 					}
-					ov = newOverlay(c, id, size)
+					var backdrop []byte
+					if painter != nil {
+						backdrop = painter.Backdrop()
+					}
+					ov = newOverlay(c, id, size, backdrop)
 					if err := ov.open(); err != nil {
 						return attachResult{}, err
 					}
@@ -604,6 +615,9 @@ func (c *client) runAttachment(id string, stream *attachStream, keys <-chan []by
 			return attachResult{outcome: outcomeDetached}, nil
 		case <-winch:
 			redraw = true
+			if ov != nil {
+				ov.resized()
+			}
 			if ech != nil {
 				ech.resized()
 			}
@@ -920,9 +934,9 @@ func (c *client) overlayInput(ov *overlay, chunk []byte, stream *attachStream, s
 			if err := stream.send(&protocol.Request{AttachTakeSize: &protocol.Geometry{Cols: cols, Rows: rows, PixelWidth: pw, PixelHeight: ph}}); err != nil {
 				return nil, false, err
 			}
-			return closeOverlay(stream, size, ech, painter)
+			return closeOverlay(ov, stream, size, ech, painter)
 		case overlayClose:
-			return closeOverlay(stream, size, ech, painter)
+			return closeOverlay(ov, stream, size, ech, painter)
 		case overlaySubmit:
 			// Enter goes on the attach stream, behind the keys the echo
 			// sent when the overlay opened. The worker encodes it for
@@ -943,7 +957,7 @@ func (c *client) overlayInput(ov *overlay, chunk []byte, stream *attachStream, s
 				return &attachResult{outcome: outcomeSwitch, next: next}, false, nil
 			}
 			// Nothing else needs attention: stay, and watch the answer.
-			return closeOverlay(stream, size, ech, painter)
+			return closeOverlay(ov, stream, size, ech, painter)
 		case overlaySwitch:
 			return &attachResult{outcome: outcomeSwitch, next: out.session}, false, nil
 		}
@@ -952,7 +966,8 @@ func (c *client) overlayInput(ov *overlay, chunk []byte, stream *attachStream, s
 }
 
 // closeOverlay restores the session's screen once the overlay has closed.
-func closeOverlay(stream *attachStream, size *protocol.SizeOwnership, ech *echo, painter *screen.Painter) (*attachResult, bool, error) {
+func closeOverlay(ov *overlay, stream *attachStream, size *protocol.SizeOwnership, ech *echo, painter *screen.Painter) (*attachResult, bool, error) {
+	writeOut(ov.leave())
 	restored, ended, err := restoreSnapshot(stream, size, ech, painter)
 	if err != nil {
 		return nil, false, err

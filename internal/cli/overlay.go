@@ -109,13 +109,25 @@ type overlay struct {
 	// latency is the round trip to the attached session's host, or 0 for
 	// the local daemon.
 	latency func() time.Duration
+	// backdrop is the session's screen, when the terminal was on its
+	// primary screen as the overlay opened: the overlay is then drawn on
+	// the alternate screen over this copy, since the terminal's view of
+	// the primary screen scrolls (with the wheel, into the session's
+	// scrollback) and would carry the overlay with it. Nil otherwise.
+	backdrop []byte
+	// repaintBackdrop is whether the next draw paints the backdrop first.
+	repaintBackdrop bool
 }
 
-func newOverlay(c *client, id string, size *protocol.SizeOwnership) *overlay {
-	return &overlay{c: c, session: id, size: size, theme: overlayThemeFor(os.Getenv), now: time.Now, latency: c.latency}
+func newOverlay(c *client, id string, size *protocol.SizeOwnership, backdrop []byte) *overlay {
+	return &overlay{c: c, session: id, size: size, theme: overlayThemeFor(os.Getenv), now: time.Now, latency: c.latency, backdrop: backdrop}
 }
 
 func (o *overlay) open() error {
+	if o.backdrop != nil {
+		writeOut([]byte("\x1b[?1049h"))
+		o.repaintBackdrop = true
+	}
 	o.mode = overlayPalette
 	o.paletteQuery, o.paletteSelected = "", 0
 	o.switcherQuery, o.switcherSelected = "", 0
@@ -123,6 +135,19 @@ func (o *overlay) open() error {
 	o.draw()
 	return o.refresh()
 }
+
+// leave is what to write as the overlay closes, before the session's
+// screen is restored: the return from the alternate screen it opened on.
+func (o *overlay) leave() []byte {
+	if o.backdrop == nil {
+		return nil
+	}
+	return []byte("\x1b[?1049l")
+}
+
+// resized repaints the backdrop with the next draw, which a resize of the
+// alternate screen may have cut or cleared.
+func (o *overlay) resized() { o.repaintBackdrop = o.backdrop != nil }
 
 func (o *overlay) refresh() error {
 	sessions, err := o.c.listSessions(o.c.requestTimeout())
@@ -800,6 +825,10 @@ func (o *overlay) sessionIcon(row displayRow) (string, string) {
 // draw paints the overlay over the session's screen, all of it every time.
 // The cursor stays hidden while the overlay is open.
 func (o *overlay) draw() {
+	if o.repaintBackdrop {
+		writeOut(append([]byte("\x1b[2J"), o.backdrop...))
+		o.repaintBackdrop = false
+	}
 	cols, rows, _, _ := terminalGeometry()
 	x, y, w, h := overlayRect(int(cols), int(rows))
 	if w < 8 || h < 8 {
