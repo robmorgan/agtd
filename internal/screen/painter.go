@@ -11,8 +11,11 @@ import (
 	"bytes"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/rivo/uniseg"
 
 	"agtd.sh/internal/protocol"
 )
@@ -144,22 +147,126 @@ func (p *Painter) altFrame(f *protocol.Frame) *protocol.Frame {
 	return &g
 }
 
-// Backdrop paints the screen as last shown, for a view drawn over it (the
-// attach overlay), which wraps it in its own synchronized update. It is
-// nil when there is nothing painted.
-func (p *Painter) Backdrop() []byte {
+// Painted reports whether a frame has been painted.
+func (p *Painter) Painted() bool { return p.painted }
+
+// Backdrop paints the screen as last shown into a terminal of cols by
+// lines, for a view drawn over it (the attach overlay), which wraps it in
+// its own synchronized update. A screen bigger than the terminal, before
+// the frames at a new size arrive, is cut to fit: its bottom rows, where
+// an agent keeps its input box, and each row's first cols cells. It is nil
+// when there is nothing painted.
+func (p *Painter) Backdrop(cols, lines int) []byte {
 	if !p.painted {
 		return nil
 	}
 	var b bytes.Buffer
-	for y, row := range p.rows {
+	top := max(len(p.rows)-lines, 0)
+	for y := top; y < len(p.rows); y++ {
+		row := p.rows[y]
 		if p.shown != nil && y < len(p.shown) {
 			row = p.shown[y]
 		}
-		b.WriteString(cup(y, 0) + rowStart)
+		if p.cols > cols {
+			row = cropRow(row, cols)
+		}
+		b.WriteString(cup(y-top, 0) + rowStart)
 		b.Write(row)
 	}
 	return b.Bytes()
+}
+
+// cropRow cuts a row's VT to its first cols cells, keeping the escapes
+// (colours, links) before the cut, and ends what they left open.
+func cropRow(row []byte, cols int) []byte {
+	var out []byte
+	col, link := 0, false
+	end := func() []byte {
+		out = append(out, "\x1b[0m"...)
+		if link {
+			out = append(out, "\x1b]8;;\x1b\\"...)
+		}
+		return out
+	}
+	for i := 0; i < len(row); {
+		if row[i] == 0x1b {
+			seq := row[i : i+escapeLen(row[i:])]
+			if n, ok := cufCount(seq); ok {
+				if col+n >= cols {
+					return end()
+				}
+				col += n
+			}
+			if bytes.HasPrefix(seq, []byte("\x1b]8;")) {
+				// OSC 8 ; params ; URI: an empty URI ends the link.
+				uri := bytes.TrimRight(seq[bytes.IndexByte(seq[4:], ';')+5:], "\x07\x1b\\")
+				link = len(uri) > 0
+			}
+			out = append(out, seq...)
+			i += len(seq)
+			continue
+		}
+		j := i
+		for j < len(row) && row[j] != 0x1b {
+			j++
+		}
+		g := uniseg.NewGraphemes(string(row[i:j]))
+		for g.Next() {
+			w := max(g.Width(), 1)
+			if col+w > cols {
+				return end()
+			}
+			out = append(out, g.Str()...)
+			col += w
+		}
+		i = j
+	}
+	return out
+}
+
+// escapeLen is the length of the escape sequence at the start of b: a CSI
+// up to its final byte, an OSC, DCS, APC or PM up to its terminator, or
+// ESC and one byte.
+func escapeLen(b []byte) int {
+	if len(b) < 2 {
+		return len(b)
+	}
+	switch b[1] {
+	case '[':
+		for i := 2; i < len(b); i++ {
+			if b[i] >= 0x40 && b[i] <= 0x7e {
+				return i + 1
+			}
+		}
+	case ']', 'P', '_', '^':
+		for i := 2; i < len(b); i++ {
+			if b[i] == 0x07 {
+				return i + 1
+			}
+			if b[i] == 0x1b && i+1 < len(b) && b[i+1] == '\\' {
+				return i + 2
+			}
+		}
+	default:
+		return 2
+	}
+	return len(b)
+}
+
+// cufCount reads a cursor-forward sequence (CSI n C), which the formatter
+// writes for a run of empty cells.
+func cufCount(seq []byte) (int, bool) {
+	if len(seq) < 3 || seq[1] != '[' || seq[len(seq)-1] != 'C' {
+		return 0, false
+	}
+	if len(seq) == 3 {
+		return 1, true
+	}
+	n, err := strconv.Atoi(string(seq[2 : len(seq)-1]))
+	if err != nil {
+		return 0, false
+	}
+	return max(n, 1), true
 }
 
 // altModes are the modes that switch to the alternate screen.
@@ -174,9 +281,6 @@ func (p *Painter) AltScreen() bool {
 	}
 	return false
 }
-
-// Size is the size of the screen last painted.
-func (p *Painter) Size() (cols, lines int) { return p.cols, p.lines }
 
 // New makes a painter for a terminal that has just been cleared.
 func New() *Painter { return &Painter{} }

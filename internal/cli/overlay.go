@@ -127,7 +127,7 @@ type overlay struct {
 
 func newOverlay(c *client, id string, size *protocol.SizeOwnership, painter *screen.Painter) *overlay {
 	o := &overlay{c: c, session: id, size: size, theme: overlayThemeFor(os.Getenv), now: time.Now, latency: c.latency, painter: painter}
-	o.ownsAlt = painter != nil && painter.Backdrop() != nil && !painter.AltScreen()
+	o.ownsAlt = painter != nil && painter.Painted() && !painter.AltScreen()
 	return o
 }
 
@@ -154,7 +154,7 @@ func (o *overlay) leave() []byte {
 }
 
 // resized clears the terminal with the next draw, under the session's
-// screen if it fits; the frames at the new size follow.
+// screen cut to fit until the frames at the new size follow.
 func (o *overlay) resized() { o.clear, o.backdrop = true, true }
 
 // framed notes a frame the painter took while the overlay is open, and
@@ -855,12 +855,8 @@ func (o *overlay) draw() {
 	if o.clear {
 		b.WriteString("\x1b[2J")
 	}
-	// A screen wider or taller than the terminal would wrap or scroll
-	// it; it is left out until a frame that fits.
 	if o.backdrop && o.painter != nil {
-		if c, l := o.painter.Size(); c <= int(cols) && l <= int(rows) {
-			b.Write(o.painter.Backdrop())
-		}
+		b.Write(o.painter.Backdrop(int(cols), int(rows)))
 	}
 	o.clear, o.backdrop = false, false
 	x, y, w, h := overlayRect(int(cols), int(rows))

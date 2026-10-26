@@ -178,3 +178,44 @@ func TestPainterAltScrollback(t *testing.T) {
 		t.Fatalf("primary: %q, Leave %q", out, p.Leave())
 	}
 }
+
+// A screen bigger than the terminal it is painted into, before the frames
+// at the new size, keeps its bottom rows (the input box) and each row's
+// first cells.
+func TestBackdropCutsToFit(t *testing.T) {
+	p := New()
+	p.Apply(&protocol.Frame{Seq: 1, Full: true, Cols: 12, Lines: 3, Rows: []protocol.FrameRow{
+		{Index: 0, VT: []byte("transcript")},
+		{Index: 1, VT: []byte("────────────")},
+		{Index: 2, VT: []byte("> typed text")},
+	}}, nil)
+	got := string(p.Backdrop(5, 2))
+	want := cup(0, 0) + rowStart + "─────\x1b[0m" + cup(1, 0) + rowStart + "> typ\x1b[0m"
+	if got != want {
+		t.Fatalf("backdrop %q, want %q", got, want)
+	}
+	if got := string(p.Backdrop(12, 3)); !strings.Contains(got, "transcript") || !strings.Contains(got, "> typed text") {
+		t.Fatalf("backdrop that fits %q", got)
+	}
+}
+
+func TestCropRow(t *testing.T) {
+	for _, c := range []struct{ row, want string }{
+		{"abc", "abc"},
+		{"abcdefgh", "abcd\x1b[0m"},
+		{"\x1b[1mab\x1b[0mcdef", "\x1b[1mab\x1b[0mcd\x1b[0m"},
+		// The formatter's empty cells.
+		{"a\x1b[2Cbcdef", "a\x1b[2Cb\x1b[0m"},
+		{"a\x1b[5Cb", "a\x1b[0m"},
+		// A wide character that would straddle the cut is left out.
+		{"abc世界", "abc\x1b[0m"},
+		{"ab世界", "ab世\x1b[0m"},
+		// A link open at the cut is ended.
+		{"\x1b]8;;https://x\x1b\\abcdef\x1b]8;;\x1b\\", "\x1b]8;;https://x\x1b\\abcd\x1b[0m\x1b]8;;\x1b\\"},
+		{"\x1b]8;;https://x\x1b\\ab\x1b]8;;\x1b\\cdef", "\x1b]8;;https://x\x1b\\ab\x1b]8;;\x1b\\cd\x1b[0m"},
+	} {
+		if got := string(cropRow([]byte(c.row), 4)); got != c.want {
+			t.Errorf("cropRow(%q) = %q, want %q", c.row, got, c.want)
+		}
+	}
+}

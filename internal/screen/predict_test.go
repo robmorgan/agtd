@@ -312,26 +312,23 @@ func TestWheelTicks(t *testing.T) {
 // The backdrop is the screen as shown, a guess included, while the
 // terminal is on its primary screen, and nothing on the alternate one.
 func TestBackdrop(t *testing.T) {
-	if New().Backdrop() != nil {
+	if New().Backdrop(20, 10) != nil {
 		t.Fatal("a backdrop before anything was painted")
 	}
 	r := started(t)
-	b := r.p.Backdrop()
+	b := r.p.Backdrop(20, 10)
 	if !bytes.Contains(b, []byte("line 20")) || !bytes.Contains(b, []byte("status")) {
 		t.Fatalf("backdrop %q", b)
 	}
 	r.p.Wheel(wheelUp())
-	if b := r.p.Backdrop(); !bytes.Contains(b, []byte("line 19")) {
+	if b := r.p.Backdrop(20, 10); !bytes.Contains(b, []byte("line 19")) {
 		t.Fatalf("backdrop under a guess %q", b)
 	}
 	p := New()
 	p.Apply(&protocol.Frame{Seq: 1, Full: true, Alternate: true, Cols: 20, Lines: 2, Prefix: []byte("\x1b[?1049h"),
 		Rows: []protocol.FrameRow{{Index: 0, VT: []byte("x")}}}, nil)
-	if b := p.Backdrop(); !p.AltScreen() || !bytes.Contains(b, []byte("x")) {
+	if b := p.Backdrop(20, 2); !p.AltScreen() || !bytes.Contains(b, []byte("x")) {
 		t.Fatalf("alternate %v, backdrop %q", p.AltScreen(), b)
-	}
-	if c, l := p.Size(); c != 20 || l != 2 {
-		t.Fatalf("size %dx%d", c, l)
 	}
 }
 
