@@ -118,7 +118,7 @@ const DefaultModelFlag = "--model"
 const preferredDefaultAgent = "claude"
 
 // builtinAgents are the agents configured when there is no config.toml, in
-// picker order. Each runs the command of the same name.
+// the agent chooser's order. Each runs the command of the same name.
 var builtinAgents = []string{"claude", "codex", "pi"}
 
 // detectDefaultAgent is the first built-in agent whose command is on PATH,

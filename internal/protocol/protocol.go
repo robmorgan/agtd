@@ -166,6 +166,11 @@ type KillSession struct {
 	Remove    bool
 	// Token (CapRequestTokens); see CreateSession.Token.
 	Token string
+	// ExpectUID (CapKillExpectUID) refuses the request unless the
+	// session's current incarnation has this UID, so a remove confirmed
+	// against one session never deletes a newer one that reused the name.
+	// Empty means any incarnation.
+	ExpectUID string
 }
 
 type Geometry struct {
@@ -828,6 +833,9 @@ func encodeRequest(req *Request, f Features) (kind, []byte, error) {
 		e.str(req.KillSession.SessionID)
 		e.bool(req.KillSession.Remove)
 		e.token(req.KillSession.Token)
+		if e.f.Has(CapKillExpectUID) {
+			e.str(req.KillSession.ExpectUID)
+		}
 		return kKillSessionRequest, e.buf, e.err
 	case req.AttachSession != nil:
 		a := req.AttachSession
@@ -980,6 +988,9 @@ func decodeRequest(k kind, payload []byte, f Features) (*Request, error) {
 	case kKillSessionRequest:
 		req.KillSession = &KillSession{SessionID: d.str(), Remove: d.bool()}
 		req.KillSession.Token = d.token()
+		if d.f.Has(CapKillExpectUID) {
+			req.KillSession.ExpectUID = d.str()
+		}
 	case kAttachSessionRequest:
 		a := &AttachSession{SessionID: d.str(), Kind: d.attachmentKind()}
 		a.Geometry = d.geometry()

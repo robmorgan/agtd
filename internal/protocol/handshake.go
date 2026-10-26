@@ -217,6 +217,9 @@ const (
 	// scripts, and AttachCompose on an attach stream, for the overlay's
 	// submit and switch. Empty text is Enter alone.
 	CapAttachCompose = "attach-compose"
+	// CapKillExpectUID: KillSession ends with ExpectUID, and the daemon
+	// refuses a kill or remove whose UID is not the session's current one.
+	CapKillExpectUID = "kill-expect-uid"
 )
 
 // GlobalSessionID identifies one incarnation of a session across every
@@ -238,7 +241,7 @@ const MinProtocolVersion uint16 = 1
 func Capabilities() []string {
 	return []string{CapControlStream, CapGitState, CapArtifacts, CapSessionUID, CapRequestTokens, CapAttachFeatures, CapAttachReplace, CapAttachResync, CapRuntimeStats,
 		CapEvents, CapSessionActivity, CapSessionStatus, CapDaemonID, CapSessionRestart, CapWorkerHandoff, CapTerminalMemory, CapAttachScrollback, CapAttachSizeOwner,
-		CapAttachField, CapTerminalColors, CapAttachFrames, CapAttachCompose}
+		CapAttachField, CapTerminalColors, CapAttachFrames, CapAttachCompose, CapKillExpectUID}
 }
 
 // AttachCapabilities are the capabilities that apply to an attach stream,
@@ -309,6 +312,9 @@ func NewHello(client string) *Hello {
 // of that message or struct, and encoders and decoders handle it only when
 // Features has the capability.
 type Features struct{ set map[string]bool }
+
+// digestFeatures are the optional fields Request.Digest covers.
+var digestFeatures = NegotiateFeatures([]string{CapKillExpectUID}, []string{CapKillExpectUID})
 
 // NegotiateFeatures is the features in both ours and theirs.
 func NegotiateFeatures(ours, theirs []string) Features {
@@ -422,9 +428,10 @@ func (r *Request) TokenSlot() *string {
 
 // Digest identifies what req asks for, without its token: two requests
 // with the same token must have the same digest, or the second is not a
-// retry of the first.
+// retry of the first. It includes the optional fields that change what a
+// request does (a kill's ExpectUID), whatever the connection negotiated.
 func (r *Request) Digest() (string, error) {
-	k, payload, err := encodeRequest(r, Features{})
+	k, payload, err := encodeRequest(r, digestFeatures)
 	if err != nil {
 		return "", err
 	}

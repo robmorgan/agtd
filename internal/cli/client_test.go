@@ -1,7 +1,10 @@
 package cli
 
 import (
+	"context"
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -137,5 +140,49 @@ func TestRemoteDaemonIsNeverManagedFromHere(t *testing.T) {
 	}
 	if err := c.prepareDaemon("info"); err != nil {
 		t.Errorf("info: %v", err)
+	}
+}
+
+// Value: protects=only an error after a request was written counts as sent, so a remove or create that never left is a certain failure; fails_when=requestSent ignores the wrapper or controlRequest drops it; why_new=controlRequest used to unwrap it; seam=none; no_claim=the transport's own errors
+// An error is "sent" only when it came after the request was written.
+func TestRequestSent(t *testing.T) {
+	cause := errors.New("connection lost")
+	for _, tc := range []struct {
+		err  error
+		want bool
+	}{
+		{cause, false},
+		{&sentError{cause}, true},
+		{fmt.Errorf("removing: %w", &sentError{cause}), true},
+	} {
+		if got := requestSent(tc.err); got != tc.want {
+			t.Errorf("requestSent(%v) = %v, want %v", tc.err, got, tc.want)
+		}
+	}
+}
+
+// Value: protects=a tokened request whose connection is lost for good after it was written reports itself as sent; fails_when=controlRequest's retry exits return a bare error; why_new=TestRequestSent only checks the helper; seam=none; no_claim=the backoff timing
+// A request with a token, sent and then never answered because the daemon
+// is gone, comes back as a sent error once its retries stop.
+func TestLostTokenedRequestIsSent(t *testing.T) {
+	f, c := newFakeRemote(t, protocol.Capabilities())
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.requestCtx(ctx, &protocol.Request{KillSession: &protocol.KillSession{SessionID: "demo", Remove: true}})
+		done <- err
+	}()
+	f.next()
+	f.mu.Lock()
+	f.listener.Close() // and never listens again
+	f.mu.Unlock()
+	select {
+	case err := <-done:
+		if err == nil || !requestSent(err) {
+			t.Fatalf("err = %v, sent %v", err, requestSent(err))
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the request did not give up")
 	}
 }

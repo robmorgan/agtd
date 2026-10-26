@@ -24,7 +24,7 @@ Both binaries are one Go module at the repository root.
 | Package | What it does |
 |---|---|
 | `cmd/agtd` | `serve [--daemonize]`, `upgrade`, `remote enable\|disable\|status` (set `[remote] listen` and restart the daemon), `remote pair\|id\|list\|authorize\|revoke`, `bench sessions` (`internal/bench`: measures sessions on a private daemon), `session-worker` (also `--handoff-probe` and `--resume-fd`, for live handoff). `upgrade` replaces the daemon, then hands running sessions' workers over to the new binary. The agt CLI runs `serve --daemonize`. |
-| `cmd/agt`, `internal/cli` | The `agt` CLI: commands, the session picker, attach and the Ctrl-Y overlay (plain ANSI), and `hosts.toml` for remote hosts. Pure Go: it never imports `worker`, `daemon` or `db`, and `cmd/agt`'s tests check that, then drive both real binaries through PTYs. |
+| `cmd/agt`, `internal/cli` | The `agt` CLI: commands, the inbox (bare `agt`), attach and the Ctrl-Y overlay (plain ANSI), and `hosts.toml` for remote hosts. Pure Go: it never imports `worker`, `daemon` or `db`, and `cmd/agt`'s tests check that, then drive both real binaries through PTYs. |
 | `internal/daemon` | `agtd serve`: lock/socket/pid file lifecycle, create/kill/rm/ls/get, attach and request proxies to workers, history, daemon management, worker supervision and startup reconciliation. Tests run the daemon in-process against real worker processes. |
 | `internal/worker` | One session: PTY via `creack/pty`, shadow terminal via `go.mitchellh.com/libghostty`, per-session Unix socket, activity and attention detection from the PTY stream, and live handoff to a new binary (`handoff.go`; OS-specific waits in `sys_linux.go`, `sys_darwin.go`). Real-PTY tests run under `-race`. |
 | `internal/repo` | Read-only views of the git repository a session works in, for the daemon: git state, the diff and patch artifacts. Runs the system `git`; tests use real temporary repositories. |
@@ -505,6 +505,7 @@ features both listed. Today there is one protocol version (1), and these capabil
 | `terminal-colors` | `CreateSession.Colors` and, on an attach stream, `AttachSession.Colors` carry the client terminal's default colours; the worker answers the program's OSC 10 and 11 queries with the most recent ones itself (see "Terminal queries") |
 | `attach-frames` | attach stream: the screen arrives as `AttachFrame`s instead of `PtyOutput`, each acknowledged with `AttachFrameAck`; `Attached.Snapshot` holds the scrollback rows only and `AttachSnapshot` is answered with a full frame (see "Screen frames") |
 | `attach-compose` | `SendInput.Compose` (written only when set, since the daemon forwards the request to the worker in the base encoding) and, on an attach stream, `AttachCompose`: a whole prompt, or Enter alone, encoded by the worker as the program's terminal modes ask for input (see "Composed input") |
+| `kill-expect-uid` | `KillSession.ExpectUID` appended after the token: the daemon refuses a stop or remove whose UID is not the session's current incarnation, so a remove confirmed in the inbox never deletes a newer session that reused the name |
 
 The protocol grows without breaking older peers this way: a new message kind, or a field appended
 to the end of an existing message or struct (a session record, even inside a list), comes with a
@@ -691,7 +692,7 @@ raises the attention to its level unless something more urgent is pending (an eq
 the summary; info events never change it). Lifecycle endings (exited, killed, failed, worker lost)
 replace the attention instead, since an agent that has stopped is no longer waiting for whatever it
 asked. Acknowledging resets the attention to info and records an `acknowledged` event, if there was
-anything to clear. Attaching interactively (`attach`, or focusing a session in the picker)
+anything to clear. Attaching interactively (`attach`, or Enter on a session in the inbox)
 acknowledges, and so does detaching from a session that is still running: either way the user has
 seen its screen. A reattach that replaces a lost attachment is the exception: the CLI reconnected
 by itself, no one looked, so attention raised while the connection was down stays pending. The
@@ -750,7 +751,7 @@ connection), subscribes again after it, so nothing is missed or repeated. `--not
 and asks the user's terminal for a desktop notification (OSC 9, or OSC 777 on VTE terminals, foot
 and urxvt; passed through tmux) for action-level events, and `--exec CMD` runs a command per event
 with the event in `AGTD_EVENT_*` variables: these are the task-level notifications, and they work
-the same against a remote host. `agt ls`, `agt status`, the picker and the Ctrl-Y overlay show
+the same against a remote host. `agt ls`, `agt status`, the inbox and the Ctrl-Y overlay show
 attention and activity, and order live sessions needing action first.
 
 ## Creating a Session
@@ -1054,7 +1055,7 @@ until then, below). What the decoder holds is bounded: an incomplete sequence go
 256 bytes or 50 ms with nothing following (Alt-[ in a legacy terminal is a lone ESC [), a
 bracketed paste over 64 KiB, or whose end is late, is forwarded as it arrives, unpredicted, and
 given up for good after another 50 ms without its end, and opening the overlay sends whatever the
-decoder holds. The overlay and the picker ignore a paste over 64 KiB. The drawing is a
+decoder holds. The overlay and the inbox ignore a paste over 64 KiB. The drawing is a
 prediction; the agent is the authority. The CLI keeps the states it predicted, each with its key,
 and an observed field that equals one of them, text and cursor (Left and Right change only the
 cursor), confirms the keys up to it, provided that key had been sent when the field was asked for
@@ -1171,7 +1172,8 @@ connection. The daemon answers a token it has seen with the original answer: a r
 returns the session it created (waiting for it to finish starting if need be), not "already
 exists"; a retried `kill` or `rm` returns what the first one did, not "not running" or "not found".
 A duplicate that arrives while the first is still running waits for it. A token reused for a
-different request is refused.
+different request is refused; a kill's `ExpectUID` counts as part of the request here whatever the
+connection negotiated, so one token never stands for kills of two incarnations.
 
 `CreateSession`'s token is stored on the session's row (`sessions.create_token`, unique), so a
 retry finds the session even across a daemon restart. The others are remembered in memory for 10
@@ -1253,6 +1255,69 @@ is what scripts can keep (`agt ls --json`, `agt status`).
 
 `agt --host auto new` is a placement hint, not a scheduler: among hosts that are online, have the
 agent and (with `--workspace`) the workspace, it picks the fewest running sessions per CPU.
+
+### The inbox
+
+Bare `agt` is the inbox (`internal/cli/inbox.go`): every session on this machine and on every host
+in `hosts.toml`, in one list drawn below the prompt, the ones that need you first. Rows are keyed by
+host and session UID, so the same name on two hosts is two rows and the selection follows its
+session through reorders. `agt --host NAME` shows that host alone and never starts or asks this
+machine's daemon; otherwise the inbox starts the local daemon as any command does, showing
+`local ◌ starting` until it answers.
+
+Hosts reach the inbox through a `hostSet` (`hosts.go`). One goroutine per host owns that host's
+client, keeping its connection and control stream open between probes, and probes it one probe at
+a time: every 200 ms for this machine's daemon, every 2 s for a remote one, and for a host that
+cannot be reached after a backoff from 2 s doubling to 30 s, which `r` resets. Each probe goes to
+the inbox as a new `hostProbe` the goroutine never touches again, on a channel that holds one per
+host, so a busy inbox only delays probing and nothing is shared. Stopping the set cancels every
+goroutine, closing its connections, and waits for them; the inbox stops it before attaching, so a
+probe never competes with an attachment.
+
+Actions never run on the inbox's goroutine. A remove (Tab, remove, confirmed on the line) runs on
+a goroutine of its own over a client of its own for the row's host, sends `KillSession` with
+`Remove` and the row's UID as `ExpectUID` (`kill-expect-uid`), and reports on a channel; the row
+reads `removing…` meanwhile and refuses a second action. A daemon without `kill-expect-uid` would
+remove by name, so the inbox first asks it for the session and refuses if its UID changed; a session
+replaced between that answer and the kill is still removed there. Creating a session runs the same
+way, and attaches to it when it is up. It creates on this machine, in the current directory; in a
+view locked to a remote host, `n` and the `+` row show the `agt new -C DIR host/NAME` to run instead.
+
+What the inbox tells the user is in two kinds. A notice (a success, or the answer to a key) passes
+after 10 s or at the next key. A failure (a refusal, or a lost answer, which says the result is
+unknown and asks that host again rather than guessing; an answer counts as lost only once the
+request was written; a local daemon that could not be started is one too) stays on screen until
+a key the user can see that comes at least 500 ms after it was first drawn on screen (a terminal
+too short for it does not count; a key already on its way does not clear it), and while any is unseen the inbox never leaves or attaches by itself. Quitting or
+attaching while an action runs waits for every action, saying what it waits for on a line of its
+own, and a second Esc leaves at once; a failure meanwhile cancels the leave, saying so when it was
+an attach. Leaving prints the failures the user has not seen and any action a second Esc
+abandoned in flight: at once when quitting, after the attachment ends when attaching (its first
+repaint would clear them). A row's menu closes when its actions change (its session exited, say), so
+the highlight never slides onto remove, and when the filter no longer shows the row. A remove
+confirmation takes Enter or y only once it has been on screen for 500 ms, so keys that arrive
+with or just after the one that opened it (key repeat, a burst queued over ssh) cannot confirm it
+unseen; while a terminal too short for it crops it, Enter says so. A menu is checked against the
+filter on every redraw, since time alone can change what it matches. Only a terminal that cannot be read or drawn ends the
+inbox.
+
+While the inbox is not on screen (before its first draw, or narrowed below 40 columns) keys and
+pastes do nothing, and acknowledge nothing, but Esc and Ctrl-C quit; the narrow notice says when an
+action failed or what a leave waits for. Pastes are bracketed (mode 2004) while the inbox runs, so a
+pasted Tab or line break is text in the filter. The key decoder holds a lone ESC for 50 ms in case
+it starts a sequence split across reads (a paste's start marker); a read that does not continue a
+sequence makes it Esc at once, and a single printable byte joins it as Alt and that key. A paste
+whose end does not come within 2 s of its start is given up, and the inbox then drops what follows
+up to the paste's end marker, until input is quiet for 2 s (10 s at most), so the rest of a stalled
+paste never acts as keys. (The overlay's decoder does not give up a paste.)
+
+The block is redrawn by moving the cursor up over the previous drawing, so it is capped at the
+terminal's height less one line (the list scrolls to keep the selection in view), every line is one
+cell narrower than the terminal so none wraps, and widths are measured in terminal cells
+(`uniseg`), so a wide character in a status message cannot wrap a row. Started below 40 columns, the
+inbox prints its own rows as `agt ls --all` does and exits; narrowed below 40 once open, it says so
+on one line until the terminal widens, and actions in flight still report. Phase 2 (actions menu, detach returning to
+the inbox) and later phases are in `docs/designs/agt-inbox.md`.
 
 ## Runtime Root
 

@@ -227,7 +227,7 @@ func TestRepeatedHandoffsLoseNoOutput(t *testing.T) {
 	}
 	t.Logf("lines %d-%d of %d retained, consecutive, across 5 handoffs", first, expect-1, stoppedAt)
 
-	if _, err := h.srv.killSession("counter", false); err != nil {
+	if _, err := h.srv.killSession("counter", false, ""); err != nil {
 		t.Fatal(err)
 	}
 	if n := <-restarts; n != 5 {

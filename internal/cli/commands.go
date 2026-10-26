@@ -609,20 +609,28 @@ func firstArg(args []string) string {
 	return ""
 }
 
+// runRuntime attaches to id, or with no id runs the inbox and attaches to
+// the session chosen there, on whichever host runs it.
 func (a *app) runRuntime(id string) error {
+	if id == "" {
+		chosen, unseen, err := a.runInbox()
+		if err != nil || chosen == nil {
+			return err
+		}
+		c := &client{paths: a.paths, host: chosen.host}
+		a.client = c // so a refused key's error explains itself
+		err = c.attachSessionUID(chosen.id, chosen.uid)
+		// What the inbox could not show before the attachment took the
+		// screen: a failure, or an action left in flight.
+		printUnseen(unseen)
+		return err
+	}
 	c := a.client
 	if c == nil {
 		var err error
 		if c, err = a.connect(nil, "", nil); err != nil {
 			return err
 		}
-	}
-	if id == "" {
-		picked, err := c.pickSession()
-		if err != nil || picked == "" {
-			return err
-		}
-		id = picked
 	}
 	return c.attachSession(id)
 }
