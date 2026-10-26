@@ -1445,3 +1445,58 @@ func TestEchoFramesSettleTheResendAfterAReattach(t *testing.T) {
 		t.Fatalf("frame 3: paused %v, field %q", e.paused, e.field.Rows)
 	}
 }
+
+// pi moves its box up over a menu of slash commands while the field
+// holds one. The key that empties the field again is drawn over the
+// screen as it last was with the field empty, the box back where it was,
+// unless the agent has written above the box since.
+func TestEchoFramesRestoreTheEmptyScreen(t *testing.T) {
+	// Value: protects=Backspace on pi's "/" collapses the menu at once;
+	// fails_when=the echo draws the emptied field where the menu put the
+	// box, or restores a screen the agent has written over since;
+	// why_new=pi 1.x full-screen menus; seam=screenShown; no_claim=pi's
+	// own layout (live trace).
+	screen := func(top string) [][]byte {
+		rows := make([][]byte, 40)
+		rows[0] = []byte(top)
+		return rows
+	}
+	raised := func(rows []string) *protocol.Field {
+		f := claudeField(rows)
+		f.Top, f.BoxTop, f.BoxBottom, f.Row = 30, 29, 31, 30
+		return f
+	}
+	for _, c := range []struct {
+		name    string
+		written bool
+	}{{"unchanged", false}, {"written since", true}} {
+		e, now := framesEcho(t, []string{""})
+		e.screenShown(claudeField([]string{""}), screen("transcript"))
+		typeKeys(e, "/")
+		e.tick(now.Add(time.Second))
+		send, _ := e.frameField(raised([]string{"/"}), (&protocol.Frame{Seq: 4}).AckedBy())
+		e.frameAcked(4)
+		if len(send) != 0 || e.holding() {
+			t.Fatalf("%s: the raised box did not confirm the slash (unconfirmed %d)", c.name, e.unconfirmed())
+		}
+		top := "transcript"
+		if c.written {
+			top = "new output"
+		}
+		e.screenShown(raised([]string{"/"}), screen(top))
+		_, paint := e.input([]byte{0x7f})
+		restored := strings.Contains(string(paint), "transcript") && strings.Contains(string(paint), cup(36, 2))
+		if restored == c.written {
+			t.Fatalf("%s: restored %v: %q", c.name, restored, paint)
+		}
+		if c.written {
+			continue
+		}
+		// The agent's own empty field, back at the bottom, confirms it.
+		e.tick(now.Add(2 * time.Second))
+		e.frameField(claudeField([]string{""}), (&protocol.Frame{Seq: 8}).AckedBy())
+		if e.holding() || e.restoring || e.field.BoxTop != 35 {
+			t.Fatalf("not confirmed: unconfirmed %d, restoring %v, box at %d", e.unconfirmed(), e.restoring, e.field.BoxTop)
+		}
+	}
+}

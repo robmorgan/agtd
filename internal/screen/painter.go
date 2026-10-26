@@ -313,6 +313,9 @@ var mouseModes = []string{"?9", "?1000", "?1002", "?1003", "?1005", "?1006", "?1
 // Seq is the sequence number of the last frame painted (0 for none).
 func (p *Painter) Seq() uint32 { return p.seq }
 
+// Rows is the VT of every row, as the frames painted them.
+func (p *Painter) Rows() [][]byte { return append([][]byte(nil), p.rows...) }
+
 // Row is the VT last painted for row y, nil when blank or unknown.
 func (p *Painter) Row(y int) []byte {
 	if y < 0 || y >= len(p.rows) {

@@ -481,6 +481,71 @@ type echo struct {
 	focus      string
 	focusUntil time.Time
 	timer      *time.Timer
+	// rest is the screen under frames as it last was with the field
+	// empty: its rows and its field. An agent may lay the screen out
+	// differently while there is text (pi moves its box up over a menu
+	// of slash commands), so the key that empties the field again is
+	// drawn over this screen, with the box back where it was (restoring)
+	// until the agent's field replaces it.
+	rest      *echoRest
+	restoring bool
+}
+
+// echoRest is the screen with the field empty.
+type echoRest struct {
+	field *protocol.Field
+	rows  [][]byte
+}
+
+// fieldEmpty reports that a field shows no text.
+func fieldEmpty(f *protocol.Field) bool {
+	for _, r := range f.Rows {
+		if r != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// sameBox reports whether two fields have their box in the same place.
+func sameBox(a, b *protocol.Field) bool {
+	return a.Lines == b.Lines && a.Cols == b.Cols && a.Top == b.Top && a.BoxTop == b.BoxTop && a.BoxBottom == b.BoxBottom
+}
+
+// screenShown notes the screen a frame left (its rows), with its field:
+// one with the field empty and nothing predicted is the rest screen,
+// which any other must still show above the box, where it was or moved
+// up with the box, else the agent has written since and it is dropped.
+func (e *echo) screenShown(f *protocol.Field, rows [][]byte) {
+	if e == nil || !e.frames || f == nil || !f.Found {
+		return
+	}
+	if fieldEmpty(f) {
+		if !e.holding() {
+			e.rest = &echoRest{field: f, rows: rows}
+		}
+		return
+	}
+	if e.rest != nil && !e.rest.above(f, rows) {
+		e.rest = nil
+	}
+}
+
+// above reports whether rows show the rest screen above f's box.
+func (r *echoRest) above(f *protocol.Field, rows [][]byte) bool {
+	if len(rows) != len(r.rows) {
+		return false
+	}
+	n, shift := int(f.BoxTop), int(r.field.BoxTop)-int(f.BoxTop)
+	same := func(d int) bool {
+		for y := range n {
+			if y+d < 0 || y+d >= len(r.rows) || !bytes.Equal(rows[y], r.rows[y+d]) {
+				return false
+			}
+		}
+		return true
+	}
+	return same(0) || (shift != 0 && same(shift))
 }
 
 func newEcho(cfg echoConfig) *echo {
@@ -581,6 +646,10 @@ func (e *echo) key(ev keyEvent) (send []byte, drawn bool) {
 		e.pause()
 		return send, false
 	}
+	if e.rest != nil && !e.restoring && len(e.text.lines) == 1 && len(e.text.lines[0]) == 0 && !sameBox(e.rest.field, e.field) {
+		// Emptied: the screen goes back to how it was when it last was.
+		e.field, e.restoring = e.rest.field, true
+	}
 	lay := layout(e.text, e.field)
 	e.states = append(e.states, echoState{rows: lay.texts(), cRow: lay.cRow, cCol: lay.cCol, key: ev})
 	send = e.queue(ev.raw)
@@ -670,7 +739,7 @@ func (e *echo) submits() bool {
 // pause stops drawing until the field is seen again: the agent's output
 // flows, and its own rendering takes over from the drawing.
 func (e *echo) pause() {
-	e.paused = true
+	e.paused, e.restoring = true, false
 	e.epoch++
 	e.staleBefore = e.ackSeq + 1
 	e.states = nil
@@ -891,7 +960,7 @@ func (e *echo) reconcile(f *protocol.Field) (send, paint []byte) {
 	}
 	// Replay what is still owed over what the agent shows, so a cursor
 	// or a wrap the agent placed differently is predicted from there on.
-	e.field = f
+	e.field, e.restoring = f, false
 	e.text = textFromField(f)
 	e.states = nil
 	for _, st := range remaining {
@@ -992,7 +1061,7 @@ func (e *echo) suspend() (send []byte) {
 func (e *echo) resized() {
 	e.epoch++
 	e.staleBefore = e.ackSeq + 1
-	e.field = nil
+	e.field, e.rest, e.restoring = nil, nil, false
 	e.states = nil
 	e.painted = false
 	e.offset = 0
@@ -1056,6 +1125,12 @@ func (e *echo) paintRows(lay echoLayout) []byte {
 	f := e.field
 	lines := int(f.Lines)
 	var b bytes.Buffer
+	if e.restoring {
+		for y, row := range e.rest.rows {
+			b.WriteString(cup(y, 0) + ansiReset + "\x1b[K")
+			b.Write(row)
+		}
+	}
 	// Put the chrome back as it was.
 	chrome := map[int][]byte{}
 	first, last := int(f.BoxTop), int(f.BoxBottom)

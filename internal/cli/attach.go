@@ -906,6 +906,9 @@ func paintFrame(fr *protocol.Frame, painter *screen.Painter, ech *echo, stream *
 	if paint := painter.Apply(fr, overlay); !overlayOpen {
 		writeOut(paint)
 	}
+	if ech != nil && fr.Field != nil {
+		ech.screenShown(fr.Field, painter.Rows())
+	}
 	if len(send) > 0 {
 		if err := stream.send(&protocol.Request{AttachInput: &protocol.Bytes{Data: send}}); err != nil {
 			return err
