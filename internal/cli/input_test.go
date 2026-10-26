@@ -60,7 +60,7 @@ func TestKeyDecoder(t *testing.T) {
 		{"kitty release dropped", []string{"\x1b[27;1:3u"}, nil},
 		{"csi split across reads", []string{"\x1b[", "B"}, []keyEvent{key(keyDown)}},
 		{"bracketed paste", []string{"\x1b[200~he", "llo\x1b[201~x"}, []keyEvent{{isPaste: true, paste: "hello"}, char('x')}},
-		// The picker and the overlay never see mouse reports, focus
+		// The inbox and the overlay never see mouse reports, focus
 		// changes or keys they have no name for (the echo does).
 		{"mouse and focus dropped", []string{"\x1b[<64;10;5M\x1b[M`*%\x1b[I"}, nil},
 		{"unnamed keys dropped", []string{"\x1bOP\x1b[15~"}, nil},
@@ -274,5 +274,127 @@ func TestMouseKeyButtons(t *testing.T) {
 		if got := mouseKey(button); got != want {
 			t.Errorf("button %d: %v, want %v", button, got, want)
 		}
+	}
+}
+
+// Value: protects=with holdEsc, a paste start marker split after its ESC is still a paste, a lone ESC becomes Esc only on expire, and an unterminated paste is given up so keys work again; fails_when=the split ESC decodes as Esc, or a paste swallows keys forever; why_new=the inbox now enables bracketed paste; seam=none; no_claim=the inbox's timing
+// A decoder that holds a lone ESC: a split paste marker stays a paste, a
+// lone ESC is Esc once nothing follows, and a paste without its end is
+// given up so keys work again.
+func TestKeyDecoderHoldsALoneEsc(t *testing.T) {
+	d := keyDecoder{holdEsc: true}
+	if evs := d.push([]byte("\x1b")); len(evs) != 0 || !d.held() {
+		t.Fatalf("lone esc: %+v held %v", evs, d.held())
+	}
+	evs := d.push([]byte("[200~\t2\r\x1b[201~"))
+	if len(evs) != 1 || !evs[0].isPaste || evs[0].paste != "\t2\r" {
+		t.Fatalf("split paste: %+v", evs)
+	}
+
+	d = keyDecoder{holdEsc: true}
+	d.push([]byte("\x1b"))
+	if evs := d.expire(); len(evs) != 1 || evs[0].code != keyEsc || d.held() {
+		t.Fatalf("expired esc: %+v held %v", evs, d.held())
+	}
+	if evs := d.push([]byte("\x1b[A")); len(evs) != 1 || evs[0].code != keyUp {
+		t.Fatalf("arrow after: %+v", evs)
+	}
+
+	d = keyDecoder{holdEsc: true}
+	if evs := d.push([]byte("\x1b[200~half a paste")); len(evs) != 0 || !d.pasting() {
+		t.Fatalf("open paste: %+v", evs)
+	}
+	for _, ev := range append(d.expire(), d.expire()...) {
+		if ev.code != keyUnknown {
+			t.Fatalf("giving up a paste made a key: %+v", ev)
+		}
+	}
+	// What follows a given-up paste is the rest of it: dropped, never
+	// keys, up to its end marker (or the next expire).
+	if evs := d.push([]byte("\t2\r")); len(evs) != 0 || !d.pasting() {
+		t.Fatalf("rest of a given-up paste: %+v", evs)
+	}
+	if evs := d.push([]byte("y\x1b[20")); len(evs) != 0 {
+		t.Fatalf("rest of a given-up paste, end marker split: %+v", evs)
+	}
+	if evs := d.push([]byte("1~q")); d.held() || len(evs) != 1 || evs[0].code != keyChar || evs[0].r != 'q' {
+		t.Fatalf("keys after the end of a given-up paste: %+v held %v", evs, d.held())
+	}
+	d = keyDecoder{holdEsc: true}
+	d.push([]byte("\x1b[200~half a paste"))
+	d.expire()
+	d.expire()
+	d.push([]byte("more of it"))
+	if evs := append(d.expire(), d.push([]byte("q"))...); len(evs) != 1 || evs[0].r != 'q' {
+		t.Fatalf("keys after a quiet expire: %+v", evs)
+	}
+	// A decoder that forwards raw bytes (attach) decodes what follows.
+	d = keyDecoder{forwardAll: true}
+	d.push([]byte("\x1b[200~half a paste"))
+	d.expire()
+	d.expire()
+	if evs := d.push([]byte("q")); len(evs) != 1 || evs[0].r != 'q' {
+		t.Fatalf("forwarding decoder after a given-up paste: %+v", evs)
+	}
+
+	// Value: protects=a held ESC that the next read does not continue is Esc followed by that read's keys, not Alt-key; fails_when=push joins the held ESC to the next read; why_new=holdEsc only met reads that continue a sequence; seam=none; no_claim=Alt and a non-printable key split across reads (taken as Esc, then the key)
+	// A held ESC followed by a plain key is Esc, then the key.
+	d = keyDecoder{holdEsc: true}
+	d.push([]byte("\x1b"))
+	if evs := d.push([]byte("x\r")); len(evs) != 3 || evs[0].code != keyEsc || evs[1].r != 'x' || evs[2].code != keyEnter {
+		t.Fatalf("esc then keys: %+v", evs)
+	}
+	d.push([]byte("\x1b"))
+	if evs := d.push([]byte("[A")); len(evs) != 1 || evs[0].code != keyUp {
+		t.Fatalf("esc continued by its sequence: %+v", evs)
+	}
+	// A second ESC continues it; a lone non-printable byte does not.
+	d.push([]byte("\x1b"))
+	if evs := d.push([]byte("\x7f")); len(evs) != 2 || evs[0].code != keyEsc || evs[1].code != keyBackspace {
+		t.Fatalf("esc then backspace: %+v", evs)
+	}
+	// Two pastes, the second begun in the read that ends the first, are
+	// counted apart, so each gets its own wait.
+	d = keyDecoder{holdEsc: true}
+	if evs := d.push([]byte("\x1b[200~a\x1b[201~\x1b[200~b")); len(evs) != 1 || d.pastes != 2 || !d.pasting() {
+		t.Fatalf("two pastes: %+v pastes %d", evs, d.pastes)
+	}
+	d = keyDecoder{holdEsc: true}
+	// One printable byte after it is Alt and that key, split across reads.
+	d.push([]byte("\x1b"))
+	if evs := d.push([]byte("x")); len(evs) != 1 || evs[0].r != 'x' || evs[0].mods != modAlt {
+		t.Fatalf("alt-x split across reads: %+v", evs)
+	}
+
+	// Value: protects=after a paste is given up, keys are dropped only until a quiet expire and then work, Ctrl-C included; fails_when=held ignores discarding, so the first key after a give-up is lost; why_new=the give-up path was tested with expire called by hand; seam=none; no_claim=runInbox's timer lengths
+	// After a give-up the decoder is held, so the caller's quiet timer
+	// runs; until it fires keys are the paste's rest, then they work.
+	d = keyDecoder{holdEsc: true}
+	d.push([]byte("\x1b[200~half a paste"))
+	d.expire()
+	d.expire()
+	if !d.held() || !d.pasting() {
+		t.Fatalf("given up: held %v pasting %v", d.held(), d.pasting())
+	}
+	if evs := d.push([]byte("\x03")); len(evs) != 0 {
+		t.Fatalf("ctrl-c inside the rest of a paste: %+v", evs)
+	}
+	d.expire()
+	if evs := d.push([]byte("\x03")); d.held() || len(evs) != 1 || evs[0].r != 'c' || evs[0].mods != modCtrl {
+		t.Fatalf("ctrl-c after the quiet expire: %+v", evs)
+	}
+
+	// Value: protects=an ESC that ends a read after other keys is held too, so a paste typed right after a key stays a paste; fails_when=only a read that is ESC alone is held; why_new=the held ESC was tested alone in its read; seam=none; no_claim=reads split elsewhere in the marker
+	// An ESC at the end of a read with keys before it is held as well.
+	d = keyDecoder{holdEsc: true}
+	if evs := d.push([]byte("a\x1b")); len(evs) != 1 || evs[0].r != 'a' || !d.held() {
+		t.Fatalf("key then esc: %+v held %v", evs, d.held())
+	}
+	if evs := d.push([]byte("[200~x\x1b[201~")); len(evs) != 1 || !evs[0].isPaste || evs[0].paste != "x" {
+		t.Fatalf("paste after a key: %+v", evs)
+	}
+	d.push([]byte("a\x1b"))
+	if evs := d.expire(); len(evs) != 1 || evs[0].code != keyEsc {
+		t.Fatalf("expired esc after a key: %+v", evs)
 	}
 }

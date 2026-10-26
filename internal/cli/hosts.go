@@ -37,6 +37,10 @@ const (
 	hostUnauthorized = "unauthorized"
 	hostKeyChanged   = "key changed"
 	hostError        = "error"
+	// The inbox's states for a host it has not heard from yet: still
+	// being asked, or this machine's daemon being started.
+	hostAsking   = "asking"
+	hostStarting = "starting"
 )
 
 // hostProbe is what probing one daemon found.
@@ -53,6 +57,9 @@ type hostProbe struct {
 	welcome    *protocol.Welcome
 	sessions   []session.Record
 	workspaces []string // only when asked for
+	// startFailed marks the one probe that says this machine's daemon
+	// could not be started (err says why).
+	startFailed bool
 }
 
 func (h *hostProbe) online() bool { return h.status == hostOnline }
@@ -97,11 +104,17 @@ func (a *app) probeHosts(withWorkspaces bool) ([]*hostProbe, error) {
 func (a *app) probe(p *hostProbe, withWorkspaces bool) {
 	c := &client{paths: a.paths, host: p.host}
 	defer c.close()
-	if p.host == nil && !c.localDaemonAnswers() {
+	probeOn(context.Background(), c, p, withWorkspaces)
+}
+
+// probeOn probes p's daemon through c, whose connection and control stream
+// it reuses when they are open, within probeTimeout of ctx.
+func probeOn(ctx context.Context, c *client, p *hostProbe, withWorkspaces bool) {
+	if p.host == nil && !c.hasControl() && !c.localDaemonAnswers() {
 		p.status = hostNotRunning
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 	p.err = func() error {
 		cs, err := c.controlStream(ctx)
@@ -134,6 +147,184 @@ func (a *app) probe(p *hostProbe, withWorkspaces bool) {
 		return nil
 	}()
 	p.status = classifyProbe(p.err)
+}
+
+// hostSet keeps a probe of every host current while the inbox runs.
+//
+// Ownership: one goroutine per host owns that host's client (its connection
+// and control stream, kept open between probes) and probes it in a loop,
+// one probe at a time, sending each result on updates as a new hostProbe
+// it never touches again. The inbox's goroutine owns everything it reads
+// from updates. updates holds one probe per host, so a busy inbox only
+// delays probing. stop cancels every goroutine, closing every connection,
+// and waits for them.
+type hostSet struct {
+	updates chan *hostProbe
+	watches []*hostWatch
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
+}
+
+// hostWatch is one host of a hostSet.
+type hostWatch struct {
+	name string
+	host *transport.Host // nil for this machine's daemon
+	// reprobe asks for a probe now, resetting an offline host's backoff.
+	reprobe chan struct{}
+}
+
+// How often a hostSet probes. The local daemon answers at once, so it is
+// asked often enough for the inbox to feel live; a remote round trip is
+// paid at most every hostRemoteInterval. A host that cannot be reached is
+// asked again after hostRetryFirst, doubling up to hostRetryMax.
+const (
+	hostLocalInterval  = 200 * time.Millisecond
+	hostRemoteInterval = 2 * time.Second
+	hostRetryFirst     = 2 * time.Second
+	hostRetryMax       = 30 * time.Second
+)
+
+// hostSetOptions are what a hostSet probes, and how; the zero value of a
+// duration means its default.
+type hostSetOptions struct {
+	// only probes that host alone (`agt --host NAME`); "" probes this
+	// machine and every host in hosts.toml.
+	only string
+	// startLocal starts this machine's daemon if it is not running.
+	startLocal bool
+
+	retryFirst, retryMax time.Duration
+	// probe replaces probeOn, for tests.
+	probe func(ctx context.Context, c *client, p *hostProbe)
+}
+
+// startHostSet starts probing. The probes it returns are each host's
+// placeholder (hostAsking), local first then in hosts.toml order, until
+// its first probe arrives.
+func (a *app) startHostSet(o hostSetOptions) (*hostSet, []*hostProbe, error) {
+	hosts, err := transport.ReadHosts(a.paths.HostsPath())
+	if err != nil {
+		return nil, nil, err
+	}
+	var watches []*hostWatch
+	if o.only == "" || o.only == localHostName {
+		watches = append(watches, &hostWatch{name: localHostName})
+	}
+	for i := range hosts {
+		if o.only == "" || o.only == hosts[i].Name {
+			watches = append(watches, &hostWatch{name: hosts[i].Name, host: &hosts[i]})
+		}
+	}
+	if len(watches) == 0 {
+		return nil, nil, fmt.Errorf("unknown host `%s`; see `agt host ls`", o.only)
+	}
+	o.retryFirst = cmp.Or(o.retryFirst, hostRetryFirst)
+	o.retryMax = cmp.Or(o.retryMax, hostRetryMax)
+	if o.probe == nil {
+		o.probe = func(ctx context.Context, c *client, p *hostProbe) { probeOn(ctx, c, p, false) }
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	set := &hostSet{updates: make(chan *hostProbe, len(watches)), watches: watches, cancel: cancel}
+	placeholders := make([]*hostProbe, len(watches))
+	for i, w := range watches {
+		w.reprobe = make(chan struct{}, 1)
+		placeholders[i] = w.placeholder(a.paths.Socket, hostAsking)
+		set.wg.Go(func() { set.watch(ctx, a, w, o) })
+	}
+	return set, placeholders, nil
+}
+
+func (w *hostWatch) placeholder(socket, status string) *hostProbe {
+	p := &hostProbe{name: w.name, address: socket, host: w.host, status: status}
+	if w.host != nil {
+		p.address = w.host.Address
+	}
+	return p
+}
+
+// watch is one host's goroutine: probe, send, wait, until ctx ends.
+func (set *hostSet) watch(ctx context.Context, a *app, w *hostWatch, o hostSetOptions) {
+	c := &client{paths: a.paths, host: w.host}
+	defer c.close()
+	send := func(p *hostProbe) bool {
+		select {
+		case set.updates <- p:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	if w.host == nil && o.startLocal && !c.localDaemonAnswers() {
+		if !send(w.placeholder(a.paths.Socket, hostStarting)) {
+			return
+		}
+		if err := c.ensureDaemon(); err != nil {
+			p := w.placeholder(a.paths.Socket, hostError)
+			p.err, p.startFailed = err, true
+			if !send(p) {
+				return
+			}
+		}
+	}
+	retry := time.Duration(0)
+	for {
+		p := w.placeholder(a.paths.Socket, "")
+		o.probe(ctx, c, p)
+		if ctx.Err() != nil {
+			return
+		}
+		wait := hostRemoteInterval
+		if w.host == nil {
+			wait = hostLocalInterval
+		}
+		if p.online() {
+			retry = 0
+		} else {
+			// Start again from a new connection, after a backoff.
+			c.close()
+			retry = min(max(2*retry, o.retryFirst), o.retryMax)
+			wait = retry
+		}
+		if !send(p) {
+			return
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-timer.C:
+		case <-w.reprobe:
+			timer.Stop()
+			retry = 0
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		}
+	}
+}
+
+// reprobeAll asks every host for a probe now.
+func (set *hostSet) reprobeAll() {
+	for _, w := range set.watches {
+		set.reprobeHost(w.name)
+	}
+}
+
+// reprobeHost asks one host for a probe now. A request while one is
+// already pending is the same request.
+func (set *hostSet) reprobeHost(name string) {
+	for _, w := range set.watches {
+		if w.name == name {
+			select {
+			case w.reprobe <- struct{}{}:
+			default:
+			}
+		}
+	}
+}
+
+// stop ends every host's goroutine and connection and waits for them.
+func (set *hostSet) stop() {
+	set.cancel()
+	set.wg.Wait()
 }
 
 // classifyProbe turns a probe's error into a host state.

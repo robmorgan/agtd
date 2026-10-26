@@ -15,7 +15,7 @@ import (
 // controlStream carries the CLI's one-shot requests to a daemon over one
 // long-lived stream (see protocol.RoleControl): it is opened with Hello, and
 // each request is tagged with an id that its response echoes, so requests
-// from the picker, the overlay and commands share it without waiting on
+// from the inbox, the overlay and commands share it without waiting on
 // each other.
 //
 // Ownership: one reader goroutine reads every response and hands it to the

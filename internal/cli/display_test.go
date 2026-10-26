@@ -100,22 +100,24 @@ func TestDisplayCwdAbbreviatesHome(t *testing.T) {
 	}
 }
 
-func TestOrderedSessionsKeepActiveFirstThenAttention(t *testing.T) {
+func TestOrderedSessionsKeepLiveFirstThenEnded(t *testing.T) {
 	now := time.Now()
 	running := demo("running")
 	running.UpdatedAt = now.Add(-2 * time.Minute)
 	creating := demoWith("creating", session.StatusCreating)
 	creating.UpdatedAt = now.Add(-time.Minute)
 	failed := demoWith("failed", session.StatusFailed)
+	lost := demoWith("lost", session.StatusUnknownRecovered)
 	exited := demoWith("exited", session.StatusExited)
 	needsAction := demoWith("needs-action", session.StatusExited)
 	needsAction.Attention = session.AttentionAction
 	needsAction.UpdatedAt = now.Add(-5 * time.Minute)
 	var got []string
-	for _, s := range orderedSessions([]session.Record{exited, failed, running, needsAction, creating}) {
+	for _, s := range orderedSessions([]session.Record{lost, exited, failed, running, needsAction, creating}) {
 		got = append(got, s.SessionID)
 	}
-	if strings.Join(got, " ") != "creating running failed needs-action exited" {
+	// Starting sorts with running; ended ones go exited, failed, lost.
+	if strings.Join(got, " ") != "creating running exited needs-action failed lost" {
 		t.Fatalf("got %v", got)
 	}
 }
@@ -132,9 +134,6 @@ func TestCellFormatting(t *testing.T) {
 	}
 	if got := formatCell("abcdefgh", 6); got != "abc..." {
 		t.Fatalf("cell: %q", got)
-	}
-	if got := fitLine("abcdef", 4); got != "abc" {
-		t.Fatalf("fitLine: %q", got)
 	}
 }
 
@@ -171,19 +170,25 @@ func needing(id string, status session.Status, level session.AttentionLevel, sum
 	return s
 }
 
+// The inbox's order: needs you, working, running, idle, then exited,
+// failed and lost; newest first within each.
 func TestOrderedSessionsPutLiveSessionsNeedingActionFirst(t *testing.T) {
 	older := needing("older-ask", session.StatusRunning, session.AttentionAction, "bell", 5*time.Minute)
 	newer := needing("newer-ask", session.StatusRunning, session.AttentionAction, "Approve?", time.Minute)
 	notice := needing("went-idle", session.StatusRunning, session.AttentionNotice, "idle", time.Minute)
+	notice.Activity = session.ActivityIdle
 	working := demo("working")
+	working.Activity = session.ActivityWorking
+	plain := demo("plain")
+	plain.UpdatedAt = time.Now().Add(-time.Hour)
 	failed := needing("failed", session.StatusFailed, session.AttentionAction, "exit 1", time.Minute)
 	finished := needing("finished", session.StatusExited, session.AttentionNotice, "finished", time.Minute)
 	seen := demoWith("seen", session.StatusExited)
 	var got []string
-	for _, s := range orderedSessions([]session.Record{seen, finished, failed, working, notice, older, newer}) {
+	for _, s := range orderedSessions([]session.Record{seen, finished, failed, plain, working, notice, older, newer}) {
 		got = append(got, s.SessionID)
 	}
-	if strings.Join(got, " ") != "newer-ask older-ask went-idle working failed finished seen" {
+	if strings.Join(got, " ") != "newer-ask older-ask working plain went-idle seen finished failed" {
 		t.Fatalf("got %v", got)
 	}
 }
@@ -250,5 +255,75 @@ func TestPrintSessionShowsActivityAndAttention(t *testing.T) {
 		if !strings.Contains(details, want) {
 			t.Errorf("details lack %q:\n%s", want, details)
 		}
+	}
+}
+func TestSessionList(t *testing.T) {
+	now := time.Now()
+	rendered := strings.Join(renderSessionListLines([]session.Record{demo("alpha")}, 120, now), "\n")
+	for _, want := range []string{"RUN", "NAME", "CWD", "/tmp/alpha", "●"} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+	if strings.Contains(rendered, "agtd - ") || strings.Contains(rendered, "› ") {
+		t.Fatal("list has a header or selector")
+	}
+	empty := strings.Join(renderSessionListLines(nil, 120, now), "\n")
+	if !strings.Contains(empty, "No sessions.") || !strings.Contains(empty, "RUN") {
+		t.Fatalf("empty %q", empty)
+	}
+	s := demo("alpha")
+	s.SessionID = "a-very-long-session-name-that-should-be-truncated-in-the-fixed-width-column"
+	s.Cwd = "/srv/checkouts/a-very-long-directory-name/that-should-be-truncated"
+	summary := "needs manual review because a long follow-up summary is present"
+	s.AttentionSummary = &summary
+	wide := renderSessionListLines([]session.Record{s}, 120, now)
+	narrow := strings.Join(renderSessionListLines([]session.Record{s}, 80, now), "\n")
+	if len(wide) != 2 || strings.Contains(wide[1], summary) || !strings.Contains(wide[1], "a-very") || !strings.Contains(wide[1], "that-should-be-truncated") {
+		t.Fatalf("wide %q", wide)
+	}
+	if !strings.Contains(narrow, "...") || !strings.Contains(narrow, "that-should-be-truncated") {
+		t.Fatalf("narrow %q", narrow)
+	}
+	r := demoWith("beta", session.StatusUnknownRecovered)
+	if got := strings.Join(renderSessionListLines([]session.Record{demo("alpha"), r}, 120, now), "\n"); strings.Contains(got, " • ") {
+		t.Fatal("list has a legend")
+	}
+	for _, width := range []int{200, 80} {
+		l := listLayout(width, false)
+		header := stripANSI(renderSessionListLines(nil, width, now)[0])
+		if got, want := runeLen(header), 10+l.run+l.age+l.name+l.activity+l.cwd; got != want {
+			t.Errorf("width %d: header is %d wide, want %d", width, got, want)
+		}
+	}
+}
+
+func TestSessionListShowsAttention(t *testing.T) {
+	ask := needing("asks", session.StatusRunning, session.AttentionAction, "Claude needs your permission to use Bash", time.Minute)
+	ask.Activity = session.ActivityWaiting
+	now := ask.AttentionAt.Add(time.Minute)
+	quiet := demo("quiet")
+	quiet.Activity = session.ActivityIdle
+	quiet.LastOutputAt = &now
+	lines := renderSessionListLines([]session.Record{quiet, ask}, 160, now)
+	header := stripANSI(lines[0])
+	if !strings.Contains(header, "ACTIVITY") || !strings.Contains(header, "ATTENTION") {
+		t.Fatalf("header %q", header)
+	}
+	first := stripANSI(lines[1])
+	if !strings.Contains(first, "⚠") || !strings.Contains(first, "asks") || !strings.Contains(first, "waiting 1m") ||
+		!strings.Contains(first, "Claude needs your permission to use Bash") || !strings.Contains(lines[1], ansiAction) {
+		t.Fatalf("first row %q", first)
+	}
+	if second := stripANSI(lines[2]); !strings.Contains(second, "quiet") || !strings.Contains(second, "idle 0s") || strings.Contains(second, "⚠") {
+		t.Fatalf("second row %q", second)
+	}
+	l := listLayout(160, true)
+	if got, want := runeLen(header), 12+l.run+l.age+l.name+l.activity+l.cwd+l.summary; got != want || l.summary < sessionListSummaryMinWidth {
+		t.Fatalf("header is %d wide, want %d (summary %d)", got, want, l.summary)
+	}
+	// Narrow terminals drop the summary before anything else.
+	if narrow := listLayout(60, true); narrow.summary != 0 {
+		t.Fatalf("narrow summary %d", narrow.summary)
 	}
 }
