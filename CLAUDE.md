@@ -288,7 +288,7 @@ rather than merely:
 cmd/agtd/          serve, upgrade, remote, bench, session-worker
 cmd/agt/             the `agt` CLI (and its end-to-end PTY tests)
 internal/
-  cli/               the CLI: commands, picker, attach, overlay
+  cli/               the CLI: commands, inbox, attach, overlay
   daemon/            session registry, proxies, lifecycle, supervision
   worker/            one session: PTY, terminal state, fan-out, input queue
   protocol/          framed protocol + daemon management protocol
@@ -527,7 +527,7 @@ Done:
 - Git state and artifacts, read-only (`internal/repo`): a session records its base commit at creation; `GetGitState` (commits and changed files since the base, untracked included) and artifact streams (`diff`, `patch`, `history`, `history.vt`) in bounded chunks under flow control; `agt diff`, `agt artifacts`, `agt artifact`, and a git section in `agt status`, locally and over QUIC.
 - Session resumption: per-incarnation session UIDs (a reattach never lands on a recreated session), attach ids unique per incarnation, reattach replaces the lost attachment at once, lagging clients are resynced from an exact-boundary snapshot, every output/input buffer is bounded (ARCHITECTURE.md lists them), and lifecycle requests carry tokens so a remote CLI retries them safely after a lost connection.
 - The connection handshake (`Hello`/`Welcome`): version and capability negotiation, host description, and a control stream of tagged requests; stream roles are set by a stream's first frame.
-- Events and attention: workers read bells, OSC 9/777 notifications, idleness and the PTY's foreground process; lifecycle and attention events persist in `state.db` (resumable ids, bounded per session); attach acknowledges; events streams (`SubscribeEvents`) feed `agt events --follow [--notify|--exec]`, locally or remotely; `ls`, `status`, the picker and the overlay show attention and activity.
+- Events and attention: workers read bells, OSC 9/777 notifications, idleness and the PTY's foreground process; lifecycle and attention events persist in `state.db` (resumable ids, bounded per session); attach acknowledges; events streams (`SubscribeEvents`) feed `agt events --follow [--notify|--exec]`, locally or remotely; `ls`, `status`, the inbox and the overlay show attention and activity.
 - Live worker handoff: `agtd upgrade` / `agt daemon upgrade` replace the daemon, then each session's worker re-execs into the new binary keeping its pid, agent, PTY, socket and exact terminal state (libghostty snapshot); attachments, local ones included, reattach by themselves. Restart and crash guarantees are documented in ARCHITECTURE.md.
 
 - Host health (`agt hosts`), machine capabilities (`agt host info`), and placement hints (`agt --host auto new`).
@@ -543,6 +543,7 @@ Done:
 - Local echo: the worker finds the program's input field on its screen (`internal/worker/field.go`, `AttachField`/`Field` under `attach-field`, fixtures from Claude Code, Codex and pi) and `agt attach` draws typing there at once, sending keys as typed (`internal/cli/echo.go`, `[composer]` in config.toml); the design and its next phases are in `docs/designs/smooth-remote-attach.md`. The worker answers the program's default colour queries (OSC 10/11) with the client terminal's colours (`terminal-colors`, `internal/worker/colors.go`), since Codex waits only 250 ms for them.
 - Screen frames (`attach-frames`, `internal/worker/frames.go`, `internal/screen`): a remote attachment gets the screen as acknowledged row frames instead of the raw output (`[attach] mode`), so nothing is dropped or resynced, scrolled rows land in the terminal's own scrollback, and the echo composes over live frames; `agt bench echo --mode` compares frames with raw over a link, `agtd bench sessions --attach-mode` under a flood.
 - Composed input and submit-and-switch (`attach-compose`, `internal/worker/compose.go`): `agt send-input --compose` and the overlay's first command (`Ctrl-Y`, `Enter`) hand the worker a whole prompt, or Enter alone, which it encodes from the terminal's modes (a paste, bracketed when the program asked, then Enter as its keyboard mode wants it); submit and switch then moves to the session that needs attention.
+- The inbox (bare `agt`, `internal/cli/inbox.go`, phase 1 of `docs/designs/agt-inbox.md`, replacing the picker): sessions from this machine and every paired host, needs-you first, a `host/` filter, Enter attaches on the row's host, Tab to attach or remove (by UID, `kill-expect-uid`), hosts probed in the background with backoff (`hostSet` in `internal/cli/hosts.go`).
 
 Next:
 1. Per-client permissions, if remote peers need to be limited.

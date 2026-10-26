@@ -142,7 +142,29 @@ Or use the compatibility form:
 agt kill --rm fix-tests
 ```
 
-Run the `agt` command without any arguments to open the TUI.
+Run `agt` without any arguments to open the inbox: every session on this machine and on every
+paired host, the ones that need you first, below the prompt.
+
+```text
+ agtd                                         1 need you · 2 working · 1 idle
+ local ● 3   devbox ● 1 38ms   sfo2 ⚠ unauthorized · agt host info sfo2
+
+▌ ⚠ auth-refactor  devbox   claude  blocked 4m    Allow Bash: go test ./...      2h
+  ● docs           local    codex   working 62%   Updating README               40m
+  ● scratch        local    claude  idle 38m                                      3h
+  + new session
+
+╭──────────────────────────────────────────────────────────────────────────────────╮
+│ ❯ Filter, or name a new session                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────╯
+ ↑↓ choose · enter attach · tab actions · n new · esc quit · ? keys
+```
+
+Type to filter (`devbox/` narrows to one host), Enter attaches to the selected session on whichever
+host runs it, Tab opens its actions (attach, remove), `n` or the `+` row starts an agent in the
+current directory, `r` asks every host again, and Esc (or Ctrl-C) quits with everything still running.
+`agt --host NAME` opens it on that host alone; for a remote host, `n` there shows the
+`agt new -C DIR NAME/SESSION` command that starts a session on it.
 
 ## Core Concepts
 
@@ -186,7 +208,7 @@ agt ls
   ○    1h     refactor        exited       ~/src/app           finished (exit 0)
 ```
 
-Sessions that need you come first, in `agt ls`, in the picker (`agt`) and in the `Ctrl-Y`
+Sessions that need you come first, in `agt ls`, in the inbox (`agt`) and in the `Ctrl-Y`
 switcher. `agt status NAME` shows the details: activity, foreground command, terminal title,
 elapsed time and what needs attention.
 
@@ -453,8 +475,8 @@ below):
 scrollback_rows = 1000
 ```
 
-Agent picker order follows the order of the `[agents.*]` tables in this file. `default_agent`
-must name one of those configured agents. Without it, the default is `claude` if configured,
+The agent chooser's order (in the inbox and the overlay) follows the order of the `[agents.*]`
+tables in this file. `default_agent` must name one of those configured agents. Without it, the default is `claude` if configured,
 otherwise the first agent listed. With no `config.toml` at all, the built-in defaults are the
 ones written above.
 
@@ -530,8 +552,8 @@ host, so without this its composer has no background when attached from afar.
 Every session has a UID (`agt status` shows it) as well as its name. A name can be reused once
 its session is removed; the UID never is, so a reconnecting client can tell that the session under
 a name is no longer the one it was attached to.
-Multiple interactive attachers are allowed per session, and the TUI uses the same shared attach
-path when a worker is focused. Background PTY writes are still available with
+Multiple interactive attachers are allowed per session, and attaching from the inbox (`agt`) uses
+the same shared attach path. Background PTY writes are still available with
 `agt send-input <name> -- <text>`, and `agt send-input --compose <name> -- <prompt>` sends a whole
 prompt the way the agent's terminal asks for input (a paste, bracketed when the agent turned that
 on, then Enter as its keyboard mode wants it), for scripts and `agt events --exec` hooks.
@@ -670,6 +692,7 @@ version, capabilities and pinned key. `--host local` (or `local/session`) is thi
 Across every host at once:
 
 ```sh
+agt                      # the inbox: every host's sessions, the ones that need you first
 agt ls --all             # one list, with a HOST column, what needs attention first
 agt ls --all --json      # one object per session, with its address and global id
 agt events --all -f      # follow every host's events (add --notify for alerts)

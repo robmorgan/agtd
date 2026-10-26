@@ -860,7 +860,7 @@ agent appears stalled
       arrives; listing a program's full record tree (ids) in `agt status`
 * [x] Add event persistence (`events` in `state.db`, newest 500 per session)
 * [x] Surface attention in CLI (`agt ls`, `agt status`, `agt events`)
-* [x] Surface attention in TUI (picker and `Ctrl-Y` switcher order and mark sessions needing action)
+* [x] Surface attention in TUI (inbox and `Ctrl-Y` switcher order and mark sessions needing action)
 * [x] Track task elapsed time (`agt ls` age, `agt status` elapsed)
 * [x] Track agent/process status (activity, PTY foreground process, title)
 * [x] Expose Git state (`GetGitState`, `agt status`; the base is recorded at session creation)
@@ -915,6 +915,15 @@ agt attach devbox-1/auth-tests
 * [x] Host-aware CLI UX (HOST column, `local/` and `host/` addresses everywhere, `--host local|auto`)
 * [x] Machine capabilities (`Welcome` host description; `agt host info`)
 * [x] Simple placement hints (`agt --host auto new`: least running sessions per CPU among hosts with the agent and workspace)
+* [x] One inbox for every host (bare `agt`, `docs/designs/agt-inbox.md` phase 1): sessions from this
+      machine and every paired host, needs-you first, filter with `host/` narrowing, Enter attaches
+      on the row's host, Tab to attach or remove (by UID, `kill-expect-uid`), hosts probed in the
+      background with backoff
+    * [ ] Phase 2: the full actions menu (stop, take over size, diff, history) and detach returning
+          to the inbox (attach owns the alternate screen when launched from it)
+    * [ ] Phase 3: new session anywhere (host, workspace, agent, name), workspaces added and removed inline
+    * [ ] Phase 4: peek and inline reply, gated on a timed trial
+    * [ ] Phase 5: host health inline
 * [ ] Moving and forking sessions between hosts (future; see below)
 
 Avoid implementing a scheduler until real usage requires one.
