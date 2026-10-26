@@ -144,22 +144,14 @@ func (p *Painter) altFrame(f *protocol.Frame) *protocol.Frame {
 	return &g
 }
 
-// Backdrop paints the screen as last shown, for a view drawn over it on
-// the alternate screen (the attach overlay), where the terminal's view
-// cannot scroll into its scrollback and carry the view off with it. It is
-// nil when there is nothing painted or the terminal is already on the
-// alternate screen.
+// Backdrop paints the screen as last shown, for a view drawn over it (the
+// attach overlay), which wraps it in its own synchronized update. It is
+// nil when there is nothing painted.
 func (p *Painter) Backdrop() []byte {
 	if !p.painted {
 		return nil
 	}
-	for _, m := range altModes {
-		if p.modes[m] {
-			return nil
-		}
-	}
 	var b bytes.Buffer
-	b.WriteString(syncBegin)
 	for y, row := range p.rows {
 		if p.shown != nil && y < len(p.shown) {
 			row = p.shown[y]
@@ -167,12 +159,24 @@ func (p *Painter) Backdrop() []byte {
 		b.WriteString(cup(y, 0) + rowStart)
 		b.Write(row)
 	}
-	b.WriteString(syncEnd)
 	return b.Bytes()
 }
 
 // altModes are the modes that switch to the alternate screen.
 var altModes = []string{"?47", "?1047", "?1049"}
+
+// AltScreen reports whether the terminal is on the alternate screen.
+func (p *Painter) AltScreen() bool {
+	for _, m := range altModes {
+		if p.modes[m] {
+			return true
+		}
+	}
+	return false
+}
+
+// Size is the size of the screen last painted.
+func (p *Painter) Size() (cols, lines int) { return p.cols, p.lines }
 
 // New makes a painter for a terminal that has just been cleared.
 func New() *Painter { return &Painter{} }

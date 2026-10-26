@@ -536,8 +536,8 @@ func (c *client) runAttachment(id string, stream *attachStream, keys <-chan []by
 	}
 	for {
 		// The overlay is drawn over the session's screen, which nothing
-		// else writes to while it is open, so it only changes after input
-		// or a resize.
+		// else writes to while it is open, so it only changes after input,
+		// a resize, or the frames that follow a resize.
 		if ov != nil && redraw {
 			ov.draw()
 		}
@@ -576,11 +576,7 @@ func (c *client) runAttachment(id string, stream *attachStream, keys <-chan []by
 					if err := flushEcho(); err != nil {
 						return attachResult{}, err
 					}
-					var backdrop []byte
-					if painter != nil {
-						backdrop = painter.Backdrop()
-					}
-					ov = newOverlay(c, id, size, backdrop)
+					ov = newOverlay(c, id, size, painter)
 					if err := ov.open(); err != nil {
 						return attachResult{}, err
 					}
@@ -630,6 +626,9 @@ func (c *client) runAttachment(id string, stream *attachStream, keys <-chan []by
 			res, done, err := handleFrame(f, ov != nil, size, ech, stream, painter)
 			if err != nil || done {
 				return res, err
+			}
+			if ov != nil && ov.framed() {
+				redraw = true
 			}
 			schedulePredict()
 		case <-predictTimer.C:

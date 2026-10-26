@@ -327,8 +327,11 @@ func TestBackdrop(t *testing.T) {
 	p := New()
 	p.Apply(&protocol.Frame{Seq: 1, Full: true, Alternate: true, Cols: 20, Lines: 2, Prefix: []byte("\x1b[?1049h"),
 		Rows: []protocol.FrameRow{{Index: 0, VT: []byte("x")}}}, nil)
-	if b := p.Backdrop(); b != nil {
-		t.Fatalf("a backdrop on the alternate screen: %q", b)
+	if b := p.Backdrop(); !p.AltScreen() || !bytes.Contains(b, []byte("x")) {
+		t.Fatalf("alternate %v, backdrop %q", p.AltScreen(), b)
+	}
+	if c, l := p.Size(); c != 20 || l != 2 {
+		t.Fatalf("size %dx%d", c, l)
 	}
 }
 

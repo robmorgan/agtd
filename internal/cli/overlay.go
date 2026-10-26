@@ -9,6 +9,7 @@ import (
 
 	"agtd.sh/internal/config"
 	"agtd.sh/internal/protocol"
+	"agtd.sh/internal/screen"
 	"agtd.sh/internal/session"
 )
 
@@ -109,24 +110,31 @@ type overlay struct {
 	// latency is the round trip to the attached session's host, or 0 for
 	// the local daemon.
 	latency func() time.Duration
-	// backdrop is the session's screen, when the terminal was on its
-	// primary screen as the overlay opened: the overlay is then drawn on
-	// the alternate screen over this copy, since the terminal's view of
-	// the primary screen scrolls (with the wheel, into the session's
-	// scrollback) and would carry the overlay with it. Nil otherwise.
-	backdrop []byte
-	// repaintBackdrop is whether the next draw paints the backdrop first.
-	repaintBackdrop bool
+	// painter is the session's screen under frames, which keeps taking
+	// frames while the overlay is open (none are written); nil otherwise.
+	painter *screen.Painter
+	// ownsAlt is whether the overlay opened the alternate screen, over a
+	// copy of the session's screen: the terminal was on its primary
+	// screen, whose view scrolls (with the wheel, into the session's
+	// scrollback) and would carry the overlay with it.
+	ownsAlt bool
+	// backdrop is whether the next draw paints the session's screen
+	// first (after a frame, so the session goes on updating behind the
+	// overlay), and clear whether it clears the terminal first (after a
+	// resize, which cuts or reflows what is under the overlay).
+	backdrop, clear bool
 }
 
-func newOverlay(c *client, id string, size *protocol.SizeOwnership, backdrop []byte) *overlay {
-	return &overlay{c: c, session: id, size: size, theme: overlayThemeFor(os.Getenv), now: time.Now, latency: c.latency, backdrop: backdrop}
+func newOverlay(c *client, id string, size *protocol.SizeOwnership, painter *screen.Painter) *overlay {
+	o := &overlay{c: c, session: id, size: size, theme: overlayThemeFor(os.Getenv), now: time.Now, latency: c.latency, painter: painter}
+	o.ownsAlt = painter != nil && painter.Backdrop() != nil && !painter.AltScreen()
+	return o
 }
 
 func (o *overlay) open() error {
-	if o.backdrop != nil {
+	if o.ownsAlt {
 		writeOut([]byte("\x1b[?1049h"))
-		o.repaintBackdrop = true
+		o.backdrop = true
 	}
 	o.mode = overlayPalette
 	o.paletteQuery, o.paletteSelected = "", 0
@@ -139,15 +147,25 @@ func (o *overlay) open() error {
 // leave is what to write as the overlay closes, before the session's
 // screen is restored: the return from the alternate screen it opened on.
 func (o *overlay) leave() []byte {
-	if o.backdrop == nil {
+	if !o.ownsAlt {
 		return nil
 	}
 	return []byte("\x1b[?1049l")
 }
 
-// resized repaints the backdrop with the next draw, which a resize of the
-// alternate screen may have cut or cleared.
-func (o *overlay) resized() { o.repaintBackdrop = o.backdrop != nil }
+// resized clears the terminal with the next draw, under the session's
+// screen if it fits; the frames at the new size follow.
+func (o *overlay) resized() { o.clear, o.backdrop = true, true }
+
+// framed notes a frame the painter took while the overlay is open, and
+// reports whether to draw again, over the session's new screen.
+func (o *overlay) framed() bool {
+	if o.painter == nil {
+		return false
+	}
+	o.backdrop = true
+	return true
+}
 
 func (o *overlay) refresh() error {
 	sessions, err := o.c.listSessions(o.c.requestTimeout())
@@ -825,11 +843,26 @@ func (o *overlay) sessionIcon(row displayRow) (string, string) {
 // draw paints the overlay over the session's screen, all of it every time.
 // The cursor stays hidden while the overlay is open.
 func (o *overlay) draw() {
-	if o.repaintBackdrop {
-		writeOut(append([]byte("\x1b[2J"), o.backdrop...))
-		o.repaintBackdrop = false
-	}
 	cols, rows, _, _ := terminalGeometry()
+	var b strings.Builder
+	// One synchronized update, so the overlay never shows missing over
+	// the session's screen.
+	b.WriteString("\x1b[?2026h")
+	defer func() {
+		b.WriteString("\x1b[?2026l")
+		writeOut([]byte(b.String()))
+	}()
+	if o.clear {
+		b.WriteString("\x1b[2J")
+	}
+	// A screen wider or taller than the terminal would wrap or scroll
+	// it; it is left out until a frame that fits.
+	if o.backdrop && o.painter != nil {
+		if c, l := o.painter.Size(); c <= int(cols) && l <= int(rows) {
+			b.Write(o.painter.Backdrop())
+		}
+	}
+	o.clear, o.backdrop = false, false
 	x, y, w, h := overlayRect(int(cols), int(rows))
 	if w < 8 || h < 8 {
 		return
@@ -842,7 +875,6 @@ func (o *overlay) draw() {
 		return t.surfaceBG + t.lineFG + s + ansiReset
 	}
 	pad := line{}.render(1, t)
-	var b strings.Builder
 	b.WriteString("\x1b[?25l")
 	at := func(row int) { fmt.Fprintf(&b, "\x1b[%d;%dH", y+row+1, x+1) }
 	at(0)
@@ -853,5 +885,4 @@ func (o *overlay) draw() {
 	}
 	at(h - 1)
 	b.WriteString(edge("╰" + strings.Repeat("─", w-2) + "╯"))
-	writeOut([]byte(b.String()))
 }
