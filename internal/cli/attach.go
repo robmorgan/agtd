@@ -79,6 +79,16 @@ type attachResult struct {
 	next    string                 // outcomeSwitch
 }
 
+// sessionAddress is how to name a session of this client's host to attach
+// to it again: HOST/NAME, or local/NAME on the local daemon.
+func (c *client) sessionAddress(id string) string {
+	host := c.remoteName()
+	if host == "" {
+		host = localHostName
+	}
+	return escapeControls(host + "/" + id)
+}
+
 // attachSession attaches the terminal to a session until the user detaches
 // or the session ends, following switches to other sessions on the way.
 func (c *client) attachSession(id string) error {
@@ -106,6 +116,7 @@ func (c *client) attachSessionUID(id, uid string) error {
 		case outcomeSwitch:
 			id, uid = res.next, ""
 		default:
+			fmt.Printf("detached from %s\n", c.sessionAddress(id))
 			return nil
 		}
 	}
@@ -970,6 +981,8 @@ func (c *client) overlayInput(ov *overlay, chunk []byte, stream *attachStream, s
 			return closeOverlay(ov, stream, size, ech, painter)
 		case overlaySwitch:
 			return &attachResult{outcome: outcomeSwitch, next: out.session}, false, nil
+		case overlayDetach:
+			return &attachResult{outcome: outcomeDetached}, false, nil
 		}
 	}
 	return nil, false, nil

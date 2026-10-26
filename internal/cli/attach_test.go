@@ -222,7 +222,7 @@ func TestOverlayTakeSize(t *testing.T) {
 	if out, err := o.handle(key(keyEnter)); err != nil || out.kind != overlayTookSize {
 		t.Fatalf("enter: %+v %v", out, err)
 	}
-	if got := len(paletteItems); got != 5 {
+	if got := len(paletteItems); got != 6 {
 		t.Fatalf("the take-size item leaked into the shared palette: %d items", got)
 	}
 
@@ -246,5 +246,22 @@ func TestSizeOwnerFrames(t *testing.T) {
 	}
 	if _, done, err := handleFrame(frame{resp: &protocol.Response{AttachSizeOwner: &note}}, false, nil, nil, nil, nil); done || err != nil {
 		t.Fatalf("size note without tracking: done %v err %v", done, err)
+	}
+}
+
+// The palette's Detach detaches, as Ctrl-\ does.
+func TestOverlayDetach(t *testing.T) {
+	o := newOverlay(testClient(t), "alpha", nil, nil)
+	for _, r := range "detach" {
+		o.handle(char(r))
+	}
+	if got := o.filteredPalette(); len(got) != 1 || got[0].title != "Detach" {
+		t.Fatalf("filtered %v", got)
+	}
+	if out, err := o.handle(key(keyEnter)); err != nil || out.kind != overlayDetach {
+		t.Fatalf("enter: %+v %v", out, err)
+	}
+	if got := testClient(t).sessionAddress("alpha"); got != "local/alpha" {
+		t.Fatalf("address %q", got)
 	}
 }

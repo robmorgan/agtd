@@ -311,10 +311,11 @@ func TestAttachEndToEnd(t *testing.T) {
 	tm.write("stty size\r")
 	m = tm.expect(m, "40 120")
 
-	// Ctrl-\ detaches and puts the terminal back.
+	// Ctrl-\ detaches, puts the terminal back and says where to attach
+	// again.
 	tm.write("\x1c")
 	tm.wait()
-	if out := tm.output(); !strings.HasSuffix(out, restoreSequence+detachSequence+"\x1b]0;agtd\x07\x1b]2;agtd\x07") {
+	if out := tm.output(); !strings.HasSuffix(out, restoreSequence+detachSequence+"detached from local/demo\r\n\x1b]0;agtd\x07\x1b]2;agtd\x07") {
 		t.Fatalf("detach did not restore the terminal:\n%q", out[max(len(out)-200, 0):])
 	}
 

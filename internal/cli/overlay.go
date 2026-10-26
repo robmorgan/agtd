@@ -32,6 +32,9 @@ const (
 	// session and the attachment moves to the session that needs
 	// attention.
 	overlaySubmitSwitch
+	// overlayDetachAction is one too: the attachment detaches, as
+	// Ctrl-\ does.
+	overlayDetachAction
 )
 
 type overlayOutcomeKind int
@@ -46,6 +49,8 @@ const (
 	// overlaySubmit sends Enter to the session and switches to the
 	// session that needs attention, or closes the overlay when none does.
 	overlaySubmit
+	// overlayDetach detaches from the session.
+	overlayDetach
 )
 
 type overlayOutcome struct {
@@ -65,6 +70,7 @@ var paletteItems = []paletteItem{
 	{"s", "Switch session", overlaySwitcher},
 	{"t", "New session", overlayNewSession},
 	{"i", "Session details", overlayDetails},
+	{"d", "Detach", overlayDetachAction},
 	{"x", "Stop session", overlayStopConfirm},
 }
 
@@ -242,6 +248,8 @@ func (o *overlay) handlePalette(ev keyEvent) (overlayOutcome, error) {
 				return overlayOutcome{kind: overlayTookSize}, nil
 			case overlaySubmitSwitch:
 				return overlayOutcome{kind: overlaySubmit}, nil
+			case overlayDetachAction:
+				return overlayOutcome{kind: overlayDetach}, nil
 			}
 			return overlayOutcome{}, o.run(items[o.paletteSelected].mode)
 		}
