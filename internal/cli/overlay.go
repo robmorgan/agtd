@@ -63,10 +63,8 @@ type paletteItem struct {
 	mode        overlayMode
 }
 
-// paletteItems are the palette's commands. Submit and switch comes first,
-// so that Ctrl-Y, Enter is it.
+// paletteItems are the palette's commands.
 var paletteItems = []paletteItem{
-	{"↵", "Submit and switch", overlaySubmitSwitch},
 	{"s", "Switch session", overlaySwitcher},
 	{"t", "New session", overlayNewSession},
 	{"i", "Session details", overlayDetails},
@@ -74,11 +72,18 @@ var paletteItems = []paletteItem{
 	{"x", "Stop session", overlayStopConfirm},
 }
 
+// submitSwitchItem comes first, so that Ctrl-Y, Enter is it, when
+// [attach] submit_and_switch offers it.
+var submitSwitchItem = paletteItem{"↵", "Submit and switch", overlaySubmitSwitch}
+
 // takeSizeItem is offered while another attachment owns the size.
 var takeSizeItem = paletteItem{"r", "Take over size", overlayTakeSize}
 
 func (o *overlay) filteredPalette() []paletteItem {
 	items := paletteItems
+	if o.submitSwitch {
+		items = append([]paletteItem{submitSwitchItem}, items...)
+	}
 	if o.size != nil && !o.size.Owner {
 		items = append(slices.Clip(items), takeSizeItem)
 	}
@@ -129,11 +134,16 @@ type overlay struct {
 	// overlay), and clear whether it clears the terminal first (after a
 	// resize, which cuts or reflows what is under the overlay).
 	backdrop, clear bool
+	// submitSwitch offers Submit and switch ([attach] submit_and_switch).
+	submitSwitch bool
 }
 
 func newOverlay(c *client, id string, size *protocol.SizeOwnership, painter *screen.Painter) *overlay {
 	o := &overlay{c: c, session: id, size: size, theme: overlayThemeFor(os.Getenv), now: time.Now, latency: c.latency, painter: painter}
 	o.ownsAlt = painter != nil && painter.Painted() && !painter.AltScreen()
+	if cfg, err := config.Load(c.paths.Config); err == nil {
+		o.submitSwitch = cfg.Attach.SubmitAndSwitch
+	}
 	return o
 }
 

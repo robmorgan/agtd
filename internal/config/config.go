@@ -55,6 +55,9 @@ type AttachConfig struct {
 	// of an agent on the alternate screen at once, and lets the agent's
 	// frames correct it, with or without AltScrollback. Unset means on.
 	PredictWheel *bool `toml:"predict_wheel"`
+	// SubmitAndSwitch offers Submit and switch first in the Ctrl-Y
+	// palette (so Ctrl-Y, Enter is it). Hidden unless set.
+	SubmitAndSwitch bool `toml:"submit_and_switch"`
 }
 
 // WheelPredicted is PredictWheel with its default applied.
@@ -190,6 +193,9 @@ alt_scrollback = false
 # screen scrolls it at once, and the agent's own screen corrects the guess
 # when it arrives.
 #predict_wheel = true
+# Offer Submit and switch in the Ctrl-Y palette, first (so Ctrl-Y, Enter):
+# Enter goes to the agent and you move to the session that needs attention.
+#submit_and_switch = false
 
 # Typing in "agt attach" is drawn in the agent's own input field at once
 # and sent as typed, batched for at most flush_after ("0" sends every key

@@ -104,7 +104,11 @@ func TestOverlayKeys(t *testing.T) {
 	if out, _ := o.handle(key(keyEsc)); out.kind != overlayClose {
 		t.Fatalf("esc: %+v", out)
 	}
-	// Ctrl-Y, Enter is submit and switch.
+	if items := o.filteredPalette(); items[0].title == submitSwitchItem.title {
+		t.Fatal("Submit and switch offered without [attach] submit_and_switch")
+	}
+	// Ctrl-Y, Enter is submit and switch, when offered.
+	o.submitSwitch = true
 	if out, err := o.handle(key(keyEnter)); err != nil || out.kind != overlaySubmit {
 		t.Fatalf("enter on the fresh palette: %+v %v", out, err)
 	}
@@ -135,6 +139,7 @@ func TestOverlayKeys(t *testing.T) {
 
 func TestOverlayDraws(t *testing.T) {
 	o := newOverlay(testClient(t), "alpha", nil, nil)
+	o.submitSwitch = true
 	o.sessions = []session.Record{demo("alpha"), demo("beta")}
 	body := o.body(60, 20)
 	if got := stripANSI(body[1].render(60, o.theme)); !strings.HasPrefix(got, " Commands ") || !strings.Contains(got, "/alpha  ") || strings.Contains(got, "╱") {
@@ -222,7 +227,7 @@ func TestOverlayTakeSize(t *testing.T) {
 	if out, err := o.handle(key(keyEnter)); err != nil || out.kind != overlayTookSize {
 		t.Fatalf("enter: %+v %v", out, err)
 	}
-	if got := len(paletteItems); got != 6 {
+	if got := len(paletteItems); got != 5 {
 		t.Fatalf("the take-size item leaked into the shared palette: %d items", got)
 	}
 

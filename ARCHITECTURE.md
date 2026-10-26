@@ -1095,7 +1095,8 @@ that moves its box while the user types is corrected at the next field. Keys typ
 reconnect are still dropped. Frames (the next phase of the design) remove the hold and the
 repaint by composing the drawing over the agent's live screen.
 
-**Composed input.** A script, or the overlay's Submit and switch, has a whole prompt rather than
+**Composed input.** A script, or the overlay's Submit and switch (offered with `[attach]
+submit_and_switch`), has a whole prompt rather than
 keystrokes, and only the worker knows how the program asked to receive input. `agt send-input
 --compose` (`SendInput.Compose`) and the attach stream's `AttachCompose` (both `attach-compose`)
 hand the worker the text, which it encodes on the owner goroutine from the terminal's modes

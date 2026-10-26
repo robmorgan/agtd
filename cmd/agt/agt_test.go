@@ -368,11 +368,11 @@ func TestAttachEndToEnd(t *testing.T) {
 	}
 }
 
-// Ctrl-Y, Enter submits what was typed and moves to the session that needs
-// attention, or stays when none does; agt send-input --compose sends a whole
+// Ctrl-Y, Enter (with [attach] submit_and_switch) submits what was typed
+// and moves to the session that needs attention, or stays when none does; agt send-input --compose sends a whole
 // prompt with Enter.
 func TestSubmitAndSwitchEndToEnd(t *testing.T) {
-	e := newEnv(t, "")
+	e := newEnv(t, "\n[attach]\nsubmit_and_switch = true\n")
 	e.startAndDetach("other")
 	tm := e.start("new", "demo")
 	m := tm.expect(0, "attached to demo")

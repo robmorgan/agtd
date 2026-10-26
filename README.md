@@ -485,9 +485,10 @@ Interactive PTY attach is available with `agt attach <name>`. Detach with `Ctrl-
 the previous running session with `Ctrl-[`, or switch to the next running session with `Ctrl-]`, or
 `agt detach <name> --attach <attach_id>` for a specific client, or
 `agt detach <name> --all` to disconnect every attached client on the session. `Ctrl-Y` opens agt's
-palette over the session; its first command, Submit and switch (so `Ctrl-Y`, `Enter`), sends Enter
-to the agent and moves you to the session that needs attention, or stays when none does; it also
-has Detach. Detaching prints the address to attach again with, `detached from HOST/NAME`.
+palette over the session: switch session, new session, session details, detach and stop. With
+`[attach] submit_and_switch = true` its first command is Submit and switch (so `Ctrl-Y`, `Enter`),
+which sends Enter to the agent and moves you to the session that needs attention, or stays when
+none does. Detaching prints the address to attach again with, `detached from HOST/NAME`.
 Use `agt attachments <name>` to inspect the current attachment ids, which one sets the session's
 size (`size-owner`), and the size each one has.
 Attach clears the visible screen and repaints from the daemon's retained terminal state; if the
