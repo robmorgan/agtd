@@ -90,6 +90,9 @@ func TestWriteDefault(t *testing.T) {
 	if got, want := cfg.Attach.AttachScrollbackRows(), want.Attach.AttachScrollbackRows(); got != want {
 		t.Fatalf("attach scrollback rows = %d, built-in default %d", got, want)
 	}
+	if cfg.SSHAgent.SessionSocketEnabled() != want.SSHAgent.SessionSocketEnabled() || cfg.SSHAgent.Forward != want.SSHAgent.Forward {
+		t.Fatalf("ssh agent = %+v, built-in default %+v", cfg.SSHAgent, want.SSHAgent)
+	}
 	os.WriteFile(path, []byte("default_agent = \"zed\"\n"), 0o600)
 	if err := WriteDefault(path); err != nil {
 		t.Fatal(err)
@@ -172,5 +175,51 @@ func TestAttachScrollbackRows(t *testing.T) {
 		if got := cfg.Attach.AttachScrollbackRows(); got != tc.want {
 			t.Fatalf("%q: scrollback rows = %d, want %d", tc.text, got, tc.want)
 		}
+	}
+}
+
+func TestSSHAgent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	t.Setenv("SSH_AUTH_SOCK", "/tmp/ssh-x/agent.1")
+	home, _ := os.UserHomeDir()
+	fp := "SHA256:" + strings.Repeat("A", 43)
+	for _, tc := range []struct {
+		text          string
+		sessionSocket bool
+		forward       bool
+		agent         string
+		keys          []string
+		bad           string
+	}{
+		{text: "", sessionSocket: true, agent: "/tmp/ssh-x/agent.1"},
+		{text: "[ssh_agent]\nsession_socket = false\n", agent: "/tmp/ssh-x/agent.1"},
+		{text: "[ssh_agent]\nforward = true\nagent = \"~/.1password/agent.sock\"\nkeys = [\"" + fp + "\"]\n",
+			sessionSocket: true, forward: true, agent: filepath.Join(home, ".1password/agent.sock"), keys: []string{fp}},
+		{text: "[ssh_agent]\nagent = \"/run/agent.sock\"\n", sessionSocket: true, agent: "/run/agent.sock"},
+		{text: "[ssh_agent]\nkeys = [\"MD5:aa:bb\"]\n", bad: "`MD5:aa:bb` is not a key fingerprint"},
+		{text: "[ssh_agent]\nkeys = [\"SHA256:short\"]\n", bad: "`SHA256:short` is not a key fingerprint"},
+	} {
+		if err := os.WriteFile(path, []byte(tc.text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := Load(path)
+		if tc.bad != "" {
+			if err == nil || !strings.Contains(err.Error(), tc.bad) {
+				t.Fatalf("%q: got %v", tc.text, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("%q: %v", tc.text, err)
+		}
+		a := cfg.SSHAgent
+		if a.SessionSocketEnabled() != tc.sessionSocket || a.Forward != tc.forward || a.AgentSocket() != tc.agent || !slices.Equal(a.Keys, tc.keys) {
+			t.Fatalf("%q: %+v (session socket %v, agent %q)", tc.text, a, a.SessionSocketEnabled(), a.AgentSocket())
+		}
+	}
+	// Without $SSH_AUTH_SOCK or an agent there is nothing to forward.
+	t.Setenv("SSH_AUTH_SOCK", "")
+	if got := (SSHAgentConfig{Forward: true}).AgentSocket(); got != "" {
+		t.Fatalf("agent socket = %q", got)
 	}
 }

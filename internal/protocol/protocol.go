@@ -90,6 +90,12 @@ type Request struct {
 	// HandoffSession asks a session worker to replace its executable
 	// without stopping the agent (CapWorkerHandoff); see handoff.go.
 	HandoffSession *HandoffSession
+	// ForwardSSHAgent opens an ssh-agent stream (CapSSHAgent), on which
+	// the client then sends SSHAgentReply and SSHAgentClose; see
+	// sshagent.go.
+	ForwardSSHAgent *ForwardSSHAgent
+	SSHAgentReply   *SSHAgentMessage
+	SSHAgentClose   *SSHAgentConn
 }
 
 type SessionRef struct{ SessionID string }
@@ -166,6 +172,11 @@ type KillSession struct {
 	Remove    bool
 	// Token (CapRequestTokens); see CreateSession.Token.
 	Token string
+	// ExpectUID (CapKillExpectUID) refuses the request unless the
+	// session's current incarnation has this UID, so a remove confirmed
+	// against one session never deletes a newer one that reused the name.
+	// Empty means any incarnation.
+	ExpectUID string
 }
 
 type Geometry struct {
@@ -473,6 +484,12 @@ type Response struct {
 	// SessionRestarting (CapSessionRestart) ends an attach stream whose
 	// session worker is about to restart; see handoff.go.
 	SessionRestarting *SessionRestarting
+	// SSHAgentForwarding accepts an ssh-agent stream (CapSSHAgent), on
+	// which the worker then sends SSHAgentRequest and SSHAgentClose; see
+	// sshagent.go.
+	SSHAgentForwarding *SSHAgentForwarding
+	SSHAgentRequest    *SSHAgentMessage
+	SSHAgentClose      *SSHAgentConn
 }
 
 type DaemonInfo struct {
@@ -559,6 +576,10 @@ const (
 	kAttachFieldRequest    kind = 52
 	kAttachFrameAckRequest kind = 53
 	kAttachComposeRequest  kind = 54
+	// 80-89: SSH agent forwarding (sshagent.go).
+	kForwardSSHAgentRequest kind = 80
+	kSSHAgentReplyRequest   kind = 81
+	kSSHAgentCloseRequest   kind = 82
 
 	kDaemonInfoResponse     kind = 101
 	kCreateSessionResponse  kind = 102
@@ -600,6 +621,11 @@ const (
 	// Worker handoff (kinds 160-169).
 	kHandedOffResponse         kind = 160
 	kSessionRestartingResponse kind = 161
+
+	// SSH agent forwarding (kinds 180-189).
+	kSSHAgentForwardingResponse kind = 180
+	kSSHAgentRequestResponse    kind = 181
+	kSSHAgentCloseResponse      kind = 182
 )
 
 // ---------------------------------------------------------------------------
@@ -850,6 +876,9 @@ func encodeRequest(req *Request, f Features) (kind, []byte, error) {
 		e.str(req.KillSession.SessionID)
 		e.bool(req.KillSession.Remove)
 		e.token(req.KillSession.Token)
+		if e.f.Has(CapKillExpectUID) {
+			e.str(req.KillSession.ExpectUID)
+		}
 		return kKillSessionRequest, e.buf, e.err
 	case req.AttachSession != nil:
 		a := req.AttachSession
@@ -975,6 +1004,21 @@ func encodeRequest(req *Request, f Features) (kind, []byte, error) {
 		e.str(req.HandoffSession.SessionID)
 		e.str(req.HandoffSession.Executable)
 		return kHandoffSessionRequest, e.buf, e.err
+	case req.ForwardSSHAgent != nil:
+		f := req.ForwardSSHAgent
+		e.str(f.SessionID)
+		e.str(f.ExpectUID)
+		e.str(f.Attachment)
+		e.str(f.Client)
+		e.strs(f.Features)
+		return kForwardSSHAgentRequest, e.buf, e.err
+	case req.SSHAgentReply != nil:
+		e.u32(req.SSHAgentReply.Conn)
+		e.bytes(req.SSHAgentReply.Data)
+		return kSSHAgentReplyRequest, e.buf, e.err
+	case req.SSHAgentClose != nil:
+		e.u32(req.SSHAgentClose.Conn)
+		return kSSHAgentCloseRequest, e.buf, e.err
 	}
 	return 0, nil, errors.New("empty request")
 }
@@ -1002,6 +1046,9 @@ func decodeRequest(k kind, payload []byte, f Features) (*Request, error) {
 	case kKillSessionRequest:
 		req.KillSession = &KillSession{SessionID: d.str(), Remove: d.bool()}
 		req.KillSession.Token = d.token()
+		if d.f.Has(CapKillExpectUID) {
+			req.KillSession.ExpectUID = d.str()
+		}
 	case kAttachSessionRequest:
 		a := &AttachSession{SessionID: d.str(), Kind: d.attachmentKind()}
 		a.Geometry = d.geometry()
@@ -1088,6 +1135,12 @@ func decodeRequest(k kind, payload []byte, f Features) (*Request, error) {
 		req.ListEvents = &ListEvents{AfterID: d.optU64(), SessionID: d.optStr(), Limit: d.u32()}
 	case kHandoffSessionRequest:
 		req.HandoffSession = &HandoffSession{SessionID: d.str(), Executable: d.str()}
+	case kForwardSSHAgentRequest:
+		req.ForwardSSHAgent = &ForwardSSHAgent{SessionID: d.str(), ExpectUID: d.str(), Attachment: d.str(), Client: d.str(), Features: d.strs()}
+	case kSSHAgentReplyRequest:
+		req.SSHAgentReply = &SSHAgentMessage{Conn: d.u32(), Data: d.bytes()}
+	case kSSHAgentCloseRequest:
+		req.SSHAgentClose = &SSHAgentConn{Conn: d.u32()}
 	default:
 		return nil, fmt.Errorf("unexpected message kind `%d` while decoding request", k)
 	}
@@ -1265,6 +1318,16 @@ func encodeResponse(resp *Response, f Features) (kind, []byte, error) {
 		e.str(resp.SessionRestarting.SessionID)
 		e.str(resp.SessionRestarting.Reason)
 		return kSessionRestartingResponse, e.buf, e.err
+	case resp.SSHAgentForwarding != nil:
+		e.strs(resp.SSHAgentForwarding.Features)
+		return kSSHAgentForwardingResponse, e.buf, e.err
+	case resp.SSHAgentRequest != nil:
+		e.u32(resp.SSHAgentRequest.Conn)
+		e.bytes(resp.SSHAgentRequest.Data)
+		return kSSHAgentRequestResponse, e.buf, e.err
+	case resp.SSHAgentClose != nil:
+		e.u32(resp.SSHAgentClose.Conn)
+		return kSSHAgentCloseResponse, e.buf, e.err
 	}
 	return 0, nil, errors.New("empty response")
 }
@@ -1398,6 +1461,12 @@ func decodeResponse(k kind, payload []byte, f Features) (*Response, error) {
 		resp.HandedOff = &HandedOff{SessionID: d.str(), WorkerPID: d.u32(), Executable: d.str(), Handoffs: d.u32()}
 	case kSessionRestartingResponse:
 		resp.SessionRestarting = &SessionRestarting{SessionID: d.str(), Reason: d.str()}
+	case kSSHAgentForwardingResponse:
+		resp.SSHAgentForwarding = &SSHAgentForwarding{Features: d.strs()}
+	case kSSHAgentRequestResponse:
+		resp.SSHAgentRequest = &SSHAgentMessage{Conn: d.u32(), Data: d.bytes()}
+	case kSSHAgentCloseResponse:
+		resp.SSHAgentClose = &SSHAgentConn{Conn: d.u32()}
 	default:
 		return nil, fmt.Errorf("unexpected message kind `%d` while decoding response", k)
 	}

@@ -17,6 +17,9 @@
 //     a handoff holds reapMu.
 //   - The input writer (input.go), the accept loop, and one handler per
 //     connection.
+//   - The SSH agent socket's accept loop and one goroutine per program
+//     connection (sshagent.go), stopped by the main goroutine at the
+//     session's end and around a handoff, like the accept loop.
 package worker
 
 import (
@@ -110,6 +113,10 @@ type Args struct {
 	// Colors are the default colours of the terminal the session was
 	// created from (CreateSession.Colors), nil when unknown; see colors.go.
 	Colors *protocol.TerminalColors
+	// SSHAgentSocket gives the agent its own SSH agent socket as
+	// SSH_AUTH_SOCK, which forwards to the client driving the session
+	// (sshagent.go).
+	SSHAgentSocket bool
 }
 
 type sessionEnded struct {
@@ -189,6 +196,10 @@ type runtime struct {
 	startedAt time.Time
 	// recorder writes events and activity to state.db (activity.go).
 	recorder *recorder
+	// agent serves the session's SSH agent socket, nil for a session
+	// started without one (sshagent.go). Like listener, it is stopped and
+	// restarted by the main goroutine around a handoff.
+	agent *agentServer
 }
 
 // terminateAgent asks the agent's whole process group to exit and escalates
@@ -267,8 +278,32 @@ func Run(args Args) error {
 		"AGTD_SESSION_NAME="+args.SessionID,
 		"AGTD_CWD="+args.Cwd,
 	)
+	// The agent socket is bound before the agent starts, so SSH_AUTH_SOCK
+	// names a socket that answers from the first moment. Without one the
+	// session keeps the SSH_AUTH_SOCK the daemon was started with.
+	var agentListener *transport.UnixListener
+	var agentSocket os.FileInfo
+	agentPath := p.SSHAgentSocketPath(args.UID)
+	if args.SSHAgentSocket {
+		if agentListener, agentSocket, err = listenAgentSocket(agentPath); err != nil {
+			fmt.Fprintf(os.Stderr, "session worker: no SSH agent socket, the session keeps the SSH_AUTH_SOCK it inherited: %v\n", err)
+		} else {
+			cmd.Env = withEnv(cmd.Env, "SSH_AUTH_SOCK", agentPath)
+		}
+	}
+	// closeAgentSocket undoes the agent socket on the way out of a failed
+	// start.
+	closeAgentSocket := func() {
+		if agentListener != nil {
+			agentListener.Close()
+			if cur, err := os.Stat(agentPath); err == nil && os.SameFile(cur, agentSocket) {
+				_ = os.Remove(agentPath)
+			}
+		}
+	}
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: defaultPtyRows, Cols: defaultPtyCols})
 	if err != nil {
+		closeAgentSocket()
 		return fail(fmt.Errorf("failed to spawn agent process: %w%s", err, ptyHint(err)))
 	}
 	defer ptmx.Close()
@@ -279,6 +314,7 @@ func Run(args Args) error {
 
 	terminal, err := newTerminalState(defaultPtyCols, defaultPtyRows, maxScrollbackBytes)
 	if err != nil {
+		closeAgentSocket()
 		signalGroup(agentPID, syscall.SIGKILL)
 		return fail(err)
 	}
@@ -289,20 +325,26 @@ func Run(args Args) error {
 	// worker's socket may already sit at the same path.
 	listener, err := transport.ListenUnix(socketPath, transport.UnixOptions{KeepSocketOnClose: true})
 	if err != nil {
+		closeAgentSocket()
 		signalGroup(agentPID, syscall.SIGKILL)
 		return fail(fmt.Errorf("failed to bind worker socket: %w", err))
 	}
 	ownSocket, err := os.Stat(socketPath)
 	if err != nil {
 		listener.Close()
+		closeAgentSocket()
 		signalGroup(agentPID, syscall.SIGKILL)
 		return fail(fmt.Errorf("failed to stat worker socket: %w", err))
 	}
 	rt := newRuntime(args, p, store, agentPID, ptmx, socketPath, ownSocket, listener)
 	rt.startedAt = startedAt
+	if agentListener != nil {
+		rt.agent = newAgentServer(rt, agentPath, agentSocket, os.Getenv("SSH_AUTH_SOCK"), agentListener)
+	}
 	if err := store.MarkRunning(args.SessionID, args.CreatedAt, os.Getpid(), agentPID); err != nil {
 		listener.Close()
 		rt.removeOwnSocket()
+		closeAgentSocket()
 		signalGroup(agentPID, syscall.SIGKILL)
 		if errors.Is(err, db.ErrNotCreating) {
 			// The daemon gave up on this worker or the session was
@@ -415,6 +457,9 @@ func (rt *runtime) run(state *ownerState, ready func()) error {
 		fmt.Fprintf(os.Stderr, "session worker: reserving attachment numbers: %v\n", err)
 	}
 	rt.startAccepting()
+	if rt.agent != nil {
+		rt.agent.start()
+	}
 	if ready != nil {
 		ready()
 	}
@@ -434,6 +479,10 @@ func (rt *runtime) run(state *ownerState, ready func()) error {
 	// returns.
 	<-rt.acceptDone
 	rt.removeOwnSocket()
+	if rt.agent != nil {
+		rt.agent.stop()
+		rt.agent.removeOwnSocket()
+	}
 	// A handoff requested meanwhile will not happen.
 	select {
 	case req := <-rt.handoffs:
@@ -634,9 +683,13 @@ func (rt *runtime) handleConnection(conn transport.Stream) (keep bool, err error
 		if err != nil {
 			return false, fail(err)
 		}
-		return false, reply(&protocol.Response{Welcome: &protocol.Welcome{
-			Version: version, Capabilities: append(protocol.AttachCapabilities(), protocol.CapWorkerHandoff),
-		}})
+		caps := append(protocol.AttachCapabilities(), protocol.CapWorkerHandoff)
+		if rt.agent != nil {
+			// Only an agent started with the socket as SSH_AUTH_SOCK
+			// can be forwarded to.
+			caps = append(caps, protocol.CapSSHAgent)
+		}
+		return false, reply(&protocol.Response{Welcome: &protocol.Welcome{Version: version, Capabilities: caps}})
 	case req.HandoffSession != nil:
 		h := req.HandoffSession
 		if h.SessionID != rt.sessionID {
@@ -650,6 +703,8 @@ func (rt *runtime) handleConnection(conn transport.Stream) (keep bool, err error
 		}
 	case req.AttachSession != nil:
 		return false, rt.serveAttach(conn, reader, req.AttachSession)
+	case req.ForwardSSHAgent != nil:
+		return false, rt.serveForwarder(conn, reader, req.ForwardSSHAgent)
 	case req.SendInput != nil, req.AttachInput != nil:
 		data, compose := []byte(nil), false
 		if req.SendInput != nil {

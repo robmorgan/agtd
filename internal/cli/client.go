@@ -75,7 +75,7 @@ func (c *client) controlTimeout() time.Duration {
 	return 250 * time.Millisecond
 }
 
-// requestTimeout bounds the requests the picker and the overlay make while
+// requestTimeout bounds the requests the inbox and the overlay make while
 // the user waits on them.
 func (c *client) requestTimeout() time.Duration {
 	if c.host != nil {
@@ -213,6 +213,11 @@ func localHostname() string {
 func (c *client) request(req *protocol.Request, timeout time.Duration) (*protocol.Response, error) {
 	ctx, cancel := contextFor(timeout)
 	defer cancel()
+	return c.requestCtx(ctx, req)
+}
+
+// requestCtx is request bounded by ctx: cancelling it abandons the request.
+func (c *client) requestCtx(ctx context.Context, req *protocol.Request) (*protocol.Response, error) {
 	if req.Role() == protocol.RoleRequest {
 		return c.controlRequest(ctx, req)
 	}
@@ -235,6 +240,13 @@ func (c *client) request(req *protocol.Request, timeout time.Duration) (*protoco
 		return nil, errors.New("agtd closed the connection")
 	}
 	return resp, nil
+}
+
+// requestSent reports whether err came after the request was written, so
+// the daemon may have acted on it (see sentError).
+func requestSent(err error) bool {
+	var se *sentError
+	return errors.As(err, &se)
 }
 
 // controlRequest sends req on the control stream. A stream that turns out
@@ -271,7 +283,7 @@ func (c *client) controlRequest(ctx context.Context, req *protocol.Request) (*pr
 			var se *sentError
 			if errors.As(err, &se) {
 				if !c.mayResend(cs, req) {
-					return nil, se.err
+					return nil, se
 				}
 				sent = true
 				err = se.err
@@ -279,8 +291,11 @@ func (c *client) controlRequest(ctx context.Context, req *protocol.Request) (*pr
 				continue // the stream had ended before req was written
 			}
 		}
-		if !sent || !c.mayRetry(ctx, err, start) {
+		if !sent {
 			return nil, err
+		}
+		if !c.mayRetry(ctx, err, start) {
+			return nil, &sentError{err}
 		}
 		// The connection is dead: the next attempt dials a new one.
 		c.close()
@@ -288,7 +303,7 @@ func (c *client) controlRequest(ctx context.Context, req *protocol.Request) (*pr
 		select {
 		case <-time.After(delay):
 		case <-ctx.Done():
-			return nil, err
+			return nil, &sentError{err}
 		}
 	}
 }
@@ -372,7 +387,14 @@ func contextFor(timeout time.Duration) (context.Context, context.CancelFunc) {
 
 // call sends a request whose only expected answers are want or an error.
 func (c *client) call(req *protocol.Request, timeout time.Duration, want func(*protocol.Response) bool) (*protocol.Response, error) {
-	resp, err := c.request(req, timeout)
+	ctx, cancel := contextFor(timeout)
+	defer cancel()
+	return c.callCtx(ctx, req, want)
+}
+
+// callCtx is call bounded by ctx.
+func (c *client) callCtx(ctx context.Context, req *protocol.Request, want func(*protocol.Response) bool) (*protocol.Response, error) {
+	resp, err := c.requestCtx(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -436,6 +458,13 @@ func (c *client) prepareDaemon(daemonCommand string) error {
 		return c.spawnDaemon()
 	}
 	return nil
+}
+
+// hasControl reports whether c has a control stream that has not failed.
+func (c *client) hasControl() bool {
+	c.controlMu.Lock()
+	defer c.controlMu.Unlock()
+	return c.control != nil && !c.control.failed()
 }
 
 func (c *client) localDaemonAnswers() bool {
@@ -678,6 +707,12 @@ func describeResponse(r *protocol.Response) string {
 		return "HandedOff"
 	case r.SessionRestarting != nil:
 		return "SessionRestarting"
+	case r.SSHAgentForwarding != nil:
+		return "SSHAgentForwarding"
+	case r.SSHAgentRequest != nil:
+		return "SSHAgentRequest"
+	case r.SSHAgentClose != nil:
+		return "SSHAgentClose"
 	}
 	return "unknown"
 }

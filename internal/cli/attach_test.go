@@ -176,6 +176,13 @@ func TestOverlayDraws(t *testing.T) {
 	if got := stripANSI(o.body(60, 20)[5].render(60, o.theme)); !strings.Contains(got, "beta") || !strings.Contains(got, "/tmp/beta") {
 		t.Fatalf("switcher row %q", got)
 	}
+	// Value: protects=an overlay row with wide characters fills its width in cells and never wraps; fails_when=the shared renderer counts runes again; why_new=theme_test covers render, not the overlay's rows; seam=none; no_claim=a terminal's own width table
+	wide := demo("beta")
+	wide.Cwd = "/tmp/日本語のとても長いディレクトリの名前です/もっと深いところ"
+	o.sessions = []session.Record{demo("alpha"), wide}
+	if got := stripANSI(o.body(60, 20)[6].render(60, o.theme)); cellWidth(got) != 60 || !strings.Contains(got, "日本語") {
+		t.Fatalf("switcher row with wide characters is %d cells: %q", cellWidth(got), got)
+	}
 	for d, want := range map[time.Duration]string{
 		40 * time.Second:                              "40s",
 		12 * time.Minute:                              "12m",
@@ -268,5 +275,23 @@ func TestOverlayDetach(t *testing.T) {
 	}
 	if got := testClient(t).sessionAddress("alpha"); got != "local/alpha" {
 		t.Fatalf("address %q", got)
+	}
+}
+
+// Value: protects=the overlay's Session Details never hand a daemon's session name, agent or size owner to the terminal raw; fails_when=sessionDetails or sizeDetails drops an escapeControls; why_new=details tests use clean fields only; seam=none; no_claim=attention level (only known levels reach the line)
+// Session Details show a daemon's fields escaped, so a hostile record
+// cannot clear the screen or set the title from the overlay.
+func TestSessionDetailsAreEscaped(t *testing.T) {
+	now := time.Now()
+	s := demo("ev\x1b[2Jil")
+	s.Agent = "co\x1b]0;t\x07dex"
+	details := sessionDetails(&s, now) + "\n" + sizeDetails(&protocol.SizeOwnership{OwnerID: "at\x1b[1Atach-1", Geometry: protocol.Geometry{Cols: 80, Rows: 24}})
+	if strings.ContainsAny(details, "\x1b\x07") {
+		t.Fatalf("controls reached the details: %q", details)
+	}
+	for _, want := range []string{"ev", "il", "co", "dex", "at", "tach-1"} {
+		if !strings.Contains(details, want) {
+			t.Fatalf("details lost %q: %q", want, details)
+		}
 	}
 }

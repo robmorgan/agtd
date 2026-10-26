@@ -123,6 +123,37 @@ func TestSessionUIDsIdentifyIncarnations(t *testing.T) {
 	b.expectOutput("got:hi")
 }
 
+// A remove that names the incarnation it was confirmed against is refused
+// once that session was replaced by a new one under the same name, and the
+// new one keeps running.
+func TestKillExpectUIDRefusesANewerIncarnation(t *testing.T) {
+	h := newHarness(t)
+	c := h.control()
+	if !c.features.Has(protocol.CapKillExpectUID) {
+		t.Fatal("daemon does not take KillSession.ExpectUID")
+	}
+	create := func() string {
+		resp := c.call(&protocol.Request{CreateSession: &protocol.CreateSession{Cwd: h.cwd, Name: strp("again"), Agent: "sh"}})
+		if resp.CreateSession == nil || resp.CreateSession.UID == "" {
+			t.Fatalf("create = %#v", resp)
+		}
+		return resp.CreateSession.UID
+	}
+	old := create()
+	if resp := c.call(&protocol.Request{KillSession: &protocol.KillSession{SessionID: "again", Remove: true, ExpectUID: old}}); resp.KillSession == nil {
+		t.Fatalf("remove with the right uid = %#v", resp.Error)
+	}
+	current := create()
+	wantError(t, c.call(&protocol.Request{KillSession: &protocol.KillSession{SessionID: "again", ExpectUID: old}}), "not the session you chose")
+	wantError(t, c.call(&protocol.Request{KillSession: &protocol.KillSession{SessionID: "again", Remove: true, ExpectUID: old}}), "not the session you chose")
+	if resp := c.call(&protocol.Request{GetSession: &protocol.SessionRef{SessionID: "again"}}); resp.Session == nil || resp.Session.UID != current || resp.Session.Status != session.StatusRunning {
+		t.Fatalf("session after a refused remove = %#v", resp)
+	}
+	if resp := c.call(&protocol.Request{KillSession: &protocol.KillSession{SessionID: "again", Remove: true, ExpectUID: current}}); resp.KillSession == nil || !resp.KillSession.WasRunning {
+		t.Fatalf("remove with the current uid = %#v", resp)
+	}
+}
+
 // A client that lost its connection after sending a lifecycle request sends
 // it again with the same token; the daemon answers with the original answer
 // instead of acting twice or failing.

@@ -41,6 +41,24 @@ func TestDerivedPaths(t *testing.T) {
 	}
 }
 
+// A session's SSH agent socket is named by its UID (32 hex digits), so its
+// path is the root plus a fixed 42 bytes: shorter than the socket of a
+// session with a name of the longest length allowed, so it fits wherever
+// that does.
+func TestSSHAgentSocketPath(t *testing.T) {
+	p := FromRoot("/r")
+	uid := strings.Repeat("0f", 16)
+	if got := p.SSHAgentSocketPath(uid); got != "/r/ssh/"+uid+".sock" {
+		t.Fatalf("agent socket = %s", got)
+	}
+	if extra := len(p.SSHAgentSocketPath(uid)) - len(p.Root); extra != 42 {
+		t.Fatalf("agent socket adds %d bytes to the root", extra)
+	}
+	if longest := p.SessionSocketPath(strings.Repeat("a", 64)); len(longest) <= len(p.SSHAgentSocketPath(uid)) {
+		t.Fatalf("a session socket (%d bytes) is shorter than an agent socket", len(longest))
+	}
+}
+
 func TestEnsureLayoutIsPrivate(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "root")
 	if err := os.Mkdir(root, 0o755); err != nil {
@@ -50,7 +68,7 @@ func TestEnsureLayoutIsPrivate(t *testing.T) {
 	if err := p.EnsureLayout(); err != nil {
 		t.Fatal(err)
 	}
-	for _, dir := range []string{p.Root, p.LogsDir, p.SessionsDir} {
+	for _, dir := range []string{p.Root, p.LogsDir, p.SessionsDir, p.SSHDir} {
 		info, err := os.Stat(dir)
 		if err != nil || info.Mode().Perm() != 0o700 {
 			t.Fatalf("%s mode = %v, %v", dir, info.Mode(), err)

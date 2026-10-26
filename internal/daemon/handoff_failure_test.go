@@ -115,7 +115,7 @@ func TestHandoffToABinaryThatDiesAfterExec(t *testing.T) {
 	id := h.mustCreate("")
 	rec := h.session(id)
 	// Passes the probe, then exits instead of resuming.
-	exe := writeScript(t, "liar", `if [ "$2" = --handoff-probe ]; then echo "agtd session-worker handoff 1"; exit 0; fi; exit 1`)
+	exe := writeScript(t, "liar", `if [ "$2" = --handoff-probe ]; then printf 'agtd session-worker handoff 1\nagtd session-worker handoff 2\n'; exit 0; fi; exit 1`)
 
 	results := h.handoff(exe)
 	if len(results) != 1 || !results[0].Lost || results[0].HandedOff != nil {
@@ -227,7 +227,7 @@ func TestRepeatedHandoffsLoseNoOutput(t *testing.T) {
 	}
 	t.Logf("lines %d-%d of %d retained, consecutive, across 5 handoffs", first, expect-1, stoppedAt)
 
-	if _, err := h.srv.killSession("counter", false); err != nil {
+	if _, err := h.srv.killSession("counter", false, ""); err != nil {
 		t.Fatal(err)
 	}
 	if n := <-restarts; n != 5 {
@@ -245,7 +245,7 @@ func TestHandoffExecFailureKeepsTheSession(t *testing.T) {
 	c.input("before\n")
 	c.expectOutput("got:before")
 	before := h.session(id)
-	exe := writeScript(t, "vanishing", `echo "agtd session-worker handoff 1"; rm -f "$0"`)
+	exe := writeScript(t, "vanishing", `printf 'agtd session-worker handoff 1\nagtd session-worker handoff 2\n'; rm -f "$0"`)
 
 	results := h.handoff(exe)
 	if len(results) != 1 || results[0].HandedOff != nil || results[0].Lost || results[0].Err == nil ||

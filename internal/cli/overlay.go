@@ -398,7 +398,7 @@ func (o *overlay) handleStop(ev keyEvent) (overlayOutcome, error) {
 // sessionDetails is the overlay's Session Details text.
 func sessionDetails(s *session.Record, now time.Time) string {
 	text := fmt.Sprintf("name       %s\nagent      %s\ncwd        %s\nstatus     %s\nelapsed    %s\nactivity   %s",
-		s.SessionID, s.Agent, escapeControls(s.Cwd), sessionStatusText(s), elapsedLabel(s, now), activityText(s, now))
+		escapeControls(s.SessionID), escapeControls(s.Agent), escapeControls(s.Cwd), escapeControls(sessionStatusText(s)), elapsedLabel(s, now), activityText(s, now))
 	if s.Foreground != nil {
 		text += "\nforeground " + escapeControls(*s.Foreground)
 	}
@@ -406,7 +406,7 @@ func sessionDetails(s *session.Record, now time.Time) string {
 		text += "\ntitle      " + escapeControls(*s.Title)
 	}
 	if row := buildDisplayRow(s, now); row.summary != "" {
-		text += fmt.Sprintf("\nattention  %s: %s", s.Attention, row.summary)
+		text += fmt.Sprintf("\nattention  %s: %s", escapeControls(string(s.Attention)), row.summary)
 	}
 	return text
 }
@@ -420,7 +420,7 @@ func sizeDetails(o *protocol.SizeOwnership) string {
 	case o.OwnerID == "":
 		return "size       " + size
 	}
-	return fmt.Sprintf("size       %s, set by %s (Ctrl-Y, Take over size)", size, o.OwnerID)
+	return fmt.Sprintf("size       %s, set by %s (Ctrl-Y, Take over size)", size, escapeControls(o.OwnerID))
 }
 
 func sessionStatusText(s *session.Record) string {
@@ -444,104 +444,6 @@ func sessionStatusText(s *session.Record) string {
 		return fmt.Sprintf("exited (%d)", *s.ExitCode)
 	}
 	return "exited"
-}
-
-// Drawing
-//
-// The overlay follows the agtd design system's dark theme: a Graphite
-// surface panel edged in a hairline, text and muted text, and amber
-// (signal) for the one thing in focus: the selected row's bar, the active
-// field, the Stop button. Sessions keep the glyphs agt prints everywhere
-// (● running, ⚠ needs you, ○ exited).
-
-// overlayTheme holds the overlay's SGR sequences: foregrounds (FG) and
-// backgrounds (BG). Every one is "" when colour is off.
-type overlayTheme struct {
-	surfaceBG, groundBG, lineBG, signalBG                              string
-	textFG, mutedFG, quietFG, lineFG, signalFG, onSignalFG, okFG, bold string
-}
-
-func rgbFG(r, g, b uint8) string { return fmt.Sprintf("\x1b[38;2;%d;%d;%dm", r, g, b) }
-func rgbBG(r, g, b uint8) string { return fmt.Sprintf("\x1b[48;2;%d;%d;%dm", r, g, b) }
-
-// The design system's tokens (dark theme), and their nearest 256-colour
-// entries for terminals without 24-bit colour.
-var (
-	overlayTrueColor = overlayTheme{
-		surfaceBG:  rgbBG(0x18, 0x1a, 0x1d), // surface
-		groundBG:   rgbBG(0x0f, 0x11, 0x13), // ground: inputs sit inset
-		lineBG:     rgbBG(0x2a, 0x2d, 0x32), // line: the selected row
-		signalBG:   rgbBG(0xfd, 0xa9, 0x34), // signal
-		textFG:     rgbFG(0xeb, 0xed, 0xef), // text
-		mutedFG:    rgbFG(0x8b, 0x90, 0x98), // text-muted
-		quietFG:    rgbFG(0x83, 0x86, 0x8c), // quiet
-		lineFG:     rgbFG(0x3a, 0x3e, 0x44), // line, a step up so the edge holds over any screen
-		signalFG:   rgbFG(0xfd, 0xa9, 0x34), // signal / signal-text
-		onSignalFG: rgbFG(0x0f, 0x11, 0x13), // on-signal
-		okFG:       rgbFG(0x8c, 0xc2, 0x65), // ok
-		bold:       "\x1b[1m",
-	}
-	overlay256 = overlayTheme{
-		surfaceBG: "\x1b[48;5;234m", groundBG: "\x1b[48;5;233m", lineBG: "\x1b[48;5;236m", signalBG: "\x1b[48;5;214m",
-		textFG: "\x1b[38;5;255m", mutedFG: "\x1b[38;5;246m", quietFG: "\x1b[38;5;245m", lineFG: "\x1b[38;5;238m",
-		signalFG: "\x1b[38;5;214m", onSignalFG: "\x1b[38;5;233m", okFG: "\x1b[38;5;107m", bold: "\x1b[1m",
-	}
-)
-
-// overlayThemeFor picks 24-bit colour where the terminal says it takes
-// it, 256 colours otherwise, and none under NO_COLOR or TERM=dumb.
-func overlayThemeFor(getenv func(string) string) *overlayTheme {
-	switch {
-	case getenv("NO_COLOR") != "" || getenv("TERM") == "dumb":
-		return &overlayTheme{}
-	case supportsTrueColor(getenv):
-		return &overlayTrueColor
-	}
-	return &overlay256
-}
-
-// span is text in one style; a line is a list of spans over a background
-// ("" for the panel's surface).
-type span struct{ style, text string }
-
-type line struct {
-	bg    string
-	spans []span
-}
-
-func plain(text string) line { return line{spans: []span{{"", text}}} }
-
-// render cuts l to width cells and pads it with spaces, so it overwrites
-// whatever was under it. Each span starts from the line's base colours, so
-// a span's own style only adds to them.
-func (l line) render(width int, t *overlayTheme) string {
-	bg := l.bg
-	if bg == "" {
-		bg = t.surfaceBG
-	}
-	base := bg + t.textFG
-	var b strings.Builder
-	left := width
-	for _, s := range l.spans {
-		if left <= 0 {
-			break
-		}
-		text := takeRunes(s.text, left)
-		left -= runeLen(text)
-		if style := base + s.style; style != "" {
-			b.WriteString(style + text + ansiReset)
-		} else {
-			b.WriteString(text)
-		}
-	}
-	if left > 0 {
-		if base != "" {
-			b.WriteString(base + strings.Repeat(" ", left) + ansiReset)
-		} else {
-			b.WriteString(strings.Repeat(" ", left))
-		}
-	}
-	return b.String()
 }
 
 func runStyle(r runState) string {
@@ -622,45 +524,6 @@ func (o *overlay) hints() [][2]string {
 	return [][2]string{{"↑↓", "choose"}, {"enter", "run"}, {"esc", "close"}}
 }
 
-// listRow is a row of a list: a bar marking the selected row, then the
-// row's own spans, then right-aligned text. The selected row is raised on
-// line with an amber bar.
-func (o *overlay) listRow(width int, selected bool, spans []span, right span) line {
-	t := o.theme
-	l := line{spans: []span{{"", " "}}}
-	if selected {
-		l = line{bg: t.lineBG, spans: []span{{t.signalFG, "▌"}}}
-	}
-	l.spans = append(l.spans, span{"", " "})
-	l.spans = append(l.spans, spans...)
-	used := 0
-	for _, s := range l.spans {
-		used += runeLen(s.text)
-	}
-	if room := width - used - runeLen(right.text) - 1; room > 0 && right.text != "" {
-		l.spans = append(l.spans, span{"", strings.Repeat(" ", room)}, right)
-	}
-	return l
-}
-
-// input is a query or form field: an inset strip with a prompt glyph and
-// a block cursor. An active field's glyph is amber.
-func (o *overlay) input(glyph, value, placeholder string, active bool) line {
-	t := o.theme
-	glyphStyle := t.quietFG
-	if active {
-		glyphStyle = t.signalFG
-	}
-	l := line{bg: t.groundBG, spans: []span{{"", " "}, {glyphStyle, glyph + " "}, {"", value}}}
-	if active {
-		l.spans = append(l.spans, span{"\x1b[7m", " "})
-	}
-	if value == "" && placeholder != "" {
-		l.spans = append(l.spans, span{t.quietFG, placeholder})
-	}
-	return l
-}
-
 // body is the box's content: height lines of width cells. Its frame is a
 // title row with the attached session's name, the mode's content, a toast
 // and the key hints.
@@ -705,13 +568,13 @@ func (o *overlay) body(width, height int) []line {
 	}
 	put(height-2, line{spans: hint})
 	if o.toast != "" {
-		put(height-4, line{spans: []span{{"", " "}, {t.signalFG, o.toast}}})
+		put(height-4, line{spans: []span{{"", " "}, {t.signalFG, escapeControls(o.toast)}}})
 	}
 
 	top, bottom := 3, height-4 // content rows: [top, bottom)
 	switch o.mode {
 	case overlayPalette:
-		put(top, o.input("❯", o.paletteQuery, "Type to filter", true))
+		put(top, o.theme.input("❯", o.paletteQuery, "Type to filter", true))
 		for i, item := range o.filteredPalette() {
 			if top+2+i >= bottom {
 				break
@@ -721,10 +584,10 @@ func (o *overlay) body(width, height int) []line {
 			if selected {
 				style = t.bold
 			}
-			put(top+2+i, o.listRow(width, selected, []span{{style, item.title}}, span{t.mutedFG, item.hint}))
+			put(top+2+i, o.theme.listRow(width, selected, []span{{style, item.title}}, span{t.mutedFG, item.hint}))
 		}
 	case overlaySwitcher:
-		put(top, o.input("❯", o.switcherQuery, "Filter sessions", true))
+		put(top, o.theme.input("❯", o.switcherQuery, "Filter sessions", true))
 		matches := o.filteredSessions()
 		room := max(bottom-top-2, 1)
 		first := max(o.switcherSelected-room+1, 0)
@@ -739,7 +602,7 @@ func (o *overlay) body(width, height int) []line {
 				spans = append(spans, span{"", "  "}, span{"", row.summary})
 			}
 			spans = append(spans, span{"", "  "}, span{t.quietFG, row.cwd})
-			put(top+2+i-first, o.listRow(width, i == o.switcherSelected, spans, span{t.quietFG, row.age}))
+			put(top+2+i-first, o.theme.listRow(width, i == o.switcherSelected, spans, span{t.quietFG, row.age}))
 		}
 		if len(matches) == 0 {
 			put(top+2, line{spans: []span{{"", "  "}, {t.mutedFG, "No sessions match."}}})
@@ -747,9 +610,9 @@ func (o *overlay) body(width, height int) []line {
 	case overlayNewSession:
 		label := func(row int, text string) { put(row, line{spans: []span{{"", " "}, {t.mutedFG, text}}}) }
 		label(top, "Name")
-		put(top+1, o.input("▌", o.nameInput, "Blank picks a name", !o.editAgent))
+		put(top+1, o.theme.input("▌", o.nameInput, "Blank picks a name", !o.editAgent))
 		label(top+3, "Agent")
-		put(top+4, o.input("▌", o.agentInput, "", o.editAgent))
+		put(top+4, o.theme.input("▌", o.agentInput, "", o.editAgent))
 		for i, l := range wrapText("Lowercase letters, numbers and hyphens.", width-2) {
 			if top+6+i < bottom {
 				put(top+6+i, line{spans: []span{{"", " "}, {t.quietFG, l}}})

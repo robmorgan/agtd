@@ -75,6 +75,9 @@ type env struct {
 	t    *testing.T
 	root string
 	work string
+	// extraEnv is added to agt's environment, and so the daemon's it
+	// starts.
+	extraEnv []string
 }
 
 func newEnv(t *testing.T, extraConfig string) *env {
@@ -96,7 +99,7 @@ func newEnv(t *testing.T, extraConfig string) *env {
 }
 
 func (e *env) environ() []string {
-	return append(os.Environ(), "AGTD_DIR="+e.root, "AGTD_BIN="+filepath.Join(binDir, "agtd"), "TERM=xterm-256color", "PS1=$ ")
+	return append(append(os.Environ(), "AGTD_DIR="+e.root, "AGTD_BIN="+filepath.Join(binDir, "agtd"), "TERM=xterm-256color", "PS1=$ "), e.extraEnv...)
 }
 
 // run runs a command without a terminal and returns its output.
@@ -506,29 +509,108 @@ func (e *env) startAndDetach(name string) {
 	tm.wait()
 }
 
-func TestPickerEndToEnd(t *testing.T) {
+// remoteEnv starts a second runtime root whose daemon listens on QUIC,
+// adds it to e as host name and authorizes e's key there: a separate
+// daemon, so a request routed to the wrong host is caught.
+func (e *env) remoteEnv(name string) *env {
+	e.t.Helper()
+	probe, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	addr := probe.LocalAddr().String()
+	probe.Close()
+	r := newEnv(e.t, "\n[remote]\nlisten = \""+addr+"\"\n")
+	r.mustRun("agt", "daemon", "info") // starts it
+	e.mustRun("agt", "host", "add", name, addr, "--fingerprint", strings.TrimSpace(r.mustRun("agtd", "remote", "id")))
+	r.mustRun("agtd", "remote", "authorize", strings.TrimSpace(e.mustRun("agt", "remote", "id")), "test")
+	return r
+}
+
+var sgrSequence = regexp.MustCompile("\x1b\\[[0-9;?]*[A-Za-z]")
+
+// expectScreen waits for a match of pattern in the output after mark, with
+// colours and cursor movement left out.
+func (tm *term) expectScreen(mark int, pattern string) int {
+	tm.t.Helper()
+	re := regexp.MustCompile(pattern)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		out := tm.output()
+		if re.MatchString(sgrSequence.ReplaceAllString(out[mark:], "")) {
+			return len(out)
+		}
+		if time.Now().After(deadline) {
+			tm.t.Fatalf("no %q on screen:\n%s", pattern, sgrSequence.ReplaceAllString(out[mark:], ""))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// Bare agt is the inbox: sessions from this machine and from a paired host,
+// the same name on both, each reached on its own daemon.
+func TestInboxEndToEnd(t *testing.T) {
 	e := newEnv(t, "")
 	e.startAndDetach("demo")
+	r := e.remoteEnv("dev")
+	r.startAndDetach("demo")
 
-	// Bare agent: filter, open the session's actions, attach.
+	// Both rows show; dev/ narrows to dev's, and Enter attaches to it.
 	tm := e.start()
-	m := tm.expect(0, "Type to filter")
-	tm.write("de")
-	m = tm.expect(m, "demo")
-	tm.write("\r")
-	m = tm.expect(m, "1. attach")
+	m := tm.expect(0, "Filter, or name a new session")
+	m = tm.expectScreen(m, `demo\s+local\s+sh\s+(running|working|idle)`)
+	tm.expectScreen(0, `demo\s+dev\s+sh\s+(running|working|idle)`)
+	tm.write("dev/")
+	m = tm.expectScreen(m, `dev/`)
 	tm.write("\r")
 	m = tm.expect(m, "attached to demo")
+	tm.write("pwd\r")
+	tm.expect(m, r.work)
 	tm.write("\x1c")
 	tm.wait()
 
-	// Esc leaves without attaching.
+	// Tab, remove, confirm: dev's demo goes, and this machine's keeps
+	// running. Esc clears the filter, then quits.
 	tm = e.start()
-	tm.expect(0, "Type to filter")
+	m = tm.expectScreen(0, `demo\s+dev`)
+	tm.write("dev/")
+	m = tm.expectScreen(m, `dev/`)
+	tm.write("\t")
+	m = tm.expectScreen(m, `2\. remove`)
+	tm.write("2")
+	m = tm.expectScreen(m, `Remove dev/demo\? Its working directory is kept\.`)
+	// A confirmation takes Enter only once it has been on screen for
+	// 500 ms (the inbox's inboxAcknowledgeAfter): read it first.
+	time.Sleep(600 * time.Millisecond) // gstack-timing-ok: waits out the inbox's confirm delay, asserts no timing
+	tm.write("\r")
+	tm.expectScreen(m, `removed session dev/demo`)
+	tm.write("\x1b")
 	tm.write("\x1b")
 	tm.wait()
 	if strings.Contains(tm.output(), "attached to") {
-		t.Fatal("Esc attached")
+		t.Fatal("the inbox attached on its way out")
+	}
+	if out := r.mustRun("agt", "ls"); strings.Contains(out, "demo") {
+		t.Fatalf("dev still has demo:\n%s", out)
+	}
+	if out := e.mustRun("agt", "ls"); !regexp.MustCompile(`demo\s+(running|working|idle)`).MatchString(sgrSequence.ReplaceAllString(out, "")) {
+		t.Fatalf("local demo after removing dev's:\n%s", out)
+	}
+}
+
+// `agt --host dev` shows dev alone and never starts this machine's daemon.
+func TestInboxLockedToHostEndToEnd(t *testing.T) {
+	e := newEnv(t, "")
+	r := e.remoteEnv("dev")
+	r.startAndDetach("there")
+	tm := e.start("--host", "dev")
+	m := tm.expectScreen(0, `there\s+dev\s+sh\s+(running|working|idle)`)
+	tm.write("n")
+	tm.expectScreen(m, "agt new -C DIR dev/NAME")
+	tm.write("\x1b")
+	tm.wait()
+	if _, err := os.Stat(paths.FromRoot(e.root).Socket); err == nil {
+		t.Fatal("agt --host dev started the local daemon")
 	}
 }
 

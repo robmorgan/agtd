@@ -23,6 +23,163 @@ const (
 	ansiAction   = "\x1b[33m"
 )
 
+// `agt list`
+
+const (
+	// listHeaderStyle is the header row's: white on grey.
+	listHeaderStyle = "\x1b[48;2;62;63;71m\x1b[38;2;255;255;255m"
+
+	sessionListDefaultWidth    = 120
+	sessionListSummaryWidth    = 160
+	sessionListRunWidth        = 3
+	sessionListAgeWidth        = 5
+	sessionListActivityWidth   = 11
+	sessionListSummaryMinWidth = 20
+	sessionListNameMinWidth    = 10
+	sessionListNameMaxWidth    = 26
+	sessionListNameFloorWidth  = 8
+	sessionListCwdMinWidth     = 16
+	sessionListCwdMaxWidth     = 48
+	sessionListCwdSummaryWidth = 32
+	sessionListCwdFloorWidth   = 10
+	sessionListStructuralWidth = 10
+)
+
+type sessionListLayout struct {
+	visible, run, age, name, activity, cwd int
+	// summary is the attention column's width; 0 hides it.
+	summary int
+}
+
+// fitColumns grows cwd then name into spare width, or shrinks name then cwd
+// down to their floors when there is too little.
+func fitColumns(name, cwd *int, available, fixed int) {
+	total := fixed + *name + *cwd
+	if available >= total {
+		remaining := available - total
+		grow := func(w *int, maxWidth int) {
+			add := min(remaining, max(maxWidth-*w, 0))
+			*w += add
+			remaining -= add
+		}
+		grow(cwd, sessionListCwdMaxWidth)
+		grow(name, sessionListNameMaxWidth)
+		return
+	}
+	deficit := total - available
+	shrink := func(w *int, floor int) {
+		remove := min(deficit, max(*w-floor, 0))
+		*w -= remove
+		deficit -= remove
+	}
+	shrink(name, sessionListNameFloorWidth)
+	shrink(cwd, sessionListCwdFloorWidth)
+}
+
+// listLayout fits the columns of `agt list` into width. With summaries
+// (some session has attention to explain) an ATTENTION column takes what
+// the others leave, and the list may be wider.
+func listLayout(width int, summaries bool) sessionListLayout {
+	limit := sessionListDefaultWidth
+	if summaries {
+		limit = sessionListSummaryWidth
+	}
+	l := sessionListLayout{
+		visible:  min(max(width, 1), limit),
+		run:      sessionListRunWidth,
+		age:      sessionListAgeWidth,
+		name:     sessionListNameMinWidth,
+		activity: sessionListActivityWidth,
+		cwd:      sessionListCwdMinWidth,
+	}
+	fixed := sessionListStructuralWidth + l.run + l.age + l.activity
+	if !summaries {
+		fitColumns(&l.name, &l.cwd, l.visible, fixed)
+		return l
+	}
+	// The attention column, with its separator, gets what is left once
+	// name and cwd have their usual widths; without room for it, they keep
+	// the room. `agt status` shows the summary in full.
+	fitColumns(&l.name, &l.cwd, l.visible-sessionListSummaryMinWidth, fixed+2)
+	if l.name < sessionListNameMinWidth || l.cwd < sessionListCwdMinWidth {
+		l.name, l.cwd = sessionListNameMinWidth, sessionListCwdMinWidth
+		fitColumns(&l.name, &l.cwd, l.visible, fixed)
+		return l
+	}
+	// What needs attention matters more than the end of a long path.
+	l.cwd = min(l.cwd, sessionListCwdSummaryWidth)
+	l.summary = l.visible - fixed - 2 - l.name - l.cwd
+	return l
+}
+
+func renderSessionListLines(sessions []session.Record, width int, now time.Time) []string {
+	return renderSessionList(sessions, nil, width, now)
+}
+
+// renderSessionList renders `agt list`. hosts, when not nil, names the
+// host of each session (hosts[i] for sessions[i]) and adds a HOST column,
+// for `agt list --all`.
+func renderSessionList(sessions []session.Record, hosts []string, width int, now time.Time) []string {
+	index := make(map[*session.Record]int, len(sessions))
+	for i := range sessions {
+		index[&sessions[i]] = i
+	}
+	rows := make([]displayRow, 0, len(sessions))
+	rowHosts := make([]string, 0, len(sessions))
+	summaries := false
+	hostWidth := 0
+	if hosts != nil {
+		hostWidth = len("HOST")
+		for _, h := range hosts {
+			hostWidth = max(hostWidth, runeLen(h))
+		}
+	}
+	for _, s := range orderedSessions(sessions) {
+		row := buildDisplayRow(s, now)
+		summaries = summaries || row.summary != ""
+		rows = append(rows, row)
+		if hosts != nil {
+			rowHosts = append(rowHosts, hosts[index[s]])
+		}
+	}
+	l := listLayout(width-hostWidth-min(hostWidth, 2), summaries)
+	hostCell := func(text string) string {
+		if hostWidth == 0 {
+			return ""
+		}
+		return formatCell(text, hostWidth) + "  "
+	}
+	headerRow := fmt.Sprintf("  %s  %s  %s%s  %s  %s", formatCell("RUN", l.run), formatCell("AGE", l.age), hostCell("HOST"), formatCell("NAME", l.name),
+		formatCell("ACTIVITY", l.activity), formatCell("CWD", l.cwd))
+	if l.summary > 0 {
+		headerRow += "  " + formatCell("ATTENTION", l.summary)
+	}
+	visible := l.visible + hostWidth + min(hostWidth, 2)
+	lines := []string{listHeaderStyle + takeRunes(headerRow, visible) + ansiReset}
+	if len(sessions) == 0 {
+		return append(lines, truncateCell("  No sessions.", visible))
+	}
+	for i, row := range rows {
+		icon, iconStyle := rowIcon(row)
+		host := ""
+		if hosts != nil {
+			host = styleAge(hostCell(rowHosts[i]))
+		}
+		line := fmt.Sprintf("  %s  %s  %s%s  %s  %s",
+			iconStyle+formatCell(icon, l.run)+ansiReset,
+			styleAge(formatCell(row.age, l.age)),
+			host,
+			styleName(formatCell(row.name, l.name)),
+			formatCell(row.activity, l.activity),
+			styleCwd(formatPathCell(row.cwd, l.cwd)))
+		if l.summary > 0 && row.summary != "" {
+			line += "  " + styleSummary(truncateCell(row.summary, l.summary), row.attention)
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
 // runState is how a session is shown: its status, with creating shown as
 // starting and unknown_recovered as recovered.
 type runState int
@@ -65,7 +222,7 @@ func buildDisplayRow(s *session.Record, now time.Time) displayRow {
 	row := displayRow{
 		run:            run,
 		age:            elapsedLabel(s, now),
-		name:           s.SessionID,
+		name:           escapeControls(s.SessionID),
 		cwd:            displayCwd(s.Cwd, os.Getenv("HOME")),
 		needsAttention: run == runFailed || s.Attention == session.AttentionAction,
 		attention:      s.Attention,
@@ -219,26 +376,46 @@ func formatElapsed(seconds int64) string {
 	return fmt.Sprintf("%dd", seconds/(60*60*24))
 }
 
-// sessionSortBucket orders sessions for every list: live ones needing
-// action first, then live ones with something to notice, the other live
-// ones, failed or lost ones, ended ones whose end is unseen (action, then
-// notice), and finished ones last. Ended sessions stay below live ones
-// even when they need action: only removing them clears it, and they
-// would otherwise crowd out the sessions the user can still act in.
-func sessionSortBucket(s *session.Record) int {
-	live := s.Status == session.StatusCreating || s.Status == session.StatusRunning
-	switch {
-	case live:
-		return 2 - s.Attention.Rank()
-	case s.Status == session.StatusFailed || s.Status == session.StatusUnknownRecovered:
-		return 3
-	case s.Attention == session.AttentionAction:
-		return 4
-	case s.Attention == session.AttentionNotice:
-		return 5
+// inboxSortBucket orders sessions for every list (the inbox, `agt ls`,
+// `agt ls --all`, the overlay's switcher): live sessions that need you
+// first, then working ones, running ones that report nothing (and those
+// still starting), idle ones, and then the ended ones: exited, failed and
+// lost. Ended sessions stay below live ones even when they need action:
+// only removing them clears it, and they would otherwise crowd out the
+// sessions the user can still act in.
+func inboxSortBucket(s *session.Record) int {
+	switch s.Status {
+	case session.StatusCreating, session.StatusRunning:
+	case session.StatusFailed:
+		return bucketFailed
+	case session.StatusUnknownRecovered:
+		return bucketLost
+	default:
+		return bucketExited
 	}
-	return 6
+	switch {
+	case s.Attention == session.AttentionAction:
+		return bucketNeedsYou
+	case s.Status == session.StatusCreating:
+		return bucketRunning
+	case s.Activity == session.ActivityWorking:
+		return bucketWorking
+	case s.Activity == session.ActivityIdle:
+		return bucketIdle
+	}
+	return bucketRunning
 }
+
+// inboxSortBucket's buckets, in list order.
+const (
+	bucketNeedsYou = iota + 1
+	bucketWorking
+	bucketRunning
+	bucketIdle
+	bucketExited
+	bucketFailed
+	bucketLost
+)
 
 // sortTime orders sessions within a bucket, newest first: when their
 // attention was raised, or else when they last changed.
@@ -256,7 +433,7 @@ func orderedSessions(sessions []session.Record) []*session.Record {
 		out[i] = &sessions[i]
 	}
 	slices.SortStableFunc(out, func(a, b *session.Record) int {
-		if d := sessionSortBucket(a) - sessionSortBucket(b); d != 0 {
+		if d := inboxSortBucket(a) - inboxSortBucket(b); d != 0 {
 			return d
 		}
 		return sortTime(b).Compare(sortTime(a))

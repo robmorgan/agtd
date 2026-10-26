@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -104,5 +105,165 @@ func TestReservedHostNames(t *testing.T) {
 	a := &app{paths: testClient(t).paths, host: autoHostName}
 	if _, err := a.connect(nil, "", nil); err == nil || !strings.Contains(err.Error(), "only chooses a host for `agt new`") {
 		t.Fatalf("--host auto: %v", err)
+	}
+}
+
+// hostSetApp is an app whose hosts.toml lists names, for hostSet tests
+// that replace the probe.
+func hostSetApp(t *testing.T, names ...string) *app {
+	t.Helper()
+	c := testClient(t)
+	if err := c.paths.EnsureLayout(); err != nil {
+		t.Fatal(err)
+	}
+	for i, name := range names {
+		if err := transport.AddHost(c.paths.HostsPath(), transport.Host{Name: name, Address: fmt.Sprintf("127.0.0.1:%d", 7000+i), Fingerprint: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return &app{paths: c.paths}
+}
+
+// nextProbe waits for the set's next snapshot.
+func nextProbe(t *testing.T, set *hostSet) *hostProbe {
+	t.Helper()
+	select {
+	case p := <-set.updates:
+		return p
+	case <-time.After(5 * time.Second):
+		t.Fatal("no probe arrived")
+		return nil
+	}
+}
+
+// Each host's snapshot arrives as soon as that host answers: a host that
+// hangs never holds up another, and stop ends every goroutine, the hung
+// probe included.
+func TestHostSetStreamsEachHost(t *testing.T) {
+	a := hostSetApp(t, "dev", "dead")
+	set, placeholders, err := a.startHostSet(hostSetOptions{probe: func(ctx context.Context, c *client, p *hostProbe) {
+		if p.name == "dead" {
+			<-ctx.Done()
+			p.status = hostOffline
+			return
+		}
+		p.status = hostOnline
+		p.sessions = []session.Record{{SessionID: p.name + "-a"}}
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(placeholders) != 3 || placeholders[0].name != localHostName || placeholders[1].name != "dev" || placeholders[2].status != hostAsking {
+		t.Fatalf("placeholders = %+v", placeholders)
+	}
+	seen := map[string]bool{}
+	for len(seen) < 2 {
+		p := nextProbe(t, set)
+		if p.name == "dead" {
+			t.Fatal("the hung host answered")
+		}
+		seen[p.name] = true
+	}
+	done := make(chan struct{})
+	go func() { set.stop(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stop did not end the probes")
+	}
+}
+
+// A host is probed one probe at a time, however often it is asked; a
+// failing one is asked again after a backoff that doubles up to its cap,
+// and r (reprobeHost) asks at once and starts the backoff over.
+func TestHostSetBackoffAndReprobe(t *testing.T) {
+	a := hostSetApp(t, "down")
+	var mu sync.Mutex
+	inFlight, maxInFlight := 0, 0
+	var calls []time.Time
+	set, _, err := a.startHostSet(hostSetOptions{only: "down", retryFirst: 40 * time.Millisecond, retryMax: 160 * time.Millisecond,
+		probe: func(ctx context.Context, c *client, p *hostProbe) {
+			mu.Lock()
+			inFlight++
+			maxInFlight = max(maxInFlight, inFlight)
+			calls = append(calls, time.Now())
+			mu.Unlock()
+			time.Sleep(5 * time.Millisecond)
+			mu.Lock()
+			inFlight--
+			mu.Unlock()
+			p.status = hostOffline
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer set.stop()
+	for range 6 {
+		nextProbe(t, set)
+		set.reprobeHost("down") // asked again and again while probing
+		set.reprobeHost("down")
+	}
+	mu.Lock()
+	if maxInFlight != 1 {
+		t.Errorf("%d probes of one host at once", maxInFlight)
+	}
+	mu.Unlock()
+
+	// Without reprobes the gaps grow 40, 80, 160, 160 ms.
+	for range 2 {
+		nextProbe(t, set) // drain what the reprobes above started
+	}
+	mu.Lock()
+	start := len(calls)
+	mu.Unlock()
+	for range 4 {
+		nextProbe(t, set)
+	}
+	mu.Lock()
+	gaps := []time.Duration{}
+	for i := start; i+1 < len(calls); i++ {
+		gaps = append(gaps, calls[i+1].Sub(calls[i]))
+	}
+	mu.Unlock()
+	if len(gaps) < 2 || gaps[len(gaps)-1] < 150*time.Millisecond || gaps[len(gaps)-1] > 400*time.Millisecond {
+		t.Errorf("backoff gaps = %v, want growing to the 160ms cap", gaps)
+	}
+
+	// A reprobe answers at once.
+	asked := time.Now()
+	set.reprobeHost("down")
+	nextProbe(t, set)
+	if waited := time.Since(asked); waited > 100*time.Millisecond {
+		t.Errorf("reprobe took %v", waited)
+	}
+}
+
+// A view locked to one remote host never probes, or starts, this
+// machine's daemon.
+func TestHostSetLockedToOneHost(t *testing.T) {
+	a := hostSetApp(t, "dev", "other")
+	var mu sync.Mutex
+	probed := map[string]bool{}
+	set, placeholders, err := a.startHostSet(hostSetOptions{only: "dev", startLocal: true, probe: func(ctx context.Context, c *client, p *hostProbe) {
+		mu.Lock()
+		probed[p.name] = true
+		mu.Unlock()
+		p.status = hostOnline
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(placeholders) != 1 || placeholders[0].name != "dev" {
+		t.Fatalf("placeholders = %+v", placeholders)
+	}
+	if p := nextProbe(t, set); p.name != "dev" {
+		t.Fatalf("probe of %s", p.name)
+	}
+	set.stop()
+	if probed[localHostName] || probed["other"] {
+		t.Fatalf("probed %v", probed)
+	}
+	if _, _, err := a.startHostSet(hostSetOptions{only: "nope"}); err == nil {
+		t.Fatal("an unknown host was accepted")
 	}
 }

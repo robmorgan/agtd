@@ -11,7 +11,7 @@ import (
 // stdinChunks returns the channel carrying everything read from stdin.
 //
 // One goroutine reads stdin for the whole process, blocking in read(2).
-// The picker, the attach loop and the overlay all take their input from
+// The inbox, the attach loop and the overlay all take their input from
 // it, so switching between them (or between sessions) never has to stop a
 // read in progress, and stdin is never made non-blocking, which would leak
 // to the shell through the shared file description. The goroutine is never
@@ -233,7 +233,7 @@ func csiDecimal(b []byte, i *int) (uint32, bool) {
 	return uint32(v), *i > start
 }
 
-// Keys for the picker and the overlay.
+// Keys for the inbox and the overlay.
 
 type keyCode int
 
@@ -301,15 +301,28 @@ type keyEvent struct {
 // until its end marker, up to pasteMax; a longer one is forwarded as it
 // arrives, in keyUnknown events, holding back only what may be the start of
 // its end marker, and the end marker is looked for once in each byte. So
-// the overlay and the picker, which get no keyUnknown events, ignore a
+// the overlay and the inbox, which get no keyUnknown events, ignore a
 // paste longer than pasteMax (a session name or a query never is). The
 // local echo calls expire when nothing completes what is held, and reset
 // when the attachment or the overlay takes over.
 type keyDecoder struct {
 	pending []byte
 	// forwardAll also returns keyUnknown and keyPassive events; the
-	// picker and the overlay have no use for them.
+	// inbox and the overlay have no use for them.
 	forwardAll bool
+	// holdEsc holds a lone ESC at the end of a read, as the start of a
+	// sequence the next read may complete (a paste's start marker split
+	// across reads would otherwise be Esc and then keys). It is Esc when
+	// the next read does not continue a sequence, or when expire comes.
+	holdEsc bool
+	// discarding is set once a paste is given up in a decoder that does
+	// not forward raw bytes: what follows is the rest of that paste, so it
+	// is dropped up to the paste's end marker (or until expire), never
+	// decoded as keys.
+	discarding bool
+	// pastes counts the pastes begun, so a caller can tell a new paste
+	// from the one it was waiting on.
+	pastes int
 	// paste is the bracketed paste being read, from its start marker (or,
 	// once streaming, what is left of it after the last event); scanned
 	// is how much of it is known to hold no end marker.
@@ -332,12 +345,28 @@ var (
 )
 
 func (d *keyDecoder) push(chunk []byte) []keyEvent {
+	var events []keyEvent
+	if d.holdEsc && !d.discarding && string(d.pending) == "\x1b" && !continuesEsc(chunk) {
+		// A held ESC that this read does not continue was Esc.
+		d.pending = nil
+		events = append(events, keyEvent{code: keyEsc, raw: []byte{0x1b}})
+	}
 	b := chunk
 	if len(d.pending) > 0 {
 		b = append(d.pending, chunk...)
 		d.pending = nil
 	}
-	var events []keyEvent
+	if d.discarding {
+		end := bytes.Index(b, pasteEnd)
+		if end < 0 {
+			// Keep what may be the start of the end marker.
+			keep := min(len(b), len(pasteEnd)-1)
+			d.pending = append([]byte(nil), b[len(b)-keep:]...)
+			return events
+		}
+		d.discarding = false
+		b = b[end+len(pasteEnd):]
+	}
 	for len(b) > 0 {
 		if d.paste != nil {
 			var ev keyEvent
@@ -349,12 +378,16 @@ func (d *keyDecoder) push(chunk []byte) []keyEvent {
 			continue
 		}
 		if bytes.HasPrefix(b, pasteStart) {
+			d.pastes++
 			d.paste = append(make([]byte, 0, len(pasteStart)+len(b)), pasteStart...)
 			d.scanned = len(pasteStart)
 			b = b[len(pasteStart):]
 			continue
 		}
 		ev, n := decodeKey(b)
+		if d.holdEsc && len(b) == 1 && b[0] == 0x1b {
+			n = 0
+		}
 		if n == 0 {
 			if len(b) <= keySequenceMax {
 				d.pending = append([]byte(nil), b...)
@@ -420,26 +453,60 @@ func (d *keyDecoder) streamPaste() (ev keyEvent, ok bool, rest []byte) {
 	return ev, true, nil
 }
 
-// held reports whether the decoder holds bytes, or is inside a paste, so
-// that expire has something to give up.
-func (d *keyDecoder) held() bool {
-	return len(d.pending) > 0 || d.paste != nil
+// continuesEsc reports whether chunk, read after a held lone ESC, is the
+// rest of what began with it: a CSI or SS3 sequence, another ESC (Alt with
+// a sequence), or one printable byte (Alt and a key, split across reads).
+func continuesEsc(chunk []byte) bool {
+	if len(chunk) == 0 {
+		return true
+	}
+	switch c := chunk[0]; {
+	case c == '[', c == 'O', c == 0x1b:
+		return true
+	case len(chunk) == 1:
+		return c >= 0x20 && c != 0x7f
+	}
+	return false
 }
 
-// expire gives up on what is held because nothing followed it: an
-// incomplete sequence goes as it is (Alt-[ in a legacy terminal is ESC [,
-// which waits for a final byte that never comes), and a paste whose end has
-// not come is forwarded as it arrives from then on. A paste already
-// forwarded that way is given up for good: what may have been the start of
-// its end marker goes too, and what follows is decoded as keys.
+// pasting reports whether the decoder is inside a bracketed paste, or
+// dropping the rest of one it gave up.
+func (d *keyDecoder) pasting() bool { return d.paste != nil || d.discarding }
+
+// held reports whether the decoder holds bytes, is inside a paste, or is
+// dropping the rest of one, so that expire has something to give up.
+func (d *keyDecoder) held() bool {
+	return len(d.pending) > 0 || d.paste != nil || d.discarding
+}
+
+// expire gives up on what is held because nothing followed it: a lone
+// ESC held by holdEsc is Esc, an incomplete sequence goes as it is (Alt-[
+// in a legacy terminal is ESC [, which waits for a final byte that never
+// comes), and a paste whose end has not come is forwarded as it arrives
+// from then on. A paste already forwarded that way is given up for good:
+// what may have been the start of its end marker goes too. What follows is
+// decoded as keys, except in a decoder that does not forward raw bytes,
+// which drops it as the rest of the paste (discarding) until the end marker
+// or the next expire.
 func (d *keyDecoder) expire() []keyEvent {
+	if d.discarding {
+		d.discarding, d.pending = false, nil
+		return nil
+	}
+	if d.paste == nil && string(d.pending) == "\x1b" {
+		d.reset()
+		return []keyEvent{{code: keyEsc, raw: []byte{0x1b}}}
+	}
 	if d.paste != nil && !d.streaming {
 		if ev, ok, _ := d.streamPaste(); ok {
 			return []keyEvent{ev}
 		}
 		return nil
 	}
-	if raw := d.reset(); len(raw) > 0 {
+	inPaste := d.paste != nil
+	raw := d.reset()
+	d.discarding = inPaste && !d.forwardAll
+	if len(raw) > 0 {
 		return []keyEvent{{code: keyUnknown, raw: raw}}
 	}
 	return nil
@@ -450,7 +517,7 @@ func (d *keyDecoder) expire() []keyEvent {
 // leaves the decoder as new.
 func (d *keyDecoder) reset() []byte {
 	raw := append(d.pending, d.paste...)
-	d.pending, d.paste, d.scanned, d.streaming = nil, nil, 0, false
+	d.pending, d.paste, d.scanned, d.streaming, d.discarding = nil, nil, 0, false, false
 	return raw
 }
 

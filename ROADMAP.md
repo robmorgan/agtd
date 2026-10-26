@@ -860,7 +860,7 @@ agent appears stalled
       arrives; listing a program's full record tree (ids) in `agt status`
 * [x] Add event persistence (`events` in `state.db`, newest 500 per session)
 * [x] Surface attention in CLI (`agt ls`, `agt status`, `agt events`)
-* [x] Surface attention in TUI (picker and `Ctrl-Y` switcher order and mark sessions needing action)
+* [x] Surface attention in TUI (inbox and `Ctrl-Y` switcher order and mark sessions needing action)
 * [x] Track task elapsed time (`agt ls` age, `agt status` elapsed)
 * [x] Track agent/process status (activity, PTY foreground process, title)
 * [x] Expose Git state (`GetGitState`, `agt status`; the base is recorded at session creation)
@@ -915,6 +915,15 @@ agt attach devbox-1/auth-tests
 * [x] Host-aware CLI UX (HOST column, `local/` and `host/` addresses everywhere, `--host local|auto`)
 * [x] Machine capabilities (`Welcome` host description; `agt host info`)
 * [x] Simple placement hints (`agt --host auto new`: least running sessions per CPU among hosts with the agent and workspace)
+* [x] One inbox for every host (bare `agt`, `docs/designs/agt-inbox.md` phase 1): sessions from this
+      machine and every paired host, needs-you first, filter with `host/` narrowing, Enter attaches
+      on the row's host, Tab to attach or remove (by UID, `kill-expect-uid`), hosts probed in the
+      background with backoff
+    * [ ] Phase 2: the full actions menu (stop, take over size, diff, history) and detach returning
+          to the inbox (attach owns the alternate screen when launched from it)
+    * [ ] Phase 3: new session anywhere (host, workspace, agent, name), workspaces added and removed inline
+    * [ ] Phase 4: peek and inline reply, gated on a timed trial
+    * [ ] Phase 5: host health inline
 * [ ] Moving and forking sessions between hosts (future; see below)
 
 Avoid implementing a scheduler until real usage requires one.
@@ -1112,6 +1121,25 @@ by the client, so lag never flashes.
 * [x] Screen frames (`attach-frames`): rows diffed per attachment, two frames in flight, the echo
       composed over the live screen, native scrollback kept
 * [x] `attach-compose` for scripts, submit-and-switch
+
+---
+
+# Phase 15 — SSH agent forwarding
+
+The design (`docs/designs/ssh-agent-forwarding.md`): an agent on a devbox pushes and signs with
+the keys of the machine the user attaches from, as `ssh -A` allows, without tying the session to a
+connection. Every session has its own agent socket; the forwarder of the attachment that owns the
+size answers on it.
+
+## Deliverables
+
+* [x] Phase 1: each session's agent socket (`SSH_AUTH_SOCK`, `[ssh_agent] session_socket`),
+      routing by size ownership with the wait for the owner's reattach, the inherited fallback,
+      `ssh-agent` streams (`ForwardSSHAgent`), `[ssh_agent] forward` for every attachment, the
+      message and key filters, events, the socket across live handoffs (handoff format 2)
+* [ ] Phase 2: destination policy (verified session bindings, `known_hosts`, `allow_hosts`,
+      `allow_namespaces`), refusing onward forwarding, and asking the user from the overlay
+* [ ] Phase 3, if asked for: the agtd hop in OpenSSH's own destination constraints
 
 ---
 

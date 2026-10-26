@@ -1,5 +1,5 @@
 // Package cli is the agent command-line client: every command, the
-// session picker, and attach with its overlay. It talks to agtd only
+// inbox, and attach with its overlay. It talks to agtd only
 // through the agent protocol, locally over the daemon's Unix socket or
 // remotely over QUIC, and never opens the daemon's state itself.
 package cli

@@ -211,3 +211,62 @@ func (s *Server) workerAttachCapabilities(id string) []string {
 	caps, _ := workerCapabilities(s.paths.SessionSocketPath(id))
 	return caps
 }
+
+// proxySSHAgent splices an attachment's SSH agent forwarder (an ssh-agent
+// stream) onto the session's worker, as proxyAttach does an attach: once the
+// incarnation is checked and the worker is known to forward, it is a byte
+// pipe in both directions. ForwardSSHAgent.Client is set here, to who the
+// connection is, for the session's events; what the client sent is
+// replaced.
+func (s *Server) proxySSHAgent(client transport.Stream, clientReader *bufio.Reader, req *protocol.ForwardSSHAgent) error {
+	fail := func(err error) error { return protocol.WriteResponse(client, protocol.ErrorResponsef("%v", err)) }
+	if req.ExpectUID != "" {
+		rec, err := s.db.GetSession(req.SessionID)
+		switch {
+		case err != nil:
+			return fail(err)
+		case rec == nil:
+			return fail(fmt.Errorf("session `%s` not found", req.SessionID))
+		case rec.UID != req.ExpectUID:
+			return fail(errors.New(protocol.SessionReplacedMessage(req.SessionID)))
+		}
+	}
+	worker, err := s.dialWorker(req.SessionID)
+	if err != nil {
+		return fail(err)
+	}
+	defer worker.Close()
+	if !protocol.HasCapability(s.workerAttachCapabilities(req.SessionID), protocol.CapSSHAgent) {
+		return fail(fmt.Errorf("session `%s` cannot forward an SSH agent: it was started without an agent socket ([ssh_agent] session_socket = false, or by an older agtd)", req.SessionID))
+	}
+	req.Client = s.describeClient(client)
+	if err := protocol.WriteRequest(worker, &protocol.Request{ForwardSSHAgent: req}); err != nil {
+		return fail(fmt.Errorf("session `%s` runtime: %v", req.SessionID, err))
+	}
+
+	clientDone := make(chan struct{})
+	go func() {
+		defer close(clientDone)
+		_, _ = io.Copy(worker, clientReader)
+		_ = worker.CloseWrite()
+	}()
+	_, copyErr := io.Copy(client, worker)
+	_ = client.CloseWrite()
+	client.Close()
+	worker.Close()
+	<-clientDone
+	if copyErr != nil && !isDisconnect(copyErr) {
+		return copyErr
+	}
+	return nil
+}
+
+// describeClient names who is on the other end of a stream, for events: a
+// remote client by its key's name and fingerprint, anything else as
+// "local".
+func (s *Server) describeClient(stream transport.Stream) string {
+	if fp := transport.PeerFingerprint(stream); fp != "" {
+		return transport.DescribeClient(fp, s.clientName(fp))
+	}
+	return "local"
+}
