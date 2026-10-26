@@ -75,6 +75,21 @@ const (
 	// EventAcknowledged: the user looked at the session, clearing its
 	// attention (info).
 	EventAcknowledged EventKind = "acknowledged"
+	// EventSSHAgentSigned: the SSH agent a client forwards signed for a
+	// program in the session; the summary names what was signed (a login,
+	// as whom and where, or a namespace such as git's), the key and the
+	// client (info).
+	EventSSHAgentSigned EventKind = "ssh_agent_signed"
+	// EventSSHAgentRefused: a request to a forwarded agent was refused:
+	// one a forwarded agent never takes (adding, removing or locking keys),
+	// or a signature the client did not give (info).
+	EventSSHAgentRefused EventKind = "ssh_agent_refused"
+	// EventSSHAgentUnavailable: a program asked the session's agent socket
+	// for keys while no client forwarded an agent and there was no other
+	// agent to answer, so it got none. Recorded once per gap in forwarding,
+	// and only for a session that has been forwarded to before (info: it
+	// never raises attention).
+	EventSSHAgentUnavailable EventKind = "ssh_agent_unavailable"
 
 	// Host events are about the machine, not a session (their SessionID is
 	// empty): an audit record of who can reach the daemon remotely.

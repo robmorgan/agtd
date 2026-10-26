@@ -990,6 +990,7 @@ func TestRuntimeFilesArePrivate(t *testing.T) {
 		h.paths.Root:                0o700,
 		h.paths.LogsDir:             0o700,
 		h.paths.SessionsDir:         0o700,
+		h.paths.SSHDir:              0o700,
 		h.paths.Socket:              0o600,
 		h.paths.PIDFile:             0o600,
 		h.paths.Database:            0o600,

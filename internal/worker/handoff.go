@@ -70,13 +70,24 @@ import (
 	"agtd.sh/internal/transport"
 )
 
-// handoffVersion is the format of handoffState. A new image refuses a state
-// it does not know, which the old image avoids by probing first.
-const handoffVersion = 1
+// handoffVersion is the newest format of handoffState. A new image refuses a
+// state it does not know, which the old image avoids by probing first.
+//
+// Format 2 adds the SSH agent socket (SSHAgentFD). An image that does not
+// know it would leave the socket listening with nobody accepting, and every
+// program asking the agent would hang, so a state that carries the socket is
+// format 2, which older images refuse, and any other is format 1, which they
+// resume.
+const handoffVersion = 2
 
-// handoffProbeOutput is what `agtd session-worker --handoff-probe` prints:
-// the handoff formats the binary can resume from.
-var handoffProbeOutput = fmt.Sprintf("agtd session-worker handoff %d", handoffVersion)
+// handoffProbeLine is the line `agtd session-worker --handoff-probe` prints
+// for each handoff format the binary can resume from.
+func handoffProbeLine(version int) string {
+	return fmt.Sprintf("agtd session-worker handoff %d", version)
+}
+
+// handoffProbeOutput is what `agtd session-worker --handoff-probe` prints.
+var handoffProbeOutput = handoffProbeLine(1) + "\n" + handoffProbeLine(2)
 
 const (
 	probeTimeout = 10 * time.Second
@@ -117,11 +128,19 @@ type handoffState struct {
 	// Colors are the client terminal's default colours (colors.go). Nil
 	// from an older image, or when no terminal reported them.
 	Colors *protocol.TerminalColors
+	// SSHAgentWaitFor is the reserved size owner whose forwarder agent
+	// connections wait for (sshagent.go), and SSHAgentForwarded records
+	// that the session has been forwarded to.
+	SSHAgentWaitFor   string
+	SSHAgentForwarded bool
 
 	// Inherited descriptors.
 	PTYFD      int
 	ListenerFD int
 	RequestFD  int
+	// SSHAgentFD is the SSH agent socket's listener (format 2), 0 for a
+	// session without one.
+	SSHAgentFD int
 }
 
 type handoffRequest struct {
@@ -160,7 +179,11 @@ func (rt *runtime) tryHandoff(req *handoffRequest, state *ownerState) (err error
 	if !filepath.IsAbs(req.exe) {
 		return errors.New("the executable must be an absolute path")
 	}
-	if err := probeHandoff(req.exe); err != nil {
+	version := 1
+	if rt.agent != nil && rt.agent.listener != nil {
+		version = 2
+	}
+	if err := probeHandoff(req.exe, version); err != nil {
 		return err
 	}
 
@@ -192,6 +215,22 @@ func (rt *runtime) tryHandoff(req *handoffRequest, state *ownerState) (err error
 		listenerFile.Close()
 		rt.startAccepting()
 	})
+
+	// The SSH agent socket goes the same way: connections queue for the
+	// new image, and the ones open now are closed (an ssh in the middle
+	// of authenticating fails once).
+	var agentFile *os.File
+	if version == 2 {
+		if agentFile, err = rt.agent.listener.File(); err != nil {
+			return fmt.Errorf("failed to duplicate the SSH agent socket: %w", err)
+		}
+		rt.agent.stop()
+		undo = append(undo, func() {
+			rt.agent.relisten(agentFile)
+			agentFile.Close()
+			rt.agent.start()
+		})
+	}
 
 	_ = rt.owner.do(func(s *ownerState) error { close(s.restart); return nil })
 	undo = append(undo, func() {
@@ -230,16 +269,18 @@ func (rt *runtime) tryHandoff(req *handoffRequest, state *ownerState) (err error
 			return err
 		}
 		st = &handoffState{
-			Version:   handoffVersion,
-			Args:      rt.args,
-			AgentPID:  rt.agentPID,
-			Handoffs:  rt.handoffCount + 1,
-			StartedAt: rt.startedAt,
-			Terminal:  *term,
-			Geometry:  s.geometry,
-			SizeOwner: s.sizeOwner,
-			Status:    s.status.handoff(),
-			Colors:    s.colors,
+			Version:           version,
+			Args:              rt.args,
+			AgentPID:          rt.agentPID,
+			Handoffs:          rt.handoffCount + 1,
+			StartedAt:         rt.startedAt,
+			Terminal:          *term,
+			Geometry:          s.geometry,
+			SizeOwner:         s.sizeOwner,
+			Status:            s.status.handoff(),
+			Colors:            s.colors,
+			SSHAgentWaitFor:   s.agentHandoffWaitFor(),
+			SSHAgentForwarded: s.agentForwarded,
 		}
 		if s.activity != nil {
 			s.activity.exportAlertMemory(st.Status)
@@ -251,7 +292,7 @@ func (rt *runtime) tryHandoff(req *handoffRequest, state *ownerState) (err error
 	if rt.killed.Load() {
 		return errors.New("the session is being stopped")
 	}
-	return rt.execHandoff(req, st, listenerFile)
+	return rt.execHandoff(req, st, listenerFile, agentFile)
 }
 
 // relisten serves the socket again from the duplicate kept for the exec.
@@ -293,8 +334,9 @@ func waitInputDrained(in *ptyInput, timeout time.Duration) bool {
 
 // execHandoff writes the state, makes the descriptors inheritable and
 // executes the new image. It returns only if the exec failed, having made
-// the descriptors close-on-exec again.
-func (rt *runtime) execHandoff(req *handoffRequest, st *handoffState, listenerFile *os.File) error {
+// the descriptors close-on-exec again. agentFile is the SSH agent socket's
+// listener, nil for none.
+func (rt *runtime) execHandoff(req *handoffRequest, st *handoffState, listenerFile, agentFile *os.File) error {
 	stateFile, err := os.CreateTemp(rt.paths.SessionsDir, "handoff-*")
 	if err != nil {
 		return fmt.Errorf("failed to create the handoff state file: %w", err)
@@ -318,6 +360,9 @@ func (rt *runtime) execHandoff(req *handoffRequest, st *handoffState, listenerFi
 	st.PTYFD = rawFD(rt.ptmx)
 	st.ListenerFD = rawFD(listenerFile)
 	st.RequestFD = rawFD(requestFile)
+	if agentFile != nil {
+		st.SSHAgentFD = rawFD(agentFile)
+	}
 	data, err := json.Marshal(st)
 	if err != nil {
 		return err
@@ -330,6 +375,9 @@ func (rt *runtime) execHandoff(req *handoffRequest, st *handoffState, listenerFi
 	}
 
 	fds := []int{st.PTYFD, st.ListenerFD, st.RequestFD, rawFD(stateFile)}
+	if st.SSHAgentFD > 0 {
+		fds = append(fds, st.SSHAgentFD)
+	}
 	for _, fd := range fds {
 		if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFD, 0); err != nil {
 			for _, fd := range fds {
@@ -357,11 +405,11 @@ func rawFD(f *os.File) int {
 	return fd
 }
 
-// probeHandoff checks that exe runs here and can resume from this image's
-// handoff format, before anything is disturbed. After the exec there is no
-// going back, so a missing binary, one for another architecture, one that
-// crashes at start, or one too old to resume, is caught here instead.
-func probeHandoff(exe string) error {
+// probeHandoff checks that exe runs here and can resume from handoff format
+// version, before anything is disturbed. After the exec there is no going
+// back, so a missing binary, one for another architecture, one that crashes
+// at start, or one too old to resume, is caught here instead.
+func probeHandoff(exe string, version int) error {
 	if exe == "" {
 		return errors.New("no executable given")
 	}
@@ -376,11 +424,11 @@ func probeHandoff(exe string) error {
 	}
 	scanner := bufio.NewScanner(&out)
 	for scanner.Scan() {
-		if strings.TrimSpace(scanner.Text()) == handoffProbeOutput {
+		if strings.TrimSpace(scanner.Text()) == handoffProbeLine(version) {
 			return nil
 		}
 	}
-	return fmt.Errorf("%s cannot resume this session (it does not support handoff format %d)", exe, handoffVersion)
+	return fmt.Errorf("%s cannot resume this session (it does not support handoff format %d)", exe, version)
 }
 
 // Resume is the new image's side of a handoff: `agtd session-worker
@@ -399,7 +447,7 @@ func Resume(stateFD int) error {
 	if err == nil {
 		err = json.Unmarshal(data, &st)
 	}
-	if err == nil && st.Version != handoffVersion {
+	if err == nil && (st.Version < 1 || st.Version > handoffVersion) {
 		err = fmt.Errorf("unsupported handoff format %d", st.Version)
 	}
 	if err != nil {
@@ -410,6 +458,9 @@ func Resume(stateFD int) error {
 	}
 	for _, fd := range []int{st.PTYFD, st.ListenerFD, st.RequestFD} {
 		syscall.CloseOnExec(fd)
+	}
+	if st.SSHAgentFD > 0 {
+		syscall.CloseOnExec(st.SSHAgentFD)
 	}
 	requestFile := os.NewFile(uintptr(st.RequestFD), "handoff-request")
 	request, reqErr := net.FileConn(requestFile)
@@ -492,6 +543,27 @@ func resumeRuntime(st *handoffState) (*runtime, *ownerState, error) {
 	rt := newRuntime(st.Args, p, store, st.AgentPID, ptmx, socketPath, ownSocket, listener)
 	rt.handoffCount = st.Handoffs
 	rt.startedAt = st.StartedAt
+	if st.SSHAgentFD > 0 {
+		// The agent's SSH_AUTH_SOCK names this socket for as long as it
+		// runs; its environment passes through every exec, so the agent
+		// the worker inherited is still in this image's.
+		agentFile := os.NewFile(uintptr(st.SSHAgentFD), "ssh-agent-socket")
+		agentPath := p.SSHAgentSocketPath(st.Args.UID)
+		agentListener, err := transport.UnixListenerFromFile(agentFile, agentPath)
+		agentFile.Close()
+		var agentSocket os.FileInfo
+		if err == nil {
+			agentSocket, err = os.Stat(agentPath)
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "session worker: lost the SSH agent socket in the handoff: %v\n", err)
+			if agentListener != nil {
+				agentListener.Close()
+			}
+		} else {
+			rt.agent = newAgentServer(rt, agentPath, agentSocket, os.Getenv("SSH_AUTH_SOCK"), agentListener)
+		}
+	}
 	if st.Killed {
 		// Signal the agent again and arm the SIGKILL escalation, which
 		// did not survive the exec.
@@ -514,6 +586,10 @@ func resumeRuntime(st *handoffState) (*runtime, *ownerState, error) {
 	state.colors = st.Colors
 	if state.sizeOwner != "" {
 		state.armSizeOwnerGrace()
+	}
+	state.agentForwarded = st.SSHAgentForwarded
+	if st.SSHAgentWaitFor != "" {
+		state.agentWaitFor, state.agentWaitUntil = st.SSHAgentWaitFor, time.Now().Add(sizeOwnerGrace)
 	}
 	return rt, state, nil
 }

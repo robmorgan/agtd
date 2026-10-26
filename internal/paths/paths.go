@@ -20,6 +20,8 @@ type AppPaths struct {
 	Config      string
 	LogsDir     string
 	SessionsDir string
+	// SSHDir holds each session's SSH agent socket (SSHAgentSocketPath).
+	SSHDir string
 }
 
 func Discover() (*AppPaths, error) {
@@ -53,6 +55,7 @@ func FromRoot(root string) *AppPaths {
 		Config:      filepath.Join(root, "config.toml"),
 		LogsDir:     filepath.Join(root, "logs"),
 		SessionsDir: filepath.Join(root, "sessions"),
+		SSHDir:      filepath.Join(root, "ssh"),
 	}
 }
 
@@ -77,16 +80,17 @@ func discoverRoot(agtdDir, xdgRuntimeDir, homeDir, tmpDir string, uid int) (stri
 	return fmt.Sprintf("/tmp/%s-%d", AppDirName, uid), nil
 }
 
-// EnsureLayout creates the runtime root, logs/ and sessions/ as private
-// (0700) directories, tightening them if they already exist. The root holds
-// the control socket, session sockets, state.db and full agent transcripts,
-// and may live in shared temp space, so a directory that is a symlink, is not
-// a directory, or belongs to another user is refused rather than used.
+// EnsureLayout creates the runtime root, logs/, sessions/ and ssh/ as
+// private (0700) directories, tightening them if they already exist. The
+// root holds the control socket, session sockets, SSH agent sockets,
+// state.db and full agent transcripts, and may live in shared temp space, so
+// a directory that is a symlink, is not a directory, or belongs to another
+// user is refused rather than used.
 func (p *AppPaths) EnsureLayout() error {
 	if err := os.MkdirAll(p.Root, 0o700); err != nil {
 		return fmt.Errorf("failed to create %s: %w", p.Root, err)
 	}
-	for _, dir := range []string{p.Root, p.LogsDir, p.SessionsDir} {
+	for _, dir := range []string{p.Root, p.LogsDir, p.SessionsDir, p.SSHDir} {
 		if err := ensurePrivateDir(dir); err != nil {
 			return err
 		}
@@ -167,4 +171,14 @@ func (p *AppPaths) RenderedLogPath(sessionID string) string {
 
 func (p *AppPaths) SessionSocketPath(sessionID string) string {
 	return filepath.Join(p.SessionsDir, sessionID+".sock")
+}
+
+// SSHAgentSocketPath is the SSH agent socket of the session incarnation uid,
+// which its agent's SSH_AUTH_SOCK names. It is named by the UID rather than
+// the session's name, which a later incarnation may reuse, so a process left
+// over from an earlier incarnation never reaches a new one's agent; and a
+// UID's fixed length keeps the path inside the socket path limit for any
+// root that fits a session socket.
+func (p *AppPaths) SSHAgentSocketPath(uid string) string {
+	return filepath.Join(p.SSHDir, uid+".sock")
 }

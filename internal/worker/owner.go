@@ -66,6 +66,17 @@ type ownerState struct {
 	// end (with SessionRestarting where the client asked for it); a
 	// handoff that fails replaces it.
 	restart chan struct{}
+	// SSH agent forwarding (sshagent.go). agentWake is closed and replaced
+	// whenever a new agent connection's route may have changed.
+	// agentWaitFor is the size owner whose forwarder new connections wait
+	// for until agentWaitUntil: a forwarding owner reserved for its
+	// reattach. agentForwarded records that the session has been forwarded
+	// to, and agentGap that the current gap in forwarding has been recorded.
+	agentWake      chan struct{}
+	agentWaitFor   string
+	agentWaitUntil time.Time
+	agentForwarded bool
+	agentGap       bool
 }
 
 type ownerAttachment struct {
@@ -91,6 +102,10 @@ type ownerAttachment struct {
 	frames     *frameState
 	detach     chan struct{}
 	detachOnce sync.Once
+	// forwarder is the attachment's SSH agent forwarder, nil for none;
+	// forwarded is set once it has had one (sshagent.go).
+	forwarder *forwarder
+	forwarded bool
 }
 
 func (a *ownerAttachment) signalDetach() {
@@ -492,6 +507,9 @@ func (s *ownerState) attach(attachID string, kind session.AttachmentKind, g prot
 			old.frames.close()
 		}
 		delete(s.attachments, replaces)
+		// Its forwarder ends with it, and if it owned the size, agent
+		// connections wait for its replacement's, as after a cut.
+		s.agentLeft(replaces, old)
 	}
 
 	// The size owner's replacement inherits the size (also a reserved
@@ -508,6 +526,11 @@ func (s *ownerState) attach(attachID string, kind session.AttachmentKind, g prot
 		// with the cursor on the wrong row in a terminal of another size.
 		if err := s.resize(g); err != nil {
 			return nil, err
+		}
+		if replaces != "" && replaces == s.agentWaitFor {
+			// Agent connections waiting for the owner's reattach wait
+			// for this attachment's forwarder now.
+			s.agentWaitFor = attachID
 		}
 		if s.sizeOwner != attachID {
 			s.sizeOwner = attachID
@@ -578,6 +601,7 @@ func (s *ownerState) removeAttachment(attachID string) {
 	if attachID == s.sizeOwner {
 		s.ownerLeft(a.announcesLeave && !a.left)
 	}
+	s.agentLeft(attachID, a)
 }
 
 func (s *ownerState) listAttachments() []session.AttachmentRecord {

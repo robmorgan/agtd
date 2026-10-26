@@ -192,13 +192,44 @@ func (a *attachStream) send(req *protocol.Request) error { return protocol.Write
 // next attachment takes over at once, then stops the stream. A stream that
 // was cut is stopped without it, which keeps the size reserved for its
 // reattach.
-func (a *attachStream) leave() {
+//
+// With flush, it first waits, at most leaveFlushTimeout, for the worker to
+// end the stream, which it does once it has read everything this client
+// sent: a client about to close its QUIC connection must, since closing it
+// drops whatever QUIC has not sent yet, and an AttachLeave lost that way
+// reads as a cut, leaving the size and the SSH agent waiting for a
+// reattach that never comes.
+func (a *attachStream) leave(flush bool) {
 	if a.announcesLeave {
 		// A stalled stream must not hold up the detach.
 		a.s.SetWriteDeadline(time.Now().Add(time.Second))
-		_ = a.send(&protocol.Request{AttachLeave: protocol.Empty})
+		if err := a.send(&protocol.Request{AttachLeave: protocol.Empty}); err == nil && flush {
+			a.s.CloseWrite()
+			a.awaitEnd(leaveFlushTimeout)
+		}
 	}
 	a.stop()
+}
+
+// leaveFlushTimeout bounds how long a leaving client waits for the worker
+// to end its stream; a round trip, normally.
+const leaveFlushTimeout = time.Second
+
+// awaitEnd waits, at most timeout, for the stream's last frame.
+func (a *attachStream) awaitEnd(timeout time.Duration) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		select {
+		case f := <-a.frames:
+			if f.err != nil || f.resp == nil || f.resp.EndOfStream != nil || f.resp.SessionEnded != nil ||
+				f.resp.SessionRestarting != nil || f.resp.Error != nil {
+				return
+			}
+		case <-timer.C:
+			return
+		}
+	}
 }
 
 // stop half-closes the stream, which tells the daemon this client detached,
@@ -314,9 +345,15 @@ func (c *client) attachOnce(id, uid string, titled *bool) (res attachResult, err
 	ident.update(attached)
 	defer func() {
 		if stream != nil {
-			stream.leave()
+			// A switch keeps the connection for the next attachment;
+			// anything else may be followed by closing it.
+			stream.leave(c.host != nil && res.outcome != outcomeSwitch)
 		}
 	}()
+	// Each attachment has its own SSH agent forwarder, if any: a reattach
+	// is a new attachment, and needs a new one.
+	fwd := c.forwardAgent(id, attached)
+	defer func() { fwd.stop() }()
 
 	writeOut(terminalTitleBytes(id + " - " + attachExitTitle))
 	*titled = true
@@ -359,12 +396,15 @@ func (c *client) attachOnce(id, uid string, titled *bool) (res attachResult, err
 		}
 		stream.stop()
 		stream = nil
+		fwd.stop()
+		fwd = nil
 		var r *attachResult
 		stream, attached, r, err = c.reattach(id, ident, keys, &parser, err)
 		if stream == nil {
 			return deref(r), err
 		}
 		ident.update(attached)
+		fwd = c.forwardAgent(id, attached)
 		snapshot = attached.Snapshot
 		painter = newPainterFor(attached)
 		// An overlay that was open when the connection dropped may have
@@ -664,7 +704,7 @@ func (c *client) reattach(id string, prev attachIdentity, keys <-chan []byte, pa
 		switch {
 		case !finished:
 			if a.stream != nil {
-				a.stream.leave()
+				a.stream.leave(c.host != nil)
 			}
 			return nil, nil, detached, nil
 		case a.err == nil && a.ended != nil:

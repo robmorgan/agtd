@@ -75,6 +75,9 @@ type env struct {
 	t    *testing.T
 	root string
 	work string
+	// extraEnv is added to agt's environment, and so the daemon's it
+	// starts.
+	extraEnv []string
 }
 
 func newEnv(t *testing.T, extraConfig string) *env {
@@ -96,7 +99,7 @@ func newEnv(t *testing.T, extraConfig string) *env {
 }
 
 func (e *env) environ() []string {
-	return append(os.Environ(), "AGTD_DIR="+e.root, "AGTD_BIN="+filepath.Join(binDir, "agtd"), "TERM=xterm-256color", "PS1=$ ")
+	return append(append(os.Environ(), "AGTD_DIR="+e.root, "AGTD_BIN="+filepath.Join(binDir, "agtd"), "TERM=xterm-256color", "PS1=$ "), e.extraEnv...)
 }
 
 // run runs a command without a terminal and returns its output.

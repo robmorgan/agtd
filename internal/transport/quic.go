@@ -296,7 +296,7 @@ func (q *QUICListener) acceptStreams(conn *quic.Conn, entry *connEntry) {
 		}
 		entry.opened.Add(1)
 		entry.open.Add(1)
-		stream := &quicStream{Stream: s, onClose: func() { entry.open.Add(-1) }}
+		stream := &quicStream{Stream: s, peer: entry.fingerprint, onClose: func() { entry.open.Add(-1) }}
 		select {
 		case q.streams <- stream:
 		case <-q.ctx.Done():
@@ -583,11 +583,23 @@ func (c *QUICClient) RTT() time.Duration { return c.conn.ConnectionStats().Smoot
 
 // quicStream adapts a QUIC stream to Stream. Closing a QUIC stream only ends
 // its send side, which is exactly CloseWrite; Close also stops receiving.
-// onClose, if set, runs once, at the first Close.
+// onClose, if set, runs once, at the first Close. peer is the fingerprint of
+// the client key, on a stream the listener accepted.
 type quicStream struct {
 	*quic.Stream
+	peer      string
 	onClose   func()
 	closeOnce sync.Once
+}
+
+// PeerFingerprint is the fingerprint of the key of the client that opened
+// s, for a stream a QUIC listener accepted, and "" for any other stream
+// (a local Unix connection, say).
+func PeerFingerprint(s Stream) string {
+	if q, ok := s.(*quicStream); ok {
+		return q.peer
+	}
+	return ""
 }
 
 func (s *quicStream) CloseWrite() error { return s.Stream.Close() }

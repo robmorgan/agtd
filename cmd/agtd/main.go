@@ -66,7 +66,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "       agtd remote enable [ADDRESS] [--yes] | disable | status")
 	fmt.Fprintln(os.Stderr, "       agtd remote pair | id | list | authorize FINGERPRINT [NAME] | revoke FINGERPRINT")
 	fmt.Fprintln(os.Stderr, "       agtd bench sessions [--count N] [--output-heavy N] [--attach K] [--duration D] [--fill-lines L] [--json] [--json-file F]")
-	fmt.Fprintln(os.Stderr, "       agtd session-worker --session-id ID --cwd DIR --created-at TS --session-uid UID --agent-name NAME --command CMD [--model M] [--colors FG/BG] [--arg A]...")
+	fmt.Fprintln(os.Stderr, "       agtd session-worker --session-id ID --cwd DIR --created-at TS --session-uid UID --agent-name NAME --command CMD [--model M] [--colors FG/BG] [--ssh-agent-socket] [--arg A]...")
 }
 
 func runServe(argv []string) int {
@@ -564,6 +564,7 @@ func runSessionWorker(argv []string) int {
 	fs.StringVar(&args.Command, "command", "", "agent command")
 	fs.StringVar(&args.Model, "model", "", "model")
 	colors := fs.String("colors", "", "default colours of the creating terminal, foreground/background as rrggbb/rrggbb")
+	fs.BoolVar(&args.SSHAgentSocket, "ssh-agent-socket", false, "give the agent its own SSH agent socket as SSH_AUTH_SOCK, forwarding to the client driving the session")
 	fs.Var(&extra, "arg", "agent argument (repeatable)")
 	probe := fs.Bool("handoff-probe", false, "print the handoff formats this binary can resume from")
 	resumeFD := fs.Int("resume-fd", -1, "resume a session handed off by a previous image (internal)")

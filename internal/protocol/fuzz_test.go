@@ -37,6 +37,9 @@ func seedFrames(f *testing.F) {
 		{AttachTakeSize: &Geometry{Cols: 120, Rows: 40}},
 		{AttachLeave: Empty},
 		{AttachField: Empty},
+		{ForwardSSHAgent: &ForwardSSHAgent{SessionID: "ab", ExpectUID: "u", Attachment: "attach-1", Client: "local", Features: []string{"f"}}},
+		{SSHAgentReply: &SSHAgentMessage{Conn: 2, Data: []byte{12, 0, 0, 0, 0}}},
+		{SSHAgentClose: &SSHAgentConn{Conn: 2}},
 	}
 	resps := []*Response{
 		{Welcome: &Welcome{Version: 1, Capabilities: []string{CapControlStream}, Host: HostInfo{Agents: []string{"a"}}}},
@@ -60,6 +63,9 @@ func seedFrames(f *testing.F) {
 		{Events: &[]session.Event{{ID: 1, SessionID: "ab", At: now, Kind: "future-kind", Attention: session.AttentionInfo}}},
 		{HandedOff: &HandedOff{SessionID: "ab", WorkerPID: 7, Executable: "/bin/agtd", Handoffs: 1}},
 		{SessionRestarting: &SessionRestarting{SessionID: "ab", Reason: "upgrade"}},
+		{SSHAgentForwarding: &SSHAgentForwarding{Features: []string{"f"}}},
+		{SSHAgentRequest: &SSHAgentMessage{Conn: 1, Data: []byte{11}}},
+		{SSHAgentClose: &SSHAgentConn{Conn: 1}},
 	}
 	for _, r := range reqs {
 		var buf bytes.Buffer
