@@ -488,6 +488,8 @@ The daemon injects:
 - `TERM=xterm-256color` and `COLORTERM=truecolor` when the daemon's environment has no `TERM`
   (a daemon started at boot or over ssh) or `TERM=dumb`: the agent's terminal is agtd's own,
   whatever started the daemon, and without them agents turn colour off
+- `SSH_AUTH_SOCK`, naming the session's own SSH agent socket (see [Forwarding Your SSH
+  Agent](#forwarding-your-ssh-agent))
 
 The daemon socket is not passed to agents. They are not sandboxed, though: an agent runs as your
 user, so it can still reach the daemon at its usual path. There is no structured event channel for
@@ -499,9 +501,9 @@ another. Without a home directory, `XDG_RUNTIME_DIR/agtd`, `TMPDIR/agtd-<uid>` a
 `/tmp/agtd-<uid>` are used instead; those may not survive a reboot.
 
 The root contains `config.toml`, `state.db`, `logs/`, `remote/` (keys for remote access),
-`hosts.toml`, and the runtime files `agtd.sock`, `agtd.lock`, `agtd.pid` and `sessions/` (one
-socket per live session). It is created private to your user (0700), and `agtd` refuses a root
-owned by someone else.
+`hosts.toml`, and the runtime files `agtd.sock`, `agtd.lock`, `agtd.pid`, `sessions/` (one
+socket per live session) and `ssh/` (each live session's SSH agent socket). It is created private
+to your user (0700), and `agtd` refuses a root owned by someone else.
 
 Interactive PTY attach is available with `agt attach <name>`. Detach with `Ctrl-\`, switch to
 the previous running session with `Ctrl-[`, or switch to the next running session with `Ctrl-]`, or
@@ -740,6 +742,44 @@ Troubleshooting:
 - **"timed out connecting"**: check `[remote] listen` on the devbox, that the daemon was restarted,
   and that UDP reaches the port (firewalls often allow TCP only).
 
+### Forwarding Your SSH Agent
+
+An agent on the devbox that pushes with git, or signs commits, can use the SSH keys on your
+laptop, as `ssh -A` would, with no key copied to the devbox. Turn it on in the laptop's
+`~/.agtd/config.toml`:
+
+```toml
+[ssh_agent]
+forward = true
+# agent = "~/.1password/agent.sock"   # the agent to lend; $SSH_AUTH_SOCK by default
+# keys = ["SHA256:..."]                # offer only these keys, as `ssh-add -l` prints them
+```
+
+From then on every attachment lends your agent to its session: `agt attach`, `agt new`, the
+inbox, the overlay's switch, and every reconnect. Programs in the session find it at their
+`SSH_AUTH_SOCK`, which every new session has: a socket of the session's own, which answers from
+the agent of whichever attachment owns the session's size. Take over the size (`agt attach --take-size`, or
+Take over size in the overlay) and your keys come with it. A connection lost for a moment, or a
+daemon restart, does not lose them: a push made meanwhile waits for you to reattach. When nobody
+driving the session forwards an agent, the socket answers from the agent the devbox's daemon was
+started with, as before, or with no keys, and ssh falls back to key files on the devbox.
+
+Your private keys never leave the laptop. Only requests to list keys and to sign cross the
+connection; agt refuses anything else (adding, removing or locking keys) and, with `keys`, any
+other key. An agent that confirms each use (1Password, a security key's touch) keeps doing so.
+Each signature is recorded in the session's events (`agt events`) with the key, what it signed (a
+login, as whom and where, or git's commit signing) and which client signed.
+
+What it does not protect: while your attachment owns a session's size, any process running as your
+user on the devbox can ask your laptop for signatures, as with `ssh -A`. It stops the moment you
+detach. For work that must push while nobody is attached, use a deploy key or a token on the
+devbox. On the devbox itself, `ssh -A devbox` and then `agt attach`, with `forward = true` in the
+devbox's own config, lends that login's agent to the session.
+
+`[ssh_agent] session_socket = false` on the devbox starts new sessions without a socket of their
+own; they keep the `SSH_AUTH_SOCK` the daemon was started with. Sessions started before agtd had
+this cannot forward until they are restarted.
+
 ### A Devbox On DigitalOcean
 
 `scripts/do-devbox.sh` does all of the above on a new droplet, with `doctl` (authenticated) on the
@@ -806,6 +846,8 @@ Current capabilities include:
 - per-session PTY history held by the session while it runs and saved to `logs/` when it ends
 - git state and artifacts of a session's repository (`agt diff`, `agt artifacts`), locally and
   remotely, with large transfers on their own streams so they never stall an attachment
+- SSH agent forwarding: programs in a session use the SSH keys of the machine attached from
+  (`[ssh_agent] forward`), which never leave it
 - attention and activity read from each session's terminal output, kept as events, followed with
   `agt events --follow` and surfaced in `agt ls`, `agt status` and the TUI
 
