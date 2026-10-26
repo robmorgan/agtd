@@ -235,8 +235,10 @@ func TestProbeHandoff(t *testing.T) {
 		return path
 	}
 	good := script("good", `echo "`+handoffProbeOutput+`"`)
-	if err := probeHandoff(good); err != nil {
-		t.Fatalf("good executable: %v", err)
+	for version := 1; version <= handoffVersion; version++ {
+		if err := probeHandoff(good, version); err != nil {
+			t.Fatalf("good executable, format %d: %v", version, err)
+		}
 	}
 	for name, exe := range map[string]string{
 		"missing":   filepath.Join(dir, "missing"),
@@ -245,9 +247,18 @@ func TestProbeHandoff(t *testing.T) {
 		"no answer": script("silent", "exit 0"),
 		"empty":     "",
 	} {
-		if err := probeHandoff(exe); err == nil {
+		if err := probeHandoff(exe, 1); err == nil {
 			t.Errorf("%s executable passed the probe", name)
 		}
+	}
+	// A binary from before the SSH agent socket resumes format 1, but not
+	// a session that carries the socket (format 2).
+	before := script("before", `echo "agtd session-worker handoff 1"`)
+	if err := probeHandoff(before, 1); err != nil {
+		t.Fatalf("format 1 binary, format 1 state: %v", err)
+	}
+	if err := probeHandoff(before, 2); err == nil || !strings.Contains(err.Error(), "handoff format 2") {
+		t.Fatalf("format 1 binary, format 2 state: %v", err)
 	}
 }
 

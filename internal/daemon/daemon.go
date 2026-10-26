@@ -16,8 +16,9 @@
 //   - One git process per one-shot git request (bounded by its timeout) and
 //     per artifact stream, plus a goroutine that kills the latter at
 //     shutdown; both end with the stream (see artifacts.go).
-//   - One extra goroutine per attach proxy (client -> worker direction),
-//     and one per events stream reading the client's side until it closes.
+//   - One extra goroutine per attach or SSH agent forwarder proxy (client
+//     -> worker direction), and one per events stream reading the client's
+//     side until it closes.
 //   - The event feed (events.go): polls state.db for events written by
 //     workers while anyone is subscribed; ends at shutdown.
 //   - One supervisor per worker this daemon spawned: blocks in cmd.Wait, so
@@ -571,6 +572,11 @@ func (s *Server) handleRequest(conn transport.Stream, reader *bufio.Reader, req 
 		}
 	case protocol.RoleEvents:
 		return s.serveEvents(conn, reader, req.SubscribeEvents)
+	case protocol.RoleSSHAgent:
+		if id := req.ForwardSSHAgent.SessionID; !session.ValidName(id) {
+			return protocol.WriteResponse(conn, protocol.ErrorResponsef("session `%s` not found", id))
+		}
+		return s.proxySSHAgent(conn, reader, req.ForwardSSHAgent)
 	}
 	resp, after := s.respond(req, protocol.Features{})
 	err := protocol.WriteResponse(conn, resp)
@@ -581,7 +587,7 @@ func (s *Server) handleRequest(conn transport.Stream, reader *bufio.Reader, req 
 }
 
 // respond answers a request that has a single response: every request but
-// Hello, AttachSession, GetArtifact and SubscribeEvents. f is the features the client's stream agreed
+// Hello, AttachSession, GetArtifact, SubscribeEvents and ForwardSSHAgent. f is the features the client's stream agreed
 // on. after, if set, runs once the response is written. It is safe to call
 // concurrently, as a control stream does.
 func (s *Server) respond(req *protocol.Request, f protocol.Features) (resp *protocol.Response, after func()) {
@@ -646,6 +652,10 @@ func (s *Server) respond(req *protocol.Request, f protocol.Features) (resp *prot
 		return protocol.ErrorResponsef("attach needs a stream of its own"), nil
 	case req.SubscribeEvents != nil:
 		return protocol.ErrorResponsef("an events subscription needs a stream of its own"), nil
+	case req.ForwardSSHAgent != nil:
+		return protocol.ErrorResponsef("an SSH agent forwarder needs a stream of its own"), nil
+	case req.SSHAgentReply != nil, req.SSHAgentClose != nil:
+		return protocol.ErrorResponsef("SSH agent messages are only valid on an ssh-agent stream"), nil
 	case req.ListEvents != nil:
 		events, err := s.listEvents(req.ListEvents)
 		if err != nil {
@@ -748,6 +758,8 @@ func requestSessionID(req *protocol.Request) (string, bool) {
 		return req.GetArtifact.SessionID, true
 	case req.GetSessionStats != nil:
 		return req.GetSessionStats.SessionID, true
+	case req.ForwardSSHAgent != nil:
+		return req.ForwardSSHAgent.SessionID, true
 	}
 	return "", false
 }

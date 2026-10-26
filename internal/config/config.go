@@ -3,11 +3,15 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -19,6 +23,7 @@ type Config struct {
 	Remote       RemoteConfig           `toml:"remote"`
 	Attach       AttachConfig           `toml:"attach"`
 	Composer     ComposerConfig         `toml:"composer"`
+	SSHAgent     SSHAgentConfig         `toml:"ssh_agent"`
 
 	// agentOrder lists the Agents keys in file order, which a map loses.
 	agentOrder []string
@@ -102,6 +107,59 @@ func (c ComposerConfig) EchoFlushAfter() time.Duration {
 	return d
 }
 
+// SSHAgentConfig is SSH agent forwarding: a client lends its SSH agent to
+// the sessions it drives (docs/designs/ssh-agent-forwarding.md). The daemon
+// reads SessionSocket; agt reads the rest.
+type SSHAgentConfig struct {
+	// SessionSocket gives each new session its own agent socket, which the
+	// agent's SSH_AUTH_SOCK names: it answers from the agent of the client
+	// that drives the session, else from the agent the daemon was started
+	// with. Unset means true; false leaves SSH_AUTH_SOCK as the daemon
+	// inherited it.
+	SessionSocket *bool `toml:"session_socket"`
+	// Forward makes every attachment agt opens forward this machine's
+	// agent: attach, new, the inbox, the overlay's switch and every
+	// reattach. Off by default.
+	Forward bool `toml:"forward"`
+	// Agent is the socket of the agent forwarded; empty means
+	// $SSH_AUTH_SOCK. A leading ~/ is the home directory.
+	Agent string `toml:"agent"`
+	// Keys are the SHA256 fingerprints of the keys offered (as `ssh-add -l`
+	// prints them); empty offers every key the agent holds.
+	Keys []string `toml:"keys"`
+}
+
+// SessionSocketEnabled is SessionSocket with its default applied.
+func (c SSHAgentConfig) SessionSocketEnabled() bool {
+	return c.SessionSocket == nil || *c.SessionSocket
+}
+
+// AgentSocket is the socket of the agent to forward, or "" when there is
+// none: Agent, else $SSH_AUTH_SOCK.
+func (c SSHAgentConfig) AgentSocket() string {
+	path := c.Agent
+	if path == "" {
+		return os.Getenv("SSH_AUTH_SOCK")
+	}
+	if rest, ok := strings.CutPrefix(path, "~/"); ok {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, rest)
+		}
+	}
+	return path
+}
+
+// validFingerprint reports whether s is a SHA256 key fingerprint as OpenSSH
+// prints it.
+func validFingerprint(s string) bool {
+	b64, ok := strings.CutPrefix(s, "SHA256:")
+	if !ok {
+		return false
+	}
+	sum, err := base64.RawStdEncoding.DecodeString(b64)
+	return err == nil && len(sum) == sha256.Size
+}
+
 type AgentConfig struct {
 	Command string   `toml:"command"`
 	Args    []string `toml:"args"`
@@ -175,6 +233,16 @@ mode = "auto"
 [composer]
 enabled = true
 flush_after = "50ms"
+
+# SSH agent forwarding. Each new session gets its own SSH_AUTH_SOCK
+# (session_socket), which answers from the agent of the client driving the
+# session, else from the agent agtd was started with. forward = true lends
+# this machine's agent (agent = "path", else $SSH_AUTH_SOCK) to every
+# session "agt attach" drives; keys = ["SHA256:..."] limits the keys it
+# offers to those listed.
+[ssh_agent]
+session_socket = true
+forward = false
 `
 
 func defaultConfig() *Config {
@@ -227,6 +295,11 @@ func Load(path string) (*Config, error) {
 		d, err := time.ParseDuration(f)
 		if err != nil || d < 0 || d > MaxFlushAfter {
 			return nil, fmt.Errorf("[composer] flush_after must be a duration between 0 and %s in %s", MaxFlushAfter, path)
+		}
+	}
+	for _, fp := range cfg.SSHAgent.Keys {
+		if !validFingerprint(fp) {
+			return nil, fmt.Errorf("[ssh_agent] keys: `%s` is not a key fingerprint (SHA256:..., as `ssh-add -l` prints it) in %s", fp, path)
 		}
 	}
 	if len(cfg.Agents) > 0 {

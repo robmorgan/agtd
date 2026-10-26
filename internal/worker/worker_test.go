@@ -111,13 +111,21 @@ func rawAttachCapabilities() []string {
 // startWorkerArgs is startWorkerWith with the creating terminal's colours.
 func startWorkerArgs(t testing.TB, script string, colors *protocol.TerminalColors) *harness {
 	t.Helper()
+	return startWorkerEdit(t, script, func(a *Args) { a.Colors = colors })
+}
+
+// startWorkerEdit is startWorkerWith with the worker's Args changed by edit.
+func startWorkerEdit(t testing.TB, script string, edit func(*Args)) *harness {
+	t.Helper()
 	dir, h := newRoot(t)
 	p := h.paths
+	args := Args{
+		SessionID: h.sessionID, Cwd: dir, CreatedAt: h.createdAt, UID: h.uid,
+		AgentName: "sh", Command: "/bin/sh", Args: []string{"-c", script},
+	}
+	edit(&args)
 	go func() {
-		h.done <- Run(Args{
-			SessionID: h.sessionID, Cwd: dir, CreatedAt: h.createdAt, UID: h.uid,
-			AgentName: "sh", Command: "/bin/sh", Args: []string{"-c", script}, Colors: colors,
-		})
+		h.done <- Run(args)
 	}()
 	t.Cleanup(h.cleanup)
 

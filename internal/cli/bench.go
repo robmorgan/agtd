@@ -90,7 +90,7 @@ func (c *client) benchEcho(id string, opts echoBenchOptions, out io.Writer) erro
 	if ended != nil {
 		return fmt.Errorf("session `%s` has ended", id)
 	}
-	defer stream.leave()
+	defer stream.leave(c.host != nil)
 	if opts.field && !attached.HasFeature(protocol.CapAttachField) {
 		return errors.New("the daemon does not report the input field (attach-field)")
 	}
