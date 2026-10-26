@@ -438,8 +438,10 @@ func (c *client) newPainterFor(attached *protocol.Attached) *screen.Painter {
 		return nil
 	}
 	p := screen.New()
-	if cfg, err := config.Load(c.paths.Config); err == nil && cfg.Attach.AltScrollback {
-		p.SetAltScrollback(altScrollbackRows)
+	if cfg, err := config.Load(c.paths.Config); err == nil {
+		if cfg.Attach.AltScrollback {
+			p.SetAltScrollback(altScrollbackRows)
+		}
 		if cfg.Attach.WheelPredicted() {
 			p.SetPredictScroll(c.latency())
 		}
@@ -911,7 +913,7 @@ func paintFrame(fr *protocol.Frame, painter *screen.Painter, ech *echo, stream *
 // while there is an echo, which notes the ack: the frames that follow it
 // show the keys sent before it.
 func ackFrame(stream *attachStream, seq uint32, ech *echo, painter *screen.Painter) error {
-	if err := stream.send(&protocol.Request{AttachFrameAck: &protocol.FrameAck{Seq: seq, Field: ech != nil || (painter != nil && painter.AltScrollback())}}); err != nil {
+	if err := stream.send(&protocol.Request{AttachFrameAck: &protocol.FrameAck{Seq: seq, Field: ech != nil || (painter != nil && painter.WantsField())}}); err != nil {
 		return err
 	}
 	ech.frameAcked(seq)

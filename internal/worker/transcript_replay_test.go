@@ -310,13 +310,20 @@ func TestFramesPredictWheelClaudeScroll(t *testing.T) {
 		data  []byte
 		ticks []int
 	}
+	// One tick per repaint that moved, and one more where the wheel turned
+	// around: Claude Code (2.1.310, seen live on sfo3) does not move for
+	// the first tick after a reversal.
 	var repaints []piece
-	off := 0
+	off, last := 0, 0
 	for _, p := range splitAfter(data, []byte("\x1b[?2026l")) {
 		off += len(p)
 		pc := piece{data: p}
 		if d := wheelDir(off); d != 0 {
 			pc.ticks = []int{d}
+			if last != 0 && d != last {
+				pc.ticks = []int{d, d}
+			}
+			last = d
 		}
 		repaints = append(repaints, pc)
 	}
@@ -335,14 +342,21 @@ func TestFramesPredictWheelClaudeScroll(t *testing.T) {
 	for _, c := range []struct {
 		name   string
 		pieces []piece
+		// mirror leaves alt scrollback off: the client's terminal
+		// mirrors the alternate screen, and the record serves the
+		// prediction alone.
+		mirror bool
 	}{
-		{"every repaint", repaints},
-		{"every 4 repaints", grouped(4)},
+		{"every repaint", repaints, false},
+		{"every 4 repaints", grouped(4), false},
+		{"mirrored", repaints, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r := newFrameRig(t, streamCols, streamRows)
 			now := time.Unix(1e9, 0)
-			r.p.SetAltScrollback(10000)
+			if !c.mirror {
+				r.p.SetAltScrollback(10000)
+			}
 			r.p.SetPredictScroll(0)
 			r.p.SetClock(func() time.Time { return now })
 			for _, p := range c.pieces {
@@ -384,6 +398,12 @@ func TestFramesPredictWheelClaudeScroll(t *testing.T) {
 				if got, want := clientRow(r.client, y), plainRow(r.p.Row(y)); got != want {
 					t.Errorf("row %d shows %q, the agent's is %q", y, got, want)
 				}
+			}
+			if c.mirror {
+				if n := must(r.client.ScrollbackRows()); n != 0 {
+					t.Errorf("the mirroring client has %d rows of scrollback", n)
+				}
+				return
 			}
 			checkShellRows(t, r, "predict-"+c.name)
 		})

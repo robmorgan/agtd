@@ -47,9 +47,10 @@ type Painter struct {
 	// altScrollback keeps the terminal on the primary screen while the
 	// program is on the alternate one, and pushes the rows that leave the
 	// top of its transcript into the terminal's own scrollback (see
-	// SetAltScrollback). alt is the record of them, nil while the program
-	// is on the primary screen; altEnd is how many rows from the top are
-	// its transcript, from the last field seen (0: unknown).
+	// SetAltScrollback). alt is the record of them, kept for that and for
+	// the wheel prediction, nil while the program is on the primary screen
+	// or neither is on; altEnd is how many rows from the top are its
+	// transcript, from the last field seen (0: unknown).
 	altScrollback bool
 	altMax        int
 	alt           *Transcript
@@ -70,15 +71,21 @@ type Painter struct {
 // scrolled into the terminal's scrollback as a primary screen's would be.
 func (p *Painter) SetAltScrollback(max int) { p.altScrollback, p.altMax = true, max }
 
-// AltScrollback reports whether the scrollback is on (SetAltScrollback).
-func (p *Painter) AltScrollback() bool { return p.altScrollback }
+// recording is whether alternate screen frames go through the transcript
+// record: for the terminal's scrollback, or for the wheel prediction's
+// guesses over a terminal that mirrors the alternate screen.
+func (p *Painter) recording() bool { return p.altScrollback || p.pr.on }
+
+// WantsField reports whether frames should carry the input field, whose
+// box top bounds the transcript the record and the prediction look at.
+func (p *Painter) WantsField() bool { return p.recording() }
 
 // Leave is what to write before restoring the terminal at detach: under
 // alt scrollback, while the program is on the alternate screen, its screen
 // stays as a primary screen program's output would, so the cursor goes
 // under it. Nil otherwise.
 func (p *Painter) Leave() []byte {
-	if p.alt == nil || p.lines == 0 {
+	if !p.altScrollback || p.alt == nil || p.lines == 0 {
 		return nil
 	}
 	return []byte(cup(p.lines-1, 0) + "\r\n")
@@ -123,7 +130,9 @@ func (p *Painter) altFrame(f *protocol.Frame) *protocol.Frame {
 	pos, jumps := p.alt.Pos(), p.alt.Jumps
 	out := p.alt.Update(cur, p.altEnd)
 	p.observe(cur, p.alt.Pos()-pos, p.alt.Jumps != jumps, f)
-	if len(out) == 0 {
+	if len(out) == 0 || !p.altScrollback {
+		// A terminal that mirrors the alternate screen keeps no
+		// scrollback of it: the record serves the prediction alone.
 		return f
 	}
 	g := *f
@@ -204,7 +213,7 @@ func (p *Painter) Row(y int) []byte {
 // drag the cursor back a few cells on every frame while typing. A full
 // frame, or one of another size, starts the row cache afresh.
 func (p *Painter) Apply(f *protocol.Frame, overlay []byte) []byte {
-	if p.altScrollback {
+	if p.recording() {
 		f = p.altFrame(f)
 	}
 	var b bytes.Buffer

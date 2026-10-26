@@ -31,6 +31,9 @@ const (
 	// place may get wrong for them to be taken as the agent's chrome
 	// (pinned) rather than a wrong guess.
 	predictMaxPinned = 2
+	// predictRecordRows bounds the record kept for the prediction alone,
+	// without alt scrollback.
+	predictRecordRows = 10000
 	// predictSeenRows bounds the rows kept as last seen, on each side of
 	// the agent's screen.
 	predictSeenRows = 2000
@@ -82,7 +85,17 @@ type wheelPredict struct {
 	pinnedEnd       int
 	// shownDebt is the debt the guess drawn (Painter.shown) was made for.
 	shownDebt int64
-	stats     PredictStats
+	// lastDir is the direction of the last tick (-1 up, 1 down, 0 none
+	// yet). Claude Code does not move for the first tick after the wheel
+	// turns the other way, so neither does the guess, unless the agent
+	// was seen to (reversalMoves). swallowed is the direction of a first
+	// tick the guess left undrawn and the agent has not answered yet
+	// (0: none), and reversed whether the gesture's first tick turned
+	// the wheel around.
+	lastDir, swallowed int64
+	reversalMoves      bool
+	reversed           bool
+	stats              PredictStats
 }
 
 // PredictStats counts the wheel prediction's work.
@@ -99,11 +112,15 @@ type PredictStats struct {
 	Corrections, Rows, Edge int
 }
 
-// SetPredictScroll turns on the wheel prediction, under alt scrollback;
-// rtt is the link's round trip, which bounds how long a guess waits for
-// the agent.
+// SetPredictScroll turns on the wheel prediction, with or without alt
+// scrollback (without it, the record is kept for the guesses alone); rtt
+// is the link's round trip, which bounds how long a guess waits for the
+// agent.
 func (p *Painter) SetPredictScroll(rtt time.Duration) {
 	p.pr.on, p.pr.rtt = true, rtt
+	if p.altMax == 0 {
+		p.altMax = predictRecordRows
+	}
 	if p.pr.stepF == 0 {
 		p.pr.stepF = 1
 	}
@@ -150,11 +167,24 @@ func (p *Painter) PredictExpire() []byte {
 	if pr.settleBy.IsZero() || p.now().Before(pr.settleBy) {
 		return nil
 	}
+	if pr.debt == 0 && pr.clamped && !pr.paused {
+		// Nothing drawn, every tick at the edge of what the record
+		// holds (above it, after attaching to a long transcript): no
+		// guess was made, so the gesture neither confirms nor faults
+		// the guessing.
+		pr.ticks, pr.rows, pr.clamped, pr.settled, pr.reversed, pr.settleBy = 0, 0, false, false, false, time.Time{}
+		return nil
+	}
 	if pr.debt == 0 {
 		// Nothing drawn (paused, or every tick at an edge): the gesture
 		// would have been right if the agent moved as far as guessed.
 		p.endGesture(pr.ticks != 0 && !pr.clamped && pr.rows == pr.ticks*p.step())
 		return nil
+	}
+	if pr.reversed && pr.rows == 0 && abs(pr.ticks) == 1 {
+		// Drawn for a first tick after a reversal, which the agent did
+		// not move for: from now on such a tick is left undrawn.
+		pr.reversalMoves = false
 	}
 	pr.debt = 0
 	pr.stats.TakenBack++
@@ -175,10 +205,21 @@ func (p *Painter) step() int64 {
 // guess drawn changed.
 func (p *Painter) tick(dir int64) bool {
 	pr := &p.pr
+	// The agent sees every tick, drawn or not, so the direction is kept
+	// first.
+	reversal := pr.lastDir != 0 && dir != pr.lastDir
+	pr.lastDir, pr.swallowed = dir, 0
 	if !p.predictable() {
 		return false
 	}
 	pr.stats.Ticks++
+	if reversal {
+		if !pr.reversalMoves {
+			pr.swallowed = dir
+			return false
+		}
+		pr.reversed = pr.reversed || pr.ticks == 0
+	}
 	pr.ticks += dir
 	pr.seqAtTick = p.seq
 	pr.settleBy = p.now().Add(2*pr.rtt + predictWait)
@@ -220,6 +261,12 @@ func (p *Painter) guess(debt int64) [][]byte {
 		n := pos + src
 		if r, ok := p.pr.seen[n]; ok {
 			out[y] = r
+			continue
+		}
+		if src >= 0 && src < int64(end) {
+			// Under the agent's own chrome (a pinned row): not known
+			// until the agent draws it, so left as it is for the frame
+			// to correct.
 			continue
 		}
 		if n < oldest || n >= mark {
@@ -268,6 +315,11 @@ func (p *Painter) observe(cur [][]byte, moved int64, jumped bool, f *protocol.Fr
 				delete(pr.seen, n)
 			}
 		}
+	}
+	if pr.swallowed != 0 && moved != 0 {
+		// The agent moved for a first tick after a reversal after all.
+		pr.reversalMoves = (moved > 0) == (pr.swallowed > 0)
+		pr.swallowed = 0
 	}
 	if pr.debt == 0 && pr.ticks == 0 {
 		return
@@ -319,7 +371,7 @@ func (p *Painter) endGesture(right bool) {
 			pr.paused = true
 		}
 	}
-	pr.ticks, pr.rows, pr.clamped, pr.settled = 0, 0, false, false
+	pr.ticks, pr.rows, pr.clamped, pr.settled, pr.reversed = 0, 0, false, false, false
 	if pr.debt == 0 {
 		pr.settleBy = time.Time{}
 	}
@@ -329,7 +381,8 @@ func (p *Painter) endGesture(right bool) {
 // screen, for a screen that was replaced (full, resized, left).
 func (p *Painter) resetPredict() {
 	pr := &p.pr
-	pr.debt, pr.ticks, pr.rows, pr.clamped, pr.settled = 0, 0, 0, false, false
+	pr.debt, pr.ticks, pr.rows, pr.clamped, pr.settled, pr.reversed = 0, 0, 0, false, false, false
+	pr.swallowed = 0
 	pr.settleBy = time.Time{}
 	pr.seen, pr.pinned, pr.suspect = nil, nil, nil
 	p.shown = nil

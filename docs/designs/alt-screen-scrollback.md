@@ -372,6 +372,32 @@ logged out on the recording machine.
       side, decision 11), the record only for rows not seen yet. The top row or two of a tick into
       unseen territory are the corrections above.
 
+    The prediction does not need the terminal's scrollback, only the record (2026-10-26). With
+    `alt_scrollback` off and `predict_wheel` on, the client mirrors the alternate screen 1:1, as
+    Claude Code's fullscreen renderer draws it (the composer fixed at the bottom, no terminal
+    scrollback), and the painter keeps the record for its guesses alone; the `mirrored` case of
+    `TestFramesPredictWheelClaudeScroll` guesses as the others do and leaves the client terminal
+    without scrollback. The two then answer different wishes: `alt_scrollback` for the terminal's
+    own search, selection and history after detach; the mirror for the agent's own fullscreen
+    view at local speed, where the terminal's scrollback is a second view the agent does not
+    know about (a keystroke jumps it back, and an overlay cannot be drawn over it).
+
+    Live on sfo3 (2026-10-26, Claude Code 2.1.310, ~195 ms away), three habits the fixture's
+    synthetic ticks had hidden:
+
+    * Claude Code does not move for the first tick after the wheel turns around; the second
+      moves one row. The guess leaves that tick undrawn too, and learns otherwise if an agent is
+      seen to move for it (the replay now sends the extra tick at each reversal).
+    * A client attached to a long transcript has nothing above the screen in its record, so the
+      first pass up draws nothing and goes at the round trip; rows the agent has shown since are
+      guessed. Ticks at that edge are no evidence against the guessing (they had paused it after
+      two). Seeding the record at attach is Phase 3's worker record.
+    * A row under the agent's pinned chrome ("Jump to bottom") is unknown until the agent draws
+      it; the guess leaves it as it is for the frame to correct rather than giving up the guess.
+
+    Fast bursts accelerate (six quick ticks moved eight rows); the learned step absorbs part of
+    it and the frames correct the rest.
+
     A local view of agt's own (tmux's copy mode) stays rejected: a viewport the agent does not know
     about, with search and selection to build, against the rule that agt draws nothing the agent
     did not draw. The guess draws only what the agent is about to draw.
@@ -431,6 +457,9 @@ logged out on the recording machine.
 # terminal stays on the primary screen while the agent runs. Off mirrors
 # the alternate screen, as a raw attach does.
 alt_scrollback = true
+# Under frames, the wheel over the transcript of an agent on the alternate
+# screen scrolls it at once, with or without alt_scrollback (decision 12).
+#predict_wheel = true
 ```
 
 The worker's `maxAltScrollbackRows` starts as a constant beside `maxScrollbackBytes`; a daemon

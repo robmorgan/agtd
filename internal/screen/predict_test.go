@@ -103,7 +103,12 @@ func TestPredictDrawsATickAtOnce(t *testing.T) {
 	if r.p.shown != nil || !r.p.PredictDue().IsZero() {
 		t.Fatal("a guess the agent followed is still drawn or pending")
 	}
-	// Down again, from what was seen at the live end.
+	// Down again, from what was seen at the live end: the first tick
+	// after the reversal goes undrawn (the agent ignores it, as Claude
+	// Code does), the second is drawn.
+	if paint := r.p.Wheel(wheelDown()); paint != nil {
+		t.Fatalf("drew the first tick after a reversal: %q", paint)
+	}
 	r.p.Wheel(wheelDown())
 	if got := r.shown(6); got != "line 26" {
 		t.Fatalf("down: row 6 shows %q", got)
@@ -324,5 +329,60 @@ func TestBackdrop(t *testing.T) {
 		Rows: []protocol.FrameRow{{Index: 0, VT: []byte("x")}}}, nil)
 	if b := p.Backdrop(); b != nil {
 		t.Fatalf("a backdrop on the alternate screen: %q", b)
+	}
+}
+
+// Ticks above what the record holds draw nothing and do not count as
+// misses: after attaching to a long transcript, scrolling up past the
+// screen's top must not pause the guessing.
+func TestPredictEdgeIsNoMiss(t *testing.T) {
+	r := newPredictRig(t)
+	r.show(30)
+	for range 3 {
+		if paint := r.p.Wheel(wheelUp()); paint != nil {
+			t.Fatalf("drew above the record: %q", paint)
+		}
+		r.show(r.top - 1)
+		r.now = r.now.Add(time.Second)
+		r.p.PredictExpire()
+	}
+	if r.p.pr.paused {
+		t.Fatal("paused by ticks at the record's edge")
+	}
+	// Back down over rows the agent has shown: guessed at once, after
+	// the tick that turns the wheel around.
+	r.p.Wheel(wheelDown())
+	if paint := r.p.Wheel(wheelDown()); paint == nil {
+		t.Fatal("nothing drawn over rows seen")
+	}
+}
+
+// The first tick after the wheel turns around is left undrawn, as Claude
+// Code ignores it; an agent seen to move for it has such ticks drawn from
+// then on, and one drawn and not followed has them left undrawn again.
+func TestPredictReversal(t *testing.T) {
+	r := started(t)
+	r.p.Wheel(wheelUp())
+	r.show(19)
+	if paint := r.p.Wheel(wheelDown()); paint != nil {
+		t.Fatalf("drew the first tick after a reversal: %q", paint)
+	}
+	// This agent moves for it.
+	r.show(20)
+	if !r.p.pr.reversalMoves {
+		t.Fatal("not learned that the agent moves for the first tick")
+	}
+	if paint := r.p.Wheel(wheelUp()); paint == nil {
+		t.Fatal("a reversal not drawn for an agent that moves for it")
+	}
+	// This time it does not: taken back, and unlearned.
+	r.show(20)
+	r.now = r.now.Add(time.Second)
+	r.p.PredictExpire()
+	if r.p.pr.reversalMoves {
+		t.Fatal("still drawing reversals the agent ignores")
+	}
+	if st := r.p.PredictStats(); st.TakenBack != 1 {
+		t.Fatalf("%+v", st)
 	}
 }
