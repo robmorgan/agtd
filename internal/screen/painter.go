@@ -34,6 +34,12 @@ type Painter struct {
 	cols, lines int
 	// rows is the VT last painted for each row; nil is blank.
 	rows [][]byte
+	// overdrawn is whether something besides the frames (the echo's
+	// drawing of typed keys over the input box, which the frames carry
+	// as their overlay while it lasts) drew over the rows: the first
+	// frame without it repaints every row, since the agent may have moved
+	// what was under it (pi moves its box up to open a menu).
+	overdrawn bool
 	// modes are the modes the last prefix mentioned ("?2004", "4") and
 	// whether it set (h) or reset (l) them. Only changes are written: a
 	// mode a new prefix no longer mentions is back at its default and is
@@ -282,6 +288,9 @@ func (p *Painter) AltScreen() bool {
 	return false
 }
 
+// Overdrawn notes that something besides the frames drew over the screen.
+func (p *Painter) Overdrawn() { p.overdrawn = true }
+
 // New makes a painter for a terminal that has just been cleared.
 func New() *Painter { return &Painter{} }
 
@@ -291,7 +300,7 @@ func New() *Painter { return &Painter{} }
 // turns them off first (attachRepaintSequence), so the next frame must set
 // them again.
 func (p *Painter) Reset() {
-	p.rows, p.seq, p.painted = nil, 0, false
+	p.rows, p.seq, p.painted, p.overdrawn = nil, 0, false, false
 	p.resetPredict()
 	for _, m := range mouseModes {
 		delete(p.modes, m)
@@ -335,9 +344,9 @@ func (p *Painter) Apply(f *protocol.Frame, overlay []byte) []byte {
 		}
 	}
 	// written are the rows this frame writes, while a guess is drawn
-	// over the rows it leaves.
+	// over the rows it leaves, or the rows were overdrawn.
 	var written []bool
-	if p.shown != nil {
+	if p.shown != nil || p.overdrawn {
 		written = make([]bool, lines)
 	}
 	p.cols, p.lines = cols, lines
@@ -413,6 +422,19 @@ func (p *Painter) Apply(f *protocol.Frame, overlay []byte) []byte {
 	if p.shown != nil || p.pr.debt != 0 || p.pr.settled {
 		p.reconcileShown(&b, written)
 	}
+	if p.overdrawn && len(overlay) == 0 {
+		for y, row := range p.rows {
+			if written[y] {
+				continue
+			}
+			if p.shown != nil && y < len(p.shown) {
+				row = p.shown[y]
+			}
+			b.WriteString(cup(y, 0) + rowStart)
+			b.Write(row)
+		}
+	}
+	p.overdrawn = len(overlay) > 0
 	b.Write(f.Keyboard)
 	b.Write(f.Colors)
 	b.Write(f.Effects)

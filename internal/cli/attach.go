@@ -496,6 +496,9 @@ func (c *client) runAttachment(id string, stream *attachStream, keys <-chan []by
 		if ech != nil {
 			send, paint := ech.input(data)
 			writeOut(paint)
+			if painter != nil && len(paint) > 0 {
+				painter.Overdrawn()
+			}
 			data = send
 		}
 		if len(data) == 0 {
@@ -847,6 +850,9 @@ func handleFrame(f frame, overlayOpen bool, size *protocol.SizeOwnership, ech *e
 		send, paint := ech.fieldAnswer(f.resp.Field)
 		if !overlayOpen {
 			writeOut(paint)
+		}
+		if painter != nil && len(paint) > 0 {
+			painter.Overdrawn()
 		}
 		if len(send) > 0 {
 			if err := stream.send(&protocol.Request{AttachInput: &protocol.Bytes{Data: send}}); err != nil {

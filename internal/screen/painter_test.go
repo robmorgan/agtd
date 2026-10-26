@@ -219,3 +219,33 @@ func TestCropRow(t *testing.T) {
 		}
 	}
 }
+
+// The echo's drawing of typed keys covers rows the frames painted; the
+// first frame without it repaints them, since the agent may have moved
+// what was under it (pi moves its input box up to open a menu).
+func TestOverdrawnRowsRepaint(t *testing.T) {
+	p := New()
+	rows := func(vt ...string) []protocol.FrameRow {
+		var out []protocol.FrameRow
+		for i, s := range vt {
+			out = append(out, protocol.FrameRow{Index: uint16(i), VT: []byte(s)})
+		}
+		return out
+	}
+	p.Apply(&protocol.Frame{Seq: 1, Full: true, Cols: 10, Lines: 3, Rows: rows("one", "two", "box")}, nil)
+	p.Apply(&protocol.Frame{Seq: 2, Cols: 10, Lines: 3, Rows: rows("one", "box", "menu")}, []byte(cup(2, 0)+"/"))
+	got := string(p.Apply(&protocol.Frame{Seq: 3, Cols: 10, Lines: 3, CursorRow: 1, CursorCol: 1}, nil))
+	for _, row := range []string{"one", "box", "menu"} {
+		if !strings.Contains(got, row) {
+			t.Fatalf("row %q not repainted after the overlay: %q", row, got)
+		}
+	}
+	if got := string(p.Apply(&protocol.Frame{Seq: 4, Cols: 10, Lines: 3, CursorRow: 1, CursorCol: 1}, nil)); strings.Contains(got, "menu") {
+		t.Fatalf("repainted again: %q", got)
+	}
+	// Typed keys drawn straight to the terminal count too.
+	p.Overdrawn()
+	if got := string(p.Apply(&protocol.Frame{Seq: 5, Cols: 10, Lines: 3, CursorRow: 1, CursorCol: 1}, nil)); !strings.Contains(got, "menu") {
+		t.Fatalf("not repainted after Overdrawn: %q", got)
+	}
+}
