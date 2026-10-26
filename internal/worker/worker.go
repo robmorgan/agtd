@@ -845,6 +845,12 @@ func (rt *runtime) serveAttach(conn transport.Stream, reader *bufio.Reader, req 
 	// A client that asked for CapAttachFrames gets the screen as frames
 	// instead of the raw output (frames.go).
 	frames := slices.Contains(features, protocol.CapAttachFrames)
+	// One that also asked for CapAttachFrameWindow gets a window sized
+	// from the round trip, and frames that say which ack they follow.
+	var rtt *frameRTT
+	if frames && slices.Contains(features, protocol.CapAttachFrameWindow) {
+		rtt = &frameRTT{}
+	}
 	// A client that asked for CapAttachCompose may send a whole prompt to
 	// encode for the program (compose.go).
 	composes := slices.Contains(features, protocol.CapAttachCompose)
@@ -941,24 +947,46 @@ func (rt *runtime) serveAttach(conn transport.Stream, reader *bufio.Reader, req 
 	if att.sub != nil {
 		outputCh = att.sub.ch
 	}
-	sendFrame := func() error {
+	// sendFrame builds and sends a frame, unless the program is inside a
+	// synchronized-output block and hold is set: then it waits for the
+	// block's end (which is output, so a wake) or frameSyncHold.
+	sendFrame := func(hold bool) error {
 		var f *protocol.Frame
+		var wait time.Duration
 		if err := rt.owner.doAtGround(func(s *ownerState) error {
 			a := s.attachments[att.attachID]
 			if a == nil || a.frames != att.frames {
 				return errors.New("the attachment has ended")
 			}
+			now := time.Now()
+			if wait = s.frameHold(now); hold && wait > 0 {
+				return nil
+			}
 			var err error
-			f, err = s.buildFrame(a, time.Now())
+			f, err = s.buildFrame(a, now)
 			return err
 		}); err != nil {
 			return err
 		}
+		if f == nil {
+			if frameTimer == nil {
+				frameTimer = time.After(wait)
+			}
+			return nil
+		}
 		sentSeq, lastFrame = f.Seq, time.Now()
+		if rtt != nil {
+			f.Acked, f.HasAcked = ackedSeq, true
+			rtt.sent(f.Seq, lastFrame)
+		}
 		return protocol.WriteResponse(conn, &protocol.Response{AttachFrame: f})
 	}
 	maybeFrame := func() error {
-		if !frames || sentSeq-ackedSeq >= frameWindow || !att.frames.dirty.Load() {
+		window := uint32(frameWindow)
+		if rtt != nil {
+			window = rtt.window()
+		}
+		if !frames || sentSeq-ackedSeq >= window || !att.frames.dirty.Load() {
 			return nil
 		}
 		if wait := frameFloor - time.Since(lastFrame); wait > 0 {
@@ -967,7 +995,7 @@ func (rt *runtime) serveAttach(conn transport.Stream, reader *bufio.Reader, req 
 			}
 			return nil
 		}
-		return sendFrame()
+		return sendFrame(true)
 	}
 	if frames {
 		frameWake = att.frames.wake
@@ -1045,7 +1073,7 @@ loop:
 				// The final screen, whether or not the last frame was
 				// acknowledged: the stream ends after it.
 				if att.frames.dirty.Load() {
-					if err := sendFrame(); err != nil {
+					if err := sendFrame(false); err != nil {
 						return err
 					}
 				}
@@ -1123,6 +1151,9 @@ loop:
 			case in.req.AttachFrameAck != nil && frames:
 				if seq := in.req.AttachFrameAck.Seq; seq > ackedSeq && seq <= sentSeq {
 					ackedSeq = seq
+					if rtt != nil {
+						rtt.acked(seq, time.Now())
+					}
 				}
 				att.frames.wantField.Store(in.req.AttachFrameAck.Field)
 				if err := maybeFrame(); err != nil {

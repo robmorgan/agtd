@@ -97,14 +97,18 @@ func TestFormatSessionEnd(t *testing.T) {
 }
 
 func TestOverlayKeys(t *testing.T) {
-	o := newOverlay(testClient(t), "alpha", nil)
+	o := newOverlay(testClient(t), "alpha", nil, nil)
 	if out, err := o.handle(keyEvent{code: keyChar, r: 'y', mods: modCtrl}); err != nil || out.kind != overlayStay {
 		t.Fatalf("ctrl-y: %+v %v", out, err)
 	}
 	if out, _ := o.handle(key(keyEsc)); out.kind != overlayClose {
 		t.Fatalf("esc: %+v", out)
 	}
-	// Ctrl-Y, Enter is submit and switch.
+	if items := o.filteredPalette(); items[0].title == submitSwitchItem.title {
+		t.Fatal("Submit and switch offered without [attach] submit_and_switch")
+	}
+	// Ctrl-Y, Enter is submit and switch, when offered.
+	o.submitSwitch = true
 	if out, err := o.handle(key(keyEnter)); err != nil || out.kind != overlaySubmit {
 		t.Fatalf("enter on the fresh palette: %+v %v", out, err)
 	}
@@ -134,7 +138,8 @@ func TestOverlayKeys(t *testing.T) {
 }
 
 func TestOverlayDraws(t *testing.T) {
-	o := newOverlay(testClient(t), "alpha", nil)
+	o := newOverlay(testClient(t), "alpha", nil, nil)
+	o.submitSwitch = true
 	o.sessions = []session.Record{demo("alpha"), demo("beta")}
 	body := o.body(60, 20)
 	if got := stripANSI(body[1].render(60, o.theme)); !strings.HasPrefix(got, " Commands ") || !strings.Contains(got, "/alpha  ") || strings.Contains(got, "╱") {
@@ -211,15 +216,15 @@ func TestOverlayTakeSize(t *testing.T) {
 		}
 		return out
 	}
-	if got := titles(newOverlay(testClient(t), "alpha", nil)); slices.Contains(got, takeSizeItem.title) {
+	if got := titles(newOverlay(testClient(t), "alpha", nil, nil)); slices.Contains(got, takeSizeItem.title) {
 		t.Fatalf("take-size offered without size ownership: %v", got)
 	}
 	owner := &protocol.SizeOwnership{Owner: true, OwnerID: "attach-1"}
-	if got := titles(newOverlay(testClient(t), "alpha", owner)); slices.Contains(got, takeSizeItem.title) {
+	if got := titles(newOverlay(testClient(t), "alpha", owner, nil)); slices.Contains(got, takeSizeItem.title) {
 		t.Fatalf("take-size offered to the owner: %v", got)
 	}
 	pending := &protocol.SizeOwnership{OwnerID: "attach-1", Geometry: protocol.Geometry{Cols: 100, Rows: 30}}
-	o := newOverlay(testClient(t), "alpha", pending)
+	o := newOverlay(testClient(t), "alpha", pending, nil)
 	for _, r := range "take" {
 		o.handle(char(r))
 	}
@@ -253,6 +258,23 @@ func TestSizeOwnerFrames(t *testing.T) {
 	}
 	if _, done, err := handleFrame(frame{resp: &protocol.Response{AttachSizeOwner: &note}}, false, nil, nil, nil, nil); done || err != nil {
 		t.Fatalf("size note without tracking: done %v err %v", done, err)
+	}
+}
+
+// The palette's Detach detaches, as Ctrl-\ does.
+func TestOverlayDetach(t *testing.T) {
+	o := newOverlay(testClient(t), "alpha", nil, nil)
+	for _, r := range "detach" {
+		o.handle(char(r))
+	}
+	if got := o.filteredPalette(); len(got) != 1 || got[0].title != "Detach" {
+		t.Fatalf("filtered %v", got)
+	}
+	if out, err := o.handle(key(keyEnter)); err != nil || out.kind != overlayDetach {
+		t.Fatalf("enter: %+v %v", out, err)
+	}
+	if got := testClient(t).sessionAddress("alpha"); got != "local/alpha" {
+		t.Fatalf("address %q", got)
 	}
 }
 

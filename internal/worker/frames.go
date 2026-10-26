@@ -15,11 +15,11 @@ import (
 // A frame client gets the screen as rows instead of the raw output. Its
 // attachment keeps a frameState: the rows it was last sent, and the modes,
 // keyboard state, colours and cursor shape, so a frame carries only what
-// changed. At most frameWindow frames are in flight: the handler builds the
-// next when the screen changed since the last (dirty) and the client has
-// acknowledged all but the newest, at least frameFloor apart, so a slow
-// link gets fewer, fresher frames rather than a queue of stale output, and
-// nothing is ever dropped. A frame is built on the owner goroutine at a
+// changed. At most frameWindow frames are in flight (or a window sized from
+// the round trip, frameRTT): the handler builds the next when the screen
+// changed since the last (dirty) and the client has acknowledged enough of
+// them, at least frameFloor apart, so a slow link gets fewer, fresher
+// frames rather than a queue of stale output, and nothing is ever dropped. A frame is built on the owner goroutine at a
 // sequence boundary (doAtGround), so it never shows half a sequence.
 //
 // A row is the VT the formatter writes for it: self-contained, from a
@@ -45,7 +45,61 @@ const (
 	// carry the input field even while output is still flowing, so keys
 	// typed during a streaming answer are confirmed.
 	frameFieldAfterInput = 500 * time.Millisecond
+	// frameSyncHold is the longest a frame waits for the program to end a
+	// synchronized-output block (mode 2026): a frame built inside one
+	// shows half a repaint, and the scrollback a client builds from
+	// frames (docs/designs/alt-screen-scrollback.md) reads it as a jump.
+	// A program that leaves the mode set has its screen sent anyway.
+	frameSyncHold = 150 * time.Millisecond
+	// frameInterval is how often a sized window (frameRTT) lets frames
+	// come on any link: one round trip's worth of them, plus one.
+	frameInterval = 16 * time.Millisecond
+	// frameRTTSpan is how long a minimum round trip stands before a new
+	// sample replaces it, so a route that got slower is followed.
+	frameRTTSpan = 10 * time.Second
 )
+
+// frameRTT sizes one attachment's frame window from the round trips it
+// measures between sending a frame and reading its ack
+// (CapAttachFrameWindow): a fixed window of two allows two frames per
+// round trip, 10 a second at 200 ms. It follows the minimum round trip,
+// not the mean: queueing delay raises the mean, and a window grown from
+// it would queue more. Owned by the attachment's handler goroutine.
+type frameRTT struct {
+	sentAt  [protocol.MaxFrameWindow]time.Time
+	sentSeq [protocol.MaxFrameWindow]uint32
+	min     time.Duration
+	minAt   time.Time
+}
+
+// sent notes that frame seq went at now.
+func (r *frameRTT) sent(seq uint32, now time.Time) {
+	i := seq % protocol.MaxFrameWindow
+	r.sentAt[i], r.sentSeq[i] = now, seq
+}
+
+// acked takes the round trip of frame seq, whose ack was read at now.
+func (r *frameRTT) acked(seq uint32, now time.Time) {
+	i := seq % protocol.MaxFrameWindow
+	if r.sentSeq[i] != seq || r.sentAt[i].IsZero() {
+		return
+	}
+	rtt := now.Sub(r.sentAt[i])
+	if r.minAt.IsZero() || rtt <= r.min || now.Sub(r.minAt) > frameRTTSpan {
+		r.min, r.minAt = rtt, now
+	}
+}
+
+// window is how many frames may be in flight: enough for one every
+// frameInterval over the minimum round trip, from frameWindow (before
+// any is measured) to protocol.MaxFrameWindow.
+func (r *frameRTT) window() uint32 {
+	if r.minAt.IsZero() {
+		return frameWindow
+	}
+	n := uint32((r.min+frameInterval-1)/frameInterval) + 1
+	return min(max(n, frameWindow), protocol.MaxFrameWindow)
+}
 
 // frameState is what one frame client has been sent.
 type frameState struct {
@@ -103,8 +157,16 @@ func (st *frameState) changed() {
 	}
 }
 
-// noteFrameOutput marks every frame client's screen changed.
+// noteFrameOutput marks every frame client's screen changed, and notes
+// whether the program is inside a synchronized-output block.
 func (s *ownerState) noteFrameOutput() {
+	if syncing, err := s.terminal.term.Mode(libghostty.ModeSyncOutput); err == nil && syncing {
+		if s.syncSince.IsZero() {
+			s.syncSince = time.Now()
+		}
+	} else {
+		s.syncSince = time.Time{}
+	}
 	for _, a := range s.attachments {
 		if a.frames != nil {
 			a.frames.changed()
@@ -130,6 +192,15 @@ func (s *ownerState) frameEffects(fx terminalEffects) {
 			a.frames.effects = append(a.frames.effects, b...)
 		}
 	}
+}
+
+// frameHold is how much longer a frame should wait for the program's
+// synchronized-output block to end; 0 to build it now.
+func (s *ownerState) frameHold(now time.Time) time.Duration {
+	if s.syncSince.IsZero() {
+		return 0
+	}
+	return max(0, frameSyncHold-now.Sub(s.syncSince))
 }
 
 // buildFrame builds the next frame for a: every row when something made

@@ -1,6 +1,7 @@
 package screen
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -139,5 +140,112 @@ func TestResetSetsMouseModesAgain(t *testing.T) {
 	out := string(p.Apply(&protocol.Frame{Seq: 2, Full: true, Cols: 4, Lines: 1, Prefix: prefix}, nil))
 	if !strings.Contains(out, "\x1b[?1000h") || !strings.Contains(out, "\x1b[?1006h") || strings.Contains(out, "?1049h") {
 		t.Fatalf("after Reset: %q", out)
+	}
+}
+
+// Under alt scrollback the alternate screen is never entered, rows leaving
+// the top of the transcript are scrolled into the scrollback, and detach
+// leaves the cursor under the screen.
+func TestPainterAltScrollback(t *testing.T) {
+	p := New()
+	p.SetAltScrollback(100)
+	if p.Leave() != nil {
+		t.Fatal("Leave before any frame")
+	}
+	screen := func(top int) []protocol.FrameRow {
+		var rows []protocol.FrameRow
+		for y := range 9 {
+			rows = append(rows, protocol.FrameRow{Index: uint16(y), VT: []byte(fmt.Sprintf("row %02d", top+y))})
+		}
+		return append(rows, protocol.FrameRow{Index: 9, VT: []byte("> ")})
+	}
+	out := string(p.Apply(&protocol.Frame{Seq: 1, Full: true, Alternate: true, Cols: 10, Lines: 10, Prefix: []byte("\x1b[?1049h\x1b[?2004h\x1b[H"), Rows: screen(0)}, nil))
+	if strings.Contains(out, "1049") || !strings.Contains(out, "?2004h") {
+		t.Fatalf("first frame: %q", out)
+	}
+	// The transcript moves up two rows: rows 00 and 01 are painted at the
+	// top and scrolled off with line feeds, then every row is repainted.
+	out = string(p.Apply(&protocol.Frame{Seq: 2, Alternate: true, Cols: 10, Lines: 10, Rows: screen(2)[:9]}, nil))
+	if !strings.Contains(out, "\x1b[1;1H\x1b[0m\x1b[Krow 00\x1b[2;1H\x1b[0m\x1b[Krow 01\x1b[10;1H\n\n\x1b[1;1H") || !strings.Contains(out, "\x1b[10;1H\x1b[0m\x1b[K> ") {
+		t.Fatalf("shift: %q", out)
+	}
+	if string(p.Leave()) != "\x1b[10;1H\r\n" {
+		t.Fatalf("Leave %q", p.Leave())
+	}
+	// Back on the primary screen nothing is recorded or switched.
+	out = string(p.Apply(&protocol.Frame{Seq: 3, Full: true, Cols: 10, Lines: 10, Prefix: []byte("\x1b[H"), Rows: []protocol.FrameRow{{Index: 0, VT: []byte("$ ")}}}, nil))
+	if strings.Contains(out, "1049") || p.Leave() != nil {
+		t.Fatalf("primary: %q, Leave %q", out, p.Leave())
+	}
+}
+
+// A screen bigger than the terminal it is painted into, before the frames
+// at the new size, keeps its bottom rows (the input box) and each row's
+// first cells.
+func TestBackdropCutsToFit(t *testing.T) {
+	p := New()
+	p.Apply(&protocol.Frame{Seq: 1, Full: true, Cols: 12, Lines: 3, Rows: []protocol.FrameRow{
+		{Index: 0, VT: []byte("transcript")},
+		{Index: 1, VT: []byte("────────────")},
+		{Index: 2, VT: []byte("> typed text")},
+	}}, nil)
+	got := string(p.Backdrop(5, 2))
+	want := cup(0, 0) + rowStart + "─────\x1b[0m" + cup(1, 0) + rowStart + "> typ\x1b[0m"
+	if got != want {
+		t.Fatalf("backdrop %q, want %q", got, want)
+	}
+	if got := string(p.Backdrop(12, 3)); !strings.Contains(got, "transcript") || !strings.Contains(got, "> typed text") {
+		t.Fatalf("backdrop that fits %q", got)
+	}
+}
+
+func TestCropRow(t *testing.T) {
+	for _, c := range []struct{ row, want string }{
+		{"abc", "abc"},
+		{"abcdefgh", "abcd\x1b[0m"},
+		{"\x1b[1mab\x1b[0mcdef", "\x1b[1mab\x1b[0mcd\x1b[0m"},
+		// The formatter's empty cells.
+		{"a\x1b[2Cbcdef", "a\x1b[2Cb\x1b[0m"},
+		{"a\x1b[5Cb", "a\x1b[0m"},
+		// A wide character that would straddle the cut is left out.
+		{"abc世界", "abc\x1b[0m"},
+		{"ab世界", "ab世\x1b[0m"},
+		// A link open at the cut is ended.
+		{"\x1b]8;;https://x\x1b\\abcdef\x1b]8;;\x1b\\", "\x1b]8;;https://x\x1b\\abcd\x1b[0m\x1b]8;;\x1b\\"},
+		{"\x1b]8;;https://x\x1b\\ab\x1b]8;;\x1b\\cdef", "\x1b]8;;https://x\x1b\\ab\x1b]8;;\x1b\\cd\x1b[0m"},
+	} {
+		if got := string(cropRow([]byte(c.row), 4)); got != c.want {
+			t.Errorf("cropRow(%q) = %q, want %q", c.row, got, c.want)
+		}
+	}
+}
+
+// The echo's drawing of typed keys covers rows the frames painted; the
+// first frame without it repaints them, since the agent may have moved
+// what was under it (pi moves its input box up to open a menu).
+func TestOverdrawnRowsRepaint(t *testing.T) {
+	p := New()
+	rows := func(vt ...string) []protocol.FrameRow {
+		var out []protocol.FrameRow
+		for i, s := range vt {
+			out = append(out, protocol.FrameRow{Index: uint16(i), VT: []byte(s)})
+		}
+		return out
+	}
+	p.Apply(&protocol.Frame{Seq: 1, Full: true, Cols: 10, Lines: 3, Rows: rows("one", "two", "box")}, nil)
+	p.Apply(&protocol.Frame{Seq: 2, Cols: 10, Lines: 3, Rows: rows("one", "box", "menu")}, []byte(cup(2, 0)+"/"))
+	got := string(p.Apply(&protocol.Frame{Seq: 3, Cols: 10, Lines: 3, CursorRow: 1, CursorCol: 1}, nil))
+	for _, row := range []string{"one", "box", "menu"} {
+		if !strings.Contains(got, row) {
+			t.Fatalf("row %q not repainted after the overlay: %q", row, got)
+		}
+	}
+	if got := string(p.Apply(&protocol.Frame{Seq: 4, Cols: 10, Lines: 3, CursorRow: 1, CursorCol: 1}, nil)); strings.Contains(got, "menu") {
+		t.Fatalf("repainted again: %q", got)
+	}
+	// Typed keys drawn straight to the terminal count too.
+	p.Overdrawn()
+	if got := string(p.Apply(&protocol.Frame{Seq: 5, Cols: 10, Lines: 3, CursorRow: 1, CursorCol: 1}, nil)); !strings.Contains(got, "menu") {
+		t.Fatalf("not repainted after Overdrawn: %q", got)
 	}
 }

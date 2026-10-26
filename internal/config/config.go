@@ -49,7 +49,24 @@ type AttachConfig struct {
 	// from a remote daemon, the raw output from the local one), "frames"
 	// or "raw". Unset means auto. See ARCHITECTURE.md, "Screen frames".
 	Mode string `toml:"mode"`
+	// AltScrollback, under frames, keeps the terminal on the primary
+	// screen while an agent runs on the alternate one and pushes the rows
+	// that leave the top of its transcript into the terminal's own
+	// scrollback. A prototype, off unless set: it applies to every
+	// program on the alternate screen. See
+	// docs/designs/alt-screen-scrollback.md.
+	AltScrollback bool `toml:"alt_scrollback"`
+	// PredictWheel, under frames, draws a wheel tick over the transcript
+	// of an agent on the alternate screen at once, and lets the agent's
+	// frames correct it, with or without AltScrollback. Unset means on.
+	PredictWheel *bool `toml:"predict_wheel"`
+	// SubmitAndSwitch offers Submit and switch first in the Ctrl-Y
+	// palette (so Ctrl-Y, Enter is it). Hidden unless set.
+	SubmitAndSwitch bool `toml:"submit_and_switch"`
 }
+
+// WheelPredicted is PredictWheel with its default applied.
+func (a AttachConfig) WheelPredicted() bool { return a.PredictWheel == nil || *a.PredictWheel }
 
 // AttachMode is Mode with its default applied.
 func (a AttachConfig) AttachMode() string {
@@ -225,6 +242,18 @@ scrollback_rows = 1000
 # How the screen reaches the terminal: "auto" (screen frames from a remote
 # daemon, the raw output from the local one), "frames" or "raw".
 mode = "auto"
+# Under frames, keep the terminal on the primary screen while an agent runs
+# on the alternate one (Claude Code, Codex), and push the rows that leave
+# the top of its transcript into this terminal's own scrollback. A
+# prototype: it applies to every program on the alternate screen.
+alt_scrollback = false
+# Under frames, the wheel over the transcript of an agent on the alternate
+# screen scrolls it at once, and the agent's own screen corrects the guess
+# when it arrives.
+#predict_wheel = true
+# Offer Submit and switch in the Ctrl-Y palette, first (so Ctrl-Y, Enter):
+# Enter goes to the agent and you move to the session that needs attention.
+#submit_and_switch = false
 
 # Typing in "agt attach" is drawn in the agent's own input field at once
 # and sent as typed, batched for at most flush_after ("0" sends every key

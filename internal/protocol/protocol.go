@@ -338,9 +338,25 @@ type Frame struct {
 	// Field is the input field, when asked for (FrameAck.Field); nil
 	// otherwise.
 	Field *Field
+	// Acked (CapAttachFrameWindow) is the last frame whose ack the worker
+	// had read when it built this one, so the frame shows the input the
+	// client sent before that ack. HasAcked is whether it is set: only for
+	// a client that asked for the capability, and encoded last.
+	Acked    uint32
+	HasAcked bool
 	// Rows are the rows that changed, by index; every row in a Full frame.
 	// A blank row has empty VT.
 	Rows []FrameRow
+}
+
+// AckedBy is the last ack the worker had read when it built f: Acked
+// under CapAttachFrameWindow, otherwise derived from the fixed window,
+// FrameWindow (it read the ack of Seq-FrameWindow or a later one).
+func (f *Frame) AckedBy() uint32 {
+	if f.HasAcked {
+		return f.Acked
+	}
+	return f.Seq - min(f.Seq, FrameWindow)
 }
 
 // FrameRow is one row of a Frame.
@@ -359,8 +375,14 @@ type FrameAck struct {
 // FrameWindow is how many frames a worker sends unacknowledged: it builds
 // frame N only after reading the ack of frame N-FrameWindow or a later
 // one. Requests are read in order, so frame N shows the input a client
-// sent before that ack, which its local echo relies on.
-const FrameWindow = 2
+// sent before that ack, which its local echo relies on. Under
+// CapAttachFrameWindow the worker sizes the window from the round trip,
+// between FrameWindow and MaxFrameWindow, and each frame says which ack
+// it was built after (Frame.Acked) instead.
+const (
+	FrameWindow    = 2
+	MaxFrameWindow = 16
+)
 
 // HasFeature reports whether the attach stream asked for capability c.
 func (a *AttachSession) HasFeature(c string) bool { return slices.Contains(a.Features, c) }
@@ -1588,6 +1610,9 @@ func (e *encoder) frame(f *Frame) {
 	for _, h := range f.History {
 		e.bytes(h)
 	}
+	if f.HasAcked {
+		e.u32(f.Acked)
+	}
 }
 
 // colors writes c as a presence flag and six bytes.
@@ -1958,6 +1983,9 @@ func (d *decoder) frame() *Frame {
 	}
 	for i := 0; i < n && d.err == nil; i++ {
 		f.History = append(f.History, d.optBytes())
+	}
+	if d.more() {
+		f.Acked, f.HasAcked = d.u32(), true
 	}
 	return f
 }

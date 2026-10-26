@@ -11,7 +11,11 @@ import (
 	"bytes"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
+
+	"github.com/rivo/uniseg"
 
 	"agtd.sh/internal/protocol"
 )
@@ -30,6 +34,12 @@ type Painter struct {
 	cols, lines int
 	// rows is the VT last painted for each row; nil is blank.
 	rows [][]byte
+	// overdrawn is whether something besides the frames (the echo's
+	// drawing of typed keys over the input box, which the frames carry
+	// as their overlay while it lasts) drew over the rows: the first
+	// frame without it repaints every row, since the agent may have moved
+	// what was under it (pi moves its box up to open a menu).
+	overdrawn bool
 	// modes are the modes the last prefix mentioned ("?2004", "4") and
 	// whether it set (h) or reset (l) them. Only changes are written: a
 	// mode a new prefix no longer mentions is back at its default and is
@@ -42,7 +52,244 @@ type Painter struct {
 	seq   uint32
 	// painted is whether any frame was painted yet.
 	painted bool
+
+	// altScrollback keeps the terminal on the primary screen while the
+	// program is on the alternate one, and pushes the rows that leave the
+	// top of its transcript into the terminal's own scrollback (see
+	// SetAltScrollback). alt is the record of them, kept for that and for
+	// the wheel prediction, nil while the program is on the primary screen
+	// or neither is on; altEnd is how many rows from the top are its
+	// transcript, from the last field seen (0: unknown).
+	altScrollback bool
+	altMax        int
+	alt           *Transcript
+	altEnd        int
+	// pr is the wheel prediction (predict.go), and shown what the
+	// terminal shows when a guess is drawn over the agent's screen (nil
+	// when it shows rows as they are).
+	pr    wheelPredict
+	shown [][]byte
+	clock func() time.Time
 }
+
+// SetAltScrollback turns on scrollback for programs on the alternate
+// screen, keeping at most max rows of their transcript
+// (docs/designs/alt-screen-scrollback.md, the client prototype): the
+// alternate screen is never entered, its frames are painted on the
+// primary screen, and the rows a Transcript finds leaving the top are
+// scrolled into the terminal's scrollback as a primary screen's would be.
+func (p *Painter) SetAltScrollback(max int) { p.altScrollback, p.altMax = true, max }
+
+// recording is whether alternate screen frames go through the transcript
+// record: for the terminal's scrollback, or for the wheel prediction's
+// guesses over a terminal that mirrors the alternate screen.
+func (p *Painter) recording() bool { return p.altScrollback || p.pr.on }
+
+// WantsField reports whether frames should carry the input field, whose
+// box top bounds the transcript the record and the prediction look at.
+func (p *Painter) WantsField() bool { return p.recording() }
+
+// Leave is what to write before restoring the terminal at detach: under
+// alt scrollback, while the program is on the alternate screen, its screen
+// stays as a primary screen program's output would, so the cursor goes
+// under it. Nil otherwise.
+func (p *Painter) Leave() []byte {
+	if !p.altScrollback || p.alt == nil || p.lines == 0 {
+		return nil
+	}
+	return []byte(cup(p.lines-1, 0) + "\r\n")
+}
+
+// altFrame turns an alternate screen frame into one painted on the
+// primary screen: the screen it shows goes through the transcript record,
+// and the rows recorded become a scroll (Scrolled, History) with every
+// row repainted after it, since the terminal's rows moved. A look inside
+// a synchronized-output block, at half a repaint, is skipped.
+func (p *Painter) altFrame(f *protocol.Frame) *protocol.Frame {
+	if !f.Alternate {
+		if p.alt != nil {
+			p.resetPredict()
+		}
+		p.alt, p.altEnd = nil, 0
+		return f
+	}
+	lines := int(f.Lines)
+	cur := make([][]byte, lines)
+	if !f.Full && lines == p.lines && int(f.Cols) == p.cols && len(p.rows) == lines {
+		copy(cur, p.rows)
+	}
+	for _, r := range f.Rows {
+		if int(r.Index) < lines {
+			cur[r.Index] = r.VT
+		}
+	}
+	if fl := f.Field; fl != nil && fl.Found && fl.Alternate && fl.BoxTop > 0 {
+		p.altEnd = int(fl.BoxTop) - 1
+	}
+	if p.alt == nil {
+		p.alt = NewTranscript(p.altMax)
+	}
+	modes := p.modes
+	if len(f.Prefix) > 0 {
+		modes = parseModes(f.Prefix)
+	}
+	if modes["?2026"] {
+		return f
+	}
+	pos, jumps := p.alt.Pos(), p.alt.Jumps
+	out := p.alt.Update(cur, p.altEnd)
+	p.observe(cur, p.alt.Pos()-pos, p.alt.Jumps != jumps, f)
+	if len(out) == 0 || !p.altScrollback {
+		// A terminal that mirrors the alternate screen keeps no
+		// scrollback of it: the record serves the prediction alone.
+		return f
+	}
+	g := *f
+	g.Scrolled, g.History = uint16(min(len(out), 65535)), out
+	g.Rows = make([]protocol.FrameRow, lines)
+	for y := range cur {
+		g.Rows[y] = protocol.FrameRow{Index: uint16(y), VT: cur[y]}
+	}
+	return &g
+}
+
+// Painted reports whether a frame has been painted.
+func (p *Painter) Painted() bool { return p.painted }
+
+// Backdrop paints the screen as last shown into a terminal of cols by
+// lines, for a view drawn over it (the attach overlay), which wraps it in
+// its own synchronized update. A screen bigger than the terminal, before
+// the frames at a new size arrive, is cut to fit: its bottom rows, where
+// an agent keeps its input box, and each row's first cols cells. It is nil
+// when there is nothing painted.
+func (p *Painter) Backdrop(cols, lines int) []byte {
+	if !p.painted {
+		return nil
+	}
+	var b bytes.Buffer
+	top := max(len(p.rows)-lines, 0)
+	for y := top; y < len(p.rows); y++ {
+		row := p.rows[y]
+		if p.shown != nil && y < len(p.shown) {
+			row = p.shown[y]
+		}
+		if p.cols > cols {
+			row = cropRow(row, cols)
+		}
+		b.WriteString(cup(y-top, 0) + rowStart)
+		b.Write(row)
+	}
+	return b.Bytes()
+}
+
+// cropRow cuts a row's VT to its first cols cells, keeping the escapes
+// (colours, links) before the cut, and ends what they left open.
+func cropRow(row []byte, cols int) []byte {
+	var out []byte
+	col, link := 0, false
+	end := func() []byte {
+		out = append(out, "\x1b[0m"...)
+		if link {
+			out = append(out, "\x1b]8;;\x1b\\"...)
+		}
+		return out
+	}
+	for i := 0; i < len(row); {
+		if row[i] == 0x1b {
+			seq := row[i : i+escapeLen(row[i:])]
+			if n, ok := cufCount(seq); ok {
+				if col+n >= cols {
+					return end()
+				}
+				col += n
+			}
+			if bytes.HasPrefix(seq, []byte("\x1b]8;")) {
+				// OSC 8 ; params ; URI: an empty URI ends the link.
+				uri := bytes.TrimRight(seq[bytes.IndexByte(seq[4:], ';')+5:], "\x07\x1b\\")
+				link = len(uri) > 0
+			}
+			out = append(out, seq...)
+			i += len(seq)
+			continue
+		}
+		j := i
+		for j < len(row) && row[j] != 0x1b {
+			j++
+		}
+		g := uniseg.NewGraphemes(string(row[i:j]))
+		for g.Next() {
+			w := max(g.Width(), 1)
+			if col+w > cols {
+				return end()
+			}
+			out = append(out, g.Str()...)
+			col += w
+		}
+		i = j
+	}
+	return out
+}
+
+// escapeLen is the length of the escape sequence at the start of b: a CSI
+// up to its final byte, an OSC, DCS, APC or PM up to its terminator, or
+// ESC and one byte.
+func escapeLen(b []byte) int {
+	if len(b) < 2 {
+		return len(b)
+	}
+	switch b[1] {
+	case '[':
+		for i := 2; i < len(b); i++ {
+			if b[i] >= 0x40 && b[i] <= 0x7e {
+				return i + 1
+			}
+		}
+	case ']', 'P', '_', '^':
+		for i := 2; i < len(b); i++ {
+			if b[i] == 0x07 {
+				return i + 1
+			}
+			if b[i] == 0x1b && i+1 < len(b) && b[i+1] == '\\' {
+				return i + 2
+			}
+		}
+	default:
+		return 2
+	}
+	return len(b)
+}
+
+// cufCount reads a cursor-forward sequence (CSI n C), which the formatter
+// writes for a run of empty cells.
+func cufCount(seq []byte) (int, bool) {
+	if len(seq) < 3 || seq[1] != '[' || seq[len(seq)-1] != 'C' {
+		return 0, false
+	}
+	if len(seq) == 3 {
+		return 1, true
+	}
+	n, err := strconv.Atoi(string(seq[2 : len(seq)-1]))
+	if err != nil {
+		return 0, false
+	}
+	return max(n, 1), true
+}
+
+// altModes are the modes that switch to the alternate screen.
+var altModes = []string{"?47", "?1047", "?1049"}
+
+// AltScreen reports whether the terminal is on the alternate screen.
+func (p *Painter) AltScreen() bool {
+	for _, m := range altModes {
+		if p.modes[m] {
+			return true
+		}
+	}
+	return false
+}
+
+// Overdrawn notes that something besides the frames drew over the screen.
+func (p *Painter) Overdrawn() { p.overdrawn = true }
 
 // New makes a painter for a terminal that has just been cleared.
 func New() *Painter { return &Painter{} }
@@ -53,7 +300,8 @@ func New() *Painter { return &Painter{} }
 // turns them off first (attachRepaintSequence), so the next frame must set
 // them again.
 func (p *Painter) Reset() {
-	p.rows, p.seq, p.painted = nil, 0, false
+	p.rows, p.seq, p.painted, p.overdrawn = nil, 0, false, false
+	p.resetPredict()
 	for _, m := range mouseModes {
 		delete(p.modes, m)
 	}
@@ -64,6 +312,9 @@ var mouseModes = []string{"?9", "?1000", "?1002", "?1003", "?1005", "?1006", "?1
 
 // Seq is the sequence number of the last frame painted (0 for none).
 func (p *Painter) Seq() uint32 { return p.seq }
+
+// Rows is the VT of every row, as the frames painted them.
+func (p *Painter) Rows() [][]byte { return append([][]byte(nil), p.rows...) }
 
 // Row is the VT last painted for row y, nil when blank or unknown.
 func (p *Painter) Row(y int) []byte {
@@ -82,16 +333,33 @@ func (p *Painter) Row(y int) []byte {
 // drag the cursor back a few cells on every frame while typing. A full
 // frame, or one of another size, starts the row cache afresh.
 func (p *Painter) Apply(f *protocol.Frame, overlay []byte) []byte {
+	if p.recording() {
+		f = p.altFrame(f)
+	}
 	var b bytes.Buffer
 	b.WriteString(syncBegin)
 	cols, lines := int(f.Cols), int(f.Lines)
 	resized := p.painted && (cols != p.cols || lines != p.lines)
 	if f.Full || resized || len(p.rows) != lines {
 		p.rows = make([][]byte, lines)
+		if p.shown != nil || resized {
+			p.resetPredict()
+		}
+	}
+	// written are the rows this frame writes, while a guess is drawn
+	// over the rows it leaves, or the rows were overdrawn.
+	var written []bool
+	if p.shown != nil || p.overdrawn {
+		written = make([]bool, lines)
 	}
 	p.cols, p.lines = cols, lines
 	if len(f.Prefix) > 0 {
 		modes, rest := splitPrefix(f.Prefix)
+		if p.altScrollback {
+			for _, m := range altModes {
+				delete(modes, m)
+			}
+		}
 		for _, m := range sortedModes(p.modes) {
 			if _, still := modes[m]; !still {
 				b.WriteString(defaultMode(m, p.modes[m]))
@@ -130,6 +398,12 @@ func (p *Painter) Apply(f *protocol.Frame, overlay []byte) []byte {
 		if k >= lines || f.Full {
 			p.rows = make([][]byte, lines)
 		} else {
+			if p.shown != nil {
+				copy(p.shown, p.shown[k:])
+				for i := lines - k; i < lines; i++ {
+					p.shown[i] = nil
+				}
+			}
 			copy(p.rows, p.rows[k:])
 			for i := lines - k; i < lines; i++ {
 				p.rows[i] = nil
@@ -144,7 +418,26 @@ func (p *Painter) Apply(f *protocol.Frame, overlay []byte) []byte {
 		b.WriteString(cup(y, 0) + rowStart)
 		b.Write(r.VT)
 		p.rows[y] = r.VT
+		if written != nil {
+			written[y] = true
+		}
 	}
+	if p.shown != nil || p.pr.debt != 0 || p.pr.settled {
+		p.reconcileShown(&b, written)
+	}
+	if p.overdrawn && len(overlay) == 0 {
+		for y, row := range p.rows {
+			if written[y] {
+				continue
+			}
+			if p.shown != nil && y < len(p.shown) {
+				row = p.shown[y]
+			}
+			b.WriteString(cup(y, 0) + rowStart)
+			b.Write(row)
+		}
+	}
+	p.overdrawn = len(overlay) > 0
 	b.Write(f.Keyboard)
 	b.Write(f.Colors)
 	b.Write(f.Effects)

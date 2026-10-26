@@ -9,6 +9,7 @@ import (
 
 	"agtd.sh/internal/config"
 	"agtd.sh/internal/protocol"
+	"agtd.sh/internal/screen"
 	"agtd.sh/internal/session"
 )
 
@@ -31,6 +32,9 @@ const (
 	// session and the attachment moves to the session that needs
 	// attention.
 	overlaySubmitSwitch
+	// overlayDetachAction is one too: the attachment detaches, as
+	// Ctrl-\ does.
+	overlayDetachAction
 )
 
 type overlayOutcomeKind int
@@ -45,6 +49,8 @@ const (
 	// overlaySubmit sends Enter to the session and switches to the
 	// session that needs attention, or closes the overlay when none does.
 	overlaySubmit
+	// overlayDetach detaches from the session.
+	overlayDetach
 )
 
 type overlayOutcome struct {
@@ -57,21 +63,27 @@ type paletteItem struct {
 	mode        overlayMode
 }
 
-// paletteItems are the palette's commands. Submit and switch comes first,
-// so that Ctrl-Y, Enter is it.
+// paletteItems are the palette's commands.
 var paletteItems = []paletteItem{
-	{"↵", "Submit and switch", overlaySubmitSwitch},
 	{"s", "Switch session", overlaySwitcher},
 	{"t", "New session", overlayNewSession},
 	{"i", "Session details", overlayDetails},
+	{"d", "Detach", overlayDetachAction},
 	{"x", "Stop session", overlayStopConfirm},
 }
+
+// submitSwitchItem comes first, so that Ctrl-Y, Enter is it, when
+// [attach] submit_and_switch offers it.
+var submitSwitchItem = paletteItem{"↵", "Submit and switch", overlaySubmitSwitch}
 
 // takeSizeItem is offered while another attachment owns the size.
 var takeSizeItem = paletteItem{"r", "Take over size", overlayTakeSize}
 
 func (o *overlay) filteredPalette() []paletteItem {
 	items := paletteItems
+	if o.submitSwitch {
+		items = append([]paletteItem{submitSwitchItem}, items...)
+	}
 	if o.size != nil && !o.size.Owner {
 		items = append(slices.Clip(items), takeSizeItem)
 	}
@@ -109,19 +121,66 @@ type overlay struct {
 	// latency is the round trip to the attached session's host, or 0 for
 	// the local daemon.
 	latency func() time.Duration
+	// painter is the session's screen under frames, which keeps taking
+	// frames while the overlay is open (none are written); nil otherwise.
+	painter *screen.Painter
+	// ownsAlt is whether the overlay opened the alternate screen, over a
+	// copy of the session's screen: the terminal was on its primary
+	// screen, whose view scrolls (with the wheel, into the session's
+	// scrollback) and would carry the overlay with it.
+	ownsAlt bool
+	// backdrop is whether the next draw paints the session's screen
+	// first (after a frame, so the session goes on updating behind the
+	// overlay), and clear whether it clears the terminal first (after a
+	// resize, which cuts or reflows what is under the overlay).
+	backdrop, clear bool
+	// submitSwitch offers Submit and switch ([attach] submit_and_switch).
+	submitSwitch bool
 }
 
-func newOverlay(c *client, id string, size *protocol.SizeOwnership) *overlay {
-	return &overlay{c: c, session: id, size: size, theme: overlayThemeFor(os.Getenv), now: time.Now, latency: c.latency}
+func newOverlay(c *client, id string, size *protocol.SizeOwnership, painter *screen.Painter) *overlay {
+	o := &overlay{c: c, session: id, size: size, theme: overlayThemeFor(os.Getenv), now: time.Now, latency: c.latency, painter: painter}
+	o.ownsAlt = painter != nil && painter.Painted() && !painter.AltScreen()
+	if cfg, err := config.Load(c.paths.Config); err == nil {
+		o.submitSwitch = cfg.Attach.SubmitAndSwitch
+	}
+	return o
 }
 
 func (o *overlay) open() error {
+	if o.ownsAlt {
+		writeOut([]byte("\x1b[?1049h"))
+		o.backdrop = true
+	}
 	o.mode = overlayPalette
 	o.paletteQuery, o.paletteSelected = "", 0
 	o.switcherQuery, o.switcherSelected = "", 0
 	o.toast = ""
 	o.draw()
 	return o.refresh()
+}
+
+// leave is what to write as the overlay closes, before the session's
+// screen is restored: the return from the alternate screen it opened on.
+func (o *overlay) leave() []byte {
+	if !o.ownsAlt {
+		return nil
+	}
+	return []byte("\x1b[?1049l")
+}
+
+// resized clears the terminal with the next draw, under the session's
+// screen cut to fit until the frames at the new size follow.
+func (o *overlay) resized() { o.clear, o.backdrop = true, true }
+
+// framed notes a frame the painter took while the overlay is open, and
+// reports whether to draw again, over the session's new screen.
+func (o *overlay) framed() bool {
+	if o.painter == nil {
+		return false
+	}
+	o.backdrop = true
+	return true
 }
 
 func (o *overlay) refresh() error {
@@ -199,6 +258,8 @@ func (o *overlay) handlePalette(ev keyEvent) (overlayOutcome, error) {
 				return overlayOutcome{kind: overlayTookSize}, nil
 			case overlaySubmitSwitch:
 				return overlayOutcome{kind: overlaySubmit}, nil
+			case overlayDetachAction:
+				return overlayOutcome{kind: overlayDetach}, nil
 			}
 			return overlayOutcome{}, o.run(items[o.paletteSelected].mode)
 		}
@@ -664,6 +725,21 @@ func (o *overlay) sessionIcon(row displayRow) (string, string) {
 // The cursor stays hidden while the overlay is open.
 func (o *overlay) draw() {
 	cols, rows, _, _ := terminalGeometry()
+	var b strings.Builder
+	// One synchronized update, so the overlay never shows missing over
+	// the session's screen.
+	b.WriteString("\x1b[?2026h")
+	defer func() {
+		b.WriteString("\x1b[?2026l")
+		writeOut([]byte(b.String()))
+	}()
+	if o.clear {
+		b.WriteString("\x1b[2J")
+	}
+	if o.backdrop && o.painter != nil {
+		b.Write(o.painter.Backdrop(int(cols), int(rows)))
+	}
+	o.clear, o.backdrop = false, false
 	x, y, w, h := overlayRect(int(cols), int(rows))
 	if w < 8 || h < 8 {
 		return
@@ -676,7 +752,6 @@ func (o *overlay) draw() {
 		return t.surfaceBG + t.lineFG + s + ansiReset
 	}
 	pad := line{}.render(1, t)
-	var b strings.Builder
 	b.WriteString("\x1b[?25l")
 	at := func(row int) { fmt.Fprintf(&b, "\x1b[%d;%dH", y+row+1, x+1) }
 	at(0)
@@ -687,5 +762,4 @@ func (o *overlay) draw() {
 	}
 	at(h - 1)
 	b.WriteString(edge("╰" + strings.Repeat("─", w-2) + "╯"))
-	writeOut([]byte(b.String()))
 }

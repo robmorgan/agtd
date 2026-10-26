@@ -227,6 +227,11 @@ const (
 	// scripts, and AttachCompose on an attach stream, for the overlay's
 	// submit and switch. Empty text is Enter alone.
 	CapAttachCompose = "attach-compose"
+	// CapAttachFrameWindow (attach stream, with CapAttachFrames): the
+	// worker sizes the frame window from the round trip it measures
+	// between a frame and its ack (up to MaxFrameWindow), and every Frame
+	// carries Acked, the ack it was built after.
+	CapAttachFrameWindow = "attach-frame-window"
 	// CapKillExpectUID: KillSession ends with ExpectUID, and the daemon
 	// refuses a kill or remove whose UID is not the session's current one.
 	CapKillExpectUID = "kill-expect-uid"
@@ -258,13 +263,13 @@ const MinProtocolVersion uint16 = 1
 func Capabilities() []string {
 	return []string{CapControlStream, CapGitState, CapArtifacts, CapSessionUID, CapRequestTokens, CapAttachFeatures, CapAttachReplace, CapAttachResync, CapRuntimeStats,
 		CapEvents, CapSessionActivity, CapSessionStatus, CapDaemonID, CapSessionRestart, CapWorkerHandoff, CapTerminalMemory, CapAttachScrollback, CapAttachSizeOwner,
-		CapAttachField, CapTerminalColors, CapAttachFrames, CapAttachCompose, CapKillExpectUID, CapSSHAgent}
+		CapAttachField, CapTerminalColors, CapAttachFrames, CapAttachCompose, CapAttachFrameWindow, CapKillExpectUID, CapSSHAgent}
 }
 
 // AttachCapabilities are the capabilities that apply to an attach stream,
 // listed in AttachSession.Features.
 func AttachCapabilities() []string {
-	return []string{CapSessionUID, CapAttachReplace, CapAttachResync, CapSessionRestart, CapAttachScrollback, CapAttachSizeOwner, CapAttachField, CapTerminalColors, CapAttachFrames, CapAttachCompose}
+	return []string{CapSessionUID, CapAttachReplace, CapAttachResync, CapSessionRestart, CapAttachScrollback, CapAttachSizeOwner, CapAttachField, CapTerminalColors, CapAttachFrames, CapAttachCompose, CapAttachFrameWindow}
 }
 
 // AttachFeatures is the attach-stream features a client may ask for given
