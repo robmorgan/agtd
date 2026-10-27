@@ -1,9 +1,43 @@
 package protocol
 
 import (
+	"bytes"
 	"slices"
+	"strings"
 	"testing"
+
+	"agtd.sh/internal/sshagent"
 )
+
+// On an open ssh-agent stream either end reads a frame holding one agent
+// message of the largest size, and refuses a larger frame at its header,
+// before allocating it.
+func TestSSHAgentFrameBound(t *testing.T) {
+	big := &SSHAgentMessage{Conn: 1, Data: bytes.Repeat([]byte{sshagent.MsgRequestIdentities}, sshagent.MaxMessageLen)}
+	var b bytes.Buffer
+	if err := WriteRequest(&b, &Request{SSHAgentReply: big}); err != nil {
+		t.Fatal(err)
+	}
+	if req, err := ReadSSHAgentRequest(&b); err != nil || req == nil || len(req.SSHAgentReply.Data) != sshagent.MaxMessageLen {
+		t.Fatalf("a reply of the largest size: %#v, %v", req, err)
+	}
+	if err := WriteResponse(&b, &Response{SSHAgentRequest: big}); err != nil {
+		t.Fatal(err)
+	}
+	if resp, err := ReadSSHAgentResponse(&b); err != nil || resp == nil || len(resp.SSHAgentRequest.Data) != sshagent.MaxMessageLen {
+		t.Fatalf("a request of the largest size: %#v, %v", resp, err)
+	}
+	// A header declaring more, with nothing after it: refused as it is.
+	h := make([]byte, frameHeaderLen)
+	putFrameHeader(h, ProtocolVersion, uint16(kSSHAgentReplyRequest), 0, MaxSSHAgentFramePayload+1)
+	if _, err := ReadSSHAgentRequest(bytes.NewReader(h)); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("an oversized reply: %v", err)
+	}
+	putFrameHeader(h, ProtocolVersion, uint16(kSSHAgentRequestResponse), 0, MaxSSHAgentFramePayload+1)
+	if _, err := ReadSSHAgentResponse(bytes.NewReader(h)); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("an oversized request: %v", err)
+	}
+}
 
 func TestSSHAgentRoundTrips(t *testing.T) {
 	roundTripRequest(t, &Request{ForwardSSHAgent: &ForwardSSHAgent{SessionID: "demo", ExpectUID: "00ff", Attachment: "attach-3", Client: "laptop (SHA256:abc)"}})
