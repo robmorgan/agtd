@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"agtd.sh/internal/protocol"
 )
 
 // view is a screen of height rows: the transcript lines from top, then
@@ -151,5 +153,101 @@ func TestRowKeyBoundsCursorForward(t *testing.T) {
 	}
 	if k := RowKey([]byte("a\x1b[3Cb")); k != "a   b" {
 		t.Fatalf("RowKey kept %q", k)
+	}
+}
+
+// rowsOf is lines[from:to] as rows.
+func rowsOf(lines []string, from, to int) [][]byte {
+	var out [][]byte
+	for _, l := range lines[from:to] {
+		out = append(out, []byte(l))
+	}
+	return out
+}
+
+func TestTranscriptFollowsAWorkersRecord(t *testing.T) {
+	// Value: protects=a client copy of the worker's record holds each row
+	// once, in order, from the seed on, and starts over where it cannot
+	// be contiguous; fails_when=Follow appends rows it holds, misnumbers
+	// them, or keeps a copy across a gap, a new record or one that went
+	// back; why_new=Follow is new; seam=none; no_claim=the worker's side
+	// (internal/worker/altrecord_test.go).
+	lines := numbered(30)
+	tr := NewTranscript(0)
+	// The seed: rows 5 to 10 of a record 10 long, the screen at 12.
+	if out := tr.Follow(&protocol.FrameRecord{New: true, Pos: 12, Mark: 10, Jumps: 1, Rows: rowsOf(lines, 5, 10)}); len(out) != 5 {
+		t.Fatalf("seed added %d rows", len(out))
+	}
+	if tr.Oldest() != 5 || tr.Recorded() != 10 || tr.Pos() != 12 || tr.Jumps != 1 {
+		t.Fatalf("oldest %d, recorded %d, pos %d, jumps %d", tr.Oldest(), tr.Recorded(), tr.Pos(), tr.Jumps)
+	}
+	if got := string(tr.Rows(7)[0]); got != lines[7] {
+		t.Fatalf("row 7 is %q", got)
+	}
+	// Rows it holds already are not added again; nothing new is nothing.
+	if out := tr.Follow(&protocol.FrameRecord{Pos: 13, Mark: 12, Rows: rowsOf(lines, 8, 12)}); len(out) != 2 || string(out[0]) != lines[10] {
+		t.Fatalf("overlap added %q", out)
+	}
+	if out := tr.Follow(&protocol.FrameRecord{Pos: 11, Mark: 12}); out != nil || tr.Pos() != 11 {
+		t.Fatalf("no rows added %q, pos %d", out, tr.Pos())
+	}
+	if got, want := recorded(tr), strings.Join(lines[5:12], ","); got != want {
+		t.Fatalf("record %s", got)
+	}
+	// A gap: the copy starts after it.
+	tr.Follow(&protocol.FrameRecord{Pos: 25, Mark: 20, Rows: rowsOf(lines, 18, 20)})
+	if tr.Oldest() != 18 || tr.Recorded() != 20 || len(tr.Rows(0)) != 2 {
+		t.Fatalf("after a gap: oldest %d, recorded %d", tr.Oldest(), tr.Recorded())
+	}
+	// A record that went back (the agent's screen started anew without a
+	// frame between) and a new one both replace the copy.
+	tr.Follow(&protocol.FrameRecord{Pos: 3, Mark: 3, Rows: rowsOf(lines, 0, 3)})
+	if tr.Oldest() != 0 || tr.Recorded() != 3 {
+		t.Fatalf("went back: oldest %d, recorded %d", tr.Oldest(), tr.Recorded())
+	}
+	tr.Follow(&protocol.FrameRecord{New: true, Pos: 4, Mark: 4, Rows: rowsOf(lines, 20, 24)})
+	if got := recorded(tr); got != strings.Join(lines[20:24], ",") {
+		t.Fatalf("new record: %s", got)
+	}
+}
+
+func TestTranscriptFollowKeepsItsBound(t *testing.T) {
+	// Value: protects=a client following a long run keeps at most its
+	// bound; fails_when=Follow skips trim; why_new=Follow is new;
+	// seam=none; no_claim=none.
+	lines := numbered(100)
+	tr := NewTranscript(20)
+	for m := 10; m <= 100; m += 10 {
+		tr.Follow(&protocol.FrameRecord{Pos: int64(m), Mark: int64(m), Rows: rowsOf(lines, m-10, m)})
+	}
+	if n := len(tr.Rows(0)); n > 25 || tr.Recorded() != 100 || string(tr.Rows(99)[0]) != lines[99] {
+		t.Fatalf("%d rows held, recorded %d", n, tr.Recorded())
+	}
+}
+
+func TestTranscriptStateRestores(t *testing.T) {
+	// Value: protects=a record handed to a new worker image carries on as
+	// if never handed over, and a state that does not add up restores
+	// empty rather than misnumbered; fails_when=State or
+	// RestoreTranscript drop a field or skip the keys the next Update
+	// compares; why_new=both are new; seam=none; no_claim=the JSON in the
+	// handoff (internal/worker/altrecord_test.go).
+	lines := numbered(40)
+	a := NewTranscript(0)
+	for top := 0; top <= 10; top++ {
+		a.Update(view(lines, top, 12, "> "), 11)
+	}
+	b := RestoreTranscript(0, a.State())
+	for top := 11; top <= 20; top++ {
+		a.Update(view(lines, top, 12, "> "), 11)
+		b.Update(view(lines, top, 12, "> "), 11)
+	}
+	if recorded(a) != recorded(b) || a.Pos() != b.Pos() || a.Recorded() != b.Recorded() || a.Jumps != b.Jumps {
+		t.Fatalf("restored record went its own way:\n%s\n%s", recorded(a), recorded(b))
+	}
+	st := a.State()
+	st.Mark++
+	if c := RestoreTranscript(0, st); c.Recorded() != 0 || c.Rows(0) != nil {
+		t.Fatalf("a state that does not add up restored %d rows", c.Recorded())
 	}
 }

@@ -504,3 +504,67 @@ func TestPredictNothingWithoutTheBox(t *testing.T) {
 		t.Fatal("no guess once the box is back")
 	}
 }
+
+// record is the worker's record for a screen whose top is line top: the
+// lines above it, as the rig's agent scrolled them off.
+func (r *predictRig) record(top int, newRecord bool, from int) *protocol.FrameRecord {
+	rec := &protocol.FrameRecord{New: newRecord, Pos: int64(top), Mark: int64(top), End: predictEnd}
+	for n := from; n < top; n++ {
+		rec.Rows = append(rec.Rows, fmt.Appendf(nil, "line %02d", n))
+	}
+	return rec
+}
+
+// showRecorded paints the agent's screen from a worker that keeps the
+// record, with the rows from from on.
+func (r *predictRig) showRecorded(top int, newRecord bool, from int, prefix string) []byte {
+	r.seq++
+	r.top = top
+	f := &protocol.Frame{Seq: r.seq, Full: r.seq == 1, Alternate: true, Cols: 20, Lines: 10, Rows: r.rows(top),
+		Prefix: []byte(prefix), Record: r.record(top, newRecord, from), HasRecord: true}
+	return r.p.Apply(f, nil)
+}
+
+func TestPredictFromASeededRecord(t *testing.T) {
+	// Value: protects=a client attached to a long transcript guesses its
+	// first tick up from the worker's seed, where its own record would be
+	// empty, and follows the worker's moves without inferring them;
+	// fails_when=the painter ignores Frame.Record, takes its End, or
+	// counts the seed as the agent moving; why_new=the record's seed is
+	// new (Phase 3); seam=none; no_claim=what the worker records
+	// (internal/worker/altrecord_test.go).
+	r := newPredictRig(t)
+	r.showRecorded(20, true, 0, "")
+	if paint := r.p.Wheel(wheelUp()); paint == nil {
+		t.Fatal("no guess over the seeded record")
+	}
+	if got := r.shown(0); got != "line 19" {
+		t.Fatalf("row 0 shows %q", got)
+	}
+	r.showRecorded(19, false, 20, "")
+	if st := r.p.PredictStats(); st.Guesses != 1 || st.TakenBack != 0 || r.p.pr.debt != 0 {
+		t.Fatalf("%+v, debt %d", st, r.p.pr.debt)
+	}
+	// Without the worker's record the same first tick has nothing above
+	// the screen to draw.
+	bare := newPredictRig(t)
+	bare.show(20)
+	if paint := bare.p.Wheel(wheelUp()); paint != nil {
+		t.Fatal("guessed without a record")
+	}
+}
+
+func TestPredictRecordInsideASyncedFrame(t *testing.T) {
+	// Value: protects=rows the worker sends in a frame built inside a
+	// synchronized block reach the copy (the worker sends each row once),
+	// while the half-drawn screen is not judged; fails_when=the painter
+	// skips Follow for a synced frame, leaving a gap that drops the copy;
+	// why_new=the record is new; seam=none; no_claim=none.
+	r := newPredictRig(t)
+	r.showRecorded(20, true, 0, "")
+	r.showRecorded(23, false, 20, "\x1b[?2026h\x1b[H")
+	r.showRecorded(25, false, 23, "\x1b[?2026l\x1b[H")
+	if r.p.alt.Oldest() != 0 || r.p.alt.Recorded() != 25 || string(r.p.alt.Rows(21)[0]) != "line 21" {
+		t.Fatalf("copy holds %d to %d", r.p.alt.Oldest(), r.p.alt.Recorded())
+	}
+}

@@ -309,6 +309,8 @@ func TestFramesPredictWheelClaudeScroll(t *testing.T) {
 	type piece struct {
 		data  []byte
 		ticks []int
+		// end is the stream offset the piece ends at.
+		end int
 	}
 	// One tick per repaint that moved, and one more where the wheel turned
 	// around: Claude Code (2.1.310, seen live on sfo3) does not move for
@@ -317,7 +319,7 @@ func TestFramesPredictWheelClaudeScroll(t *testing.T) {
 	off, last := 0, 0
 	for _, p := range splitAfter(data, []byte("\x1b[?2026l")) {
 		off += len(p)
-		pc := piece{data: p}
+		pc := piece{data: p, end: off}
 		if d := wheelDir(off); d != 0 {
 			pc.ticks = []int{d}
 			if last != 0 && d != last {
@@ -334,6 +336,7 @@ func TestFramesPredictWheelClaudeScroll(t *testing.T) {
 			for _, p := range repaints[i:min(i+n, len(repaints))] {
 				g.data = append(g.data, p.data...)
 				g.ticks = append(g.ticks, p.ticks...)
+				g.end = p.end
 			}
 			out = append(out, g)
 		}
@@ -346,13 +349,30 @@ func TestFramesPredictWheelClaudeScroll(t *testing.T) {
 		// mirrors the alternate screen, and the record serves the
 		// prediction alone.
 		mirror bool
+		// record has the worker keep the record (attach-alt-record), so
+		// the client follows it instead of inferring its own.
+		record bool
+		// late attaches the client after the four shell commands, which
+		// scrolled 120 rows past with nobody attached: only the worker's
+		// record holds them, so without it the first pass up is mostly
+		// left to the round trip.
+		late bool
 	}{
-		{"every repaint", repaints, false},
-		{"every 4 repaints", grouped(4), false},
-		{"mirrored", repaints, true},
+		{"every repaint", repaints, false, false, false},
+		{"every 4 repaints", grouped(4), false, false, false},
+		{"mirrored", repaints, true, false, false},
+		{"mirrored, worker record", repaints, true, true, false},
+		{"mirrored, worker record, every 4 repaints", grouped(4), true, true, false},
+		{"mirrored, attached late", repaints, true, false, true},
+		{"mirrored, worker record, attached late", repaints, true, true, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r := newFrameRig(t, streamCols, streamRows)
+			if c.record {
+				detectEveryChange(t)
+				r.s.agentName = "claude"
+				r.a.frames.record = true
+			}
 			now := time.Unix(1e9, 0)
 			if !c.mirror {
 				r.p.SetAltScrollback()
@@ -360,6 +380,14 @@ func TestFramesPredictWheelClaudeScroll(t *testing.T) {
 			r.p.SetPredictScroll(0)
 			r.p.SetClock(func() time.Time { return now })
 			for _, p := range c.pieces {
+				if c.late && p.end <= marks["shell-4"] {
+					// Nobody is attached: the worker sees the output
+					// alone.
+					if err := r.s.publishScanned(p.data); err != nil {
+						t.Fatal(err)
+					}
+					continue
+				}
 				for _, d := range p.ticks {
 					// The recorder's wheel: SGR, at column 20, row 12.
 					button := 64
@@ -381,6 +409,13 @@ func TestFramesPredictWheelClaudeScroll(t *testing.T) {
 			r.frame()
 			st := r.p.PredictStats()
 			t.Logf("%+v", st)
+			if c.late && !c.record {
+				// The gap the worker's record closes.
+				if st.Guesses >= st.Ticks*9/10 {
+					t.Errorf("%d of %d ticks guessed with no record of what scrolled past", st.Guesses, st.Ticks)
+				}
+				return
+			}
 			if st.Guesses < st.Ticks*9/10 {
 				t.Errorf("only %d of %d ticks guessed", st.Guesses, st.Ticks)
 			}

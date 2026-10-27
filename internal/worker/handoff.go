@@ -133,6 +133,10 @@ type handoffState struct {
 	// that the session has been forwarded to.
 	SSHAgentWaitFor   string
 	SSHAgentForwarded bool
+	// AltRecord is the record of the agent's transcript on the alternate
+	// screen (altrecord.go). Nil from an older image, or when there is
+	// none; an older image ignores it and starts its own.
+	AltRecord *altRecordHandoff
 
 	// Inherited descriptors.
 	PTYFD      int
@@ -281,6 +285,7 @@ func (rt *runtime) tryHandoff(req *handoffRequest, state *ownerState) (err error
 			Colors:            s.colors,
 			SSHAgentWaitFor:   s.agentHandoffWaitFor(),
 			SSHAgentForwarded: s.agentForwarded,
+			AltRecord:         s.altRecordHandoff(),
 		}
 		if s.activity != nil {
 			s.activity.exportAlertMemory(st.Status)
@@ -588,6 +593,9 @@ func resumeRuntime(st *handoffState) (*runtime, *ownerState, error) {
 		state.armSizeOwnerGrace()
 	}
 	state.agentForwarded = st.SSHAgentForwarded
+	if state.altRecord = restoreAltRecord(st.AltRecord); state.altRecord != nil {
+		state.altChecked = true
+	}
 	if st.SSHAgentWaitFor != "" {
 		state.agentWaitFor, state.agentWaitUntil = st.SSHAgentWaitFor, time.Now().Add(sizeOwnerGrace)
 	}
