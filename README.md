@@ -551,9 +551,10 @@ do something else); Tab, Esc, Ctrl-C, Ctrl-J, Ctrl-Enter and the other keys are 
 predicted, so the agent's own menus, completions and history work as they always did, one round
 trip late. Mouse input reaches the agent as it is, so in a fullscreen agent
 (Claude Code, Codex, pi) the wheel scrolls its transcript while you type; from a remote daemon
-each wheel tick is drawn at once from the rows the agent has shown since you attached, and the
-agent's screen corrects the guess a round trip later (`[attach] predict_wheel`). Rows above
-what it has shown since attaching come at the round trip. The agent's rendering replaces the drawing as soon as it arrives; the one thing you may
+each wheel tick is drawn at once from the agent's transcript, which the daemon records while the
+agent runs, attached or not, and the agent's screen corrects the guess a round trip later
+(`[attach] predict_wheel`). Against an older daemon the transcript is only what scrolled past
+since you attached, and rows above it come at the round trip. The agent's rendering replaces the drawing as soon as it arrives; the one thing you may
 notice is that the screen behind the box stands still for about a round trip after you pause
 typing. ARCHITECTURE.md, "The Input Field And Local Echo", has the details.
 

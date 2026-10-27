@@ -515,6 +515,14 @@ setting follows only if a real session needs more than 10,000 rows.
    capability and `Frame.AltScrollback`, attach seeding, history, handoff, stats, the bench. The
    client takes the worker's counts when the capability is offered and drops its own inference;
    against an older worker it mirrors the alternate screen as today.
+   Built 2026-10-27 for the mirror (`alt_scrollback` off): the worker's record
+   (`internal/worker/altrecord.go`), `attach-alt-record` with `Frame.Record` (the screen's
+   position, the record's length and jumps, the transcript's end, the rows the client lacks: 2,000
+   to seed, 1,000 a frame after), the handoff, and `BenchmarkAltRecordFeed`. The client follows
+   the record instead of inferring one. A client attached after the four shell commands of
+   `claude-scroll` guesses 78 of 81 ticks with it, 48 without. Not done, since they serve
+   `alt_scrollback` alone: `Frame.AltScrollback` and the primary-screen painting, seeding
+   `Attached.Snapshot` and `SinceRow`, the record in `agt history`, and the stats.
 3a. **Frame window and wheel prediction** (decisions 12 and 13, revised 2026-10-25): the
    `attach-frame-window` capability, `Frame.Acked` and the worker's RTT-sized window first, then
    the client's prediction of the plain wheel, measured over the `claude-scroll` fixture.

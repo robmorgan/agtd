@@ -593,6 +593,22 @@ The idle round trip was 0.09 ms before attachment ids were numbered in `state.db
 Incarnations And Attachments" in ARCHITECTURE.md), and 0.50 ms with a database write per attach.
 Workers now reserve ids in blocks, so an attach no longer writes.
 
+### The transcript record
+
+`BenchmarkAltRecordFeed`: the `claude-scroll` stream (Claude Code at 120x40, 117 KiB, 336
+repaints, several minutes of use) fed through the owner in 4 KiB reads, with the worker's
+transcript record (`internal/worker/altrecord.go`) and without it (Apple M1 Max, `-benchtime
+20x`):
+
+| | Per stream | Allocations |
+| --- | --- | --- |
+| Not recorded | 0.56 ms | 77 |
+| Recorded | 11.9 ms | 48,000 |
+
+About 34 µs per repaint: one formatter run over the screen, the row keys, the shift search, and
+the few input-box searches that the changing rows under the box called for. At 60 repaints a
+second that is 2 ms of CPU a second, so the record has no rate floor.
+
 ### Input field detection
 
 `BenchmarkDetectField`: finding the input field (`internal/worker/field.go`) on a 200x50
