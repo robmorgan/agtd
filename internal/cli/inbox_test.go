@@ -1239,7 +1239,7 @@ func TestCreateResult(t *testing.T) {
 // `--host auto` is not a host the inbox can show.
 func TestInboxRefusesHostAuto(t *testing.T) {
 	a := &app{paths: testClient(t).paths, host: autoHostName}
-	if _, _, err := a.runInbox(); err == nil || !strings.Contains(err.Error(), "only chooses a host for `agt new`") {
+	if err := a.runInbox(); err == nil || !strings.Contains(err.Error(), "only chooses a host for `agt new`") {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -1391,5 +1391,29 @@ func TestInboxHidingRestartsAConfirmation(t *testing.T) {
 	i.handleKey(key(keyEnter))
 	if len(i.effects) != 1 {
 		t.Fatalf("not confirmed after its wait: %+v", i.effects)
+	}
+}
+
+// Value: protects=a return from an attachment says how the session ended or why it could not attach, asks its host again, and leaves nothing waiting to leave; fails_when=attached drops the end, the error or the reprobe; why_new=the inbox used to exit after an attachment; seam=none; no_claim=the attachment itself (TestInboxEndToEnd)
+// Back from an attachment, the inbox says how the session ended, or why
+// it could not attach, and asks the session's host again.
+func TestInboxAfterAnAttachment(t *testing.T) {
+	dev := &transport.Host{Name: "dev"}
+	i := testInbox(t, hostWith(localHostName, withUID(demo("a"), "1")))
+	i.leaving = &inboxLeave{&inboxOutcome{id: "a", uid: "1"}}
+	exit := int32(0)
+	i.attached(&inboxOutcome{id: "a", uid: "1"}, &protocol.SessionEnded{Status: session.StatusExited, ExitCode: &exit}, nil)
+	if i.leaving != nil || i.notice == nil || !strings.HasPrefix(i.notice.message, "a ended: ") || len(i.effects) != 1 || i.effects[0].reprobe != localHostName {
+		t.Fatalf("after the session ended: %+v %+v %+v", i.leaving, i.notice, i.effects)
+	}
+	i.effects = nil
+	i.attached(&inboxOutcome{host: dev, id: "demo"}, nil, errors.New("connection refused"))
+	if len(i.failures) != 1 || i.failures[0] != "could not attach to dev/demo: connection refused" || len(i.effects) != 1 || i.effects[0].reprobe != "dev" {
+		t.Fatalf("after a failed attach: %q %+v", i.failures, i.effects)
+	}
+	i.effects, i.notice = nil, nil
+	i.attached(&inboxOutcome{id: "a", uid: "1"}, nil, nil) // a detach
+	if i.notice != nil || len(i.failures) != 1 || len(i.effects) != 1 {
+		t.Fatalf("after a detach: %+v %q %+v", i.notice, i.failures, i.effects)
 	}
 }

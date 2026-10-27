@@ -45,6 +45,10 @@ type client struct {
 	// takeSize makes the next attach take the session's size from the
 	// attachment that owns it (`agt attach --take-size`).
 	takeSize bool
+	// fromInbox makes attach keep the screen it was launched from: it
+	// draws the session on the alternate screen and leaves it on return,
+	// with nothing printed, so the inbox's block is where it was.
+	fromInbox bool
 }
 
 const (

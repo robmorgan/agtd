@@ -1276,25 +1276,23 @@ func (s *inlineScreen) clearSequence(cols int) string {
 	return seq + "\x1b[J"
 }
 
-// runInbox runs the inbox until the user picks a session (returned) or
-// quits (nil). With a session, unseen is what the user has not seen (see
-// inbox.unseen), for the caller to print once the attachment ends; when
-// quitting it has been printed already.
-func (a *app) runInbox() (outcome *inboxOutcome, unseen []string, err error) {
+// runInbox runs the inbox until the user quits, attaching to the sessions
+// they choose on the way: a detach, or the session ending, returns to it.
+func (a *app) runInbox() error {
 	locked := a.host
 	if locked == autoHostName {
-		return nil, nil, errors.New("`--host auto` only chooses a host for `agt new`")
+		return errors.New("`--host auto` only chooses a host for `agt new`")
 	}
 	raw, err := enterRaw(false)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to enable raw terminal mode: %w", err)
+		return fmt.Errorf("failed to enable raw terminal mode: %w", err)
 	}
 	defer raw.restore()
 	// This machine's daemon is started as for any command, unless the
 	// inbox is locked to a remote host.
 	set, hosts, err := a.startHostSet(hostSetOptions{only: locked, startLocal: locked == "" || locked == localHostName})
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
 	defer set.stop()
 	writeOut([]byte(inboxEnterSequence))
@@ -1371,7 +1369,7 @@ func (a *app) runInbox() (outcome *inboxOutcome, unseen []string, err error) {
 			screen.clear(int(cols))
 			i.printNarrow(int(cols))
 			printUnseen(i.unseen())
-			return nil, nil, nil
+			return nil
 		}
 		// What the decoder holds (a lone ESC, a paste, or the rest of a
 		// given-up one) is given up when nothing completes it in time.
@@ -1411,7 +1409,7 @@ func (a *app) runInbox() (outcome *inboxOutcome, unseen []string, err error) {
 		case chunk, ok := <-input:
 			if !ok {
 				screen.clear(int(cols))
-				return nil, nil, errors.New("stdin closed")
+				return errors.New("stdin closed")
 			}
 			if c, r, _, _ := terminalGeometry(); c != cols || r != rows {
 				// Resized since the last drawing: what is on screen is
@@ -1436,17 +1434,22 @@ func (a *app) runInbox() (outcome *inboxOutcome, unseen []string, err error) {
 			start(e)
 		}
 		i.effects = nil
-		if done {
+		if done && outcome == nil {
 			cols, _, _, _ := terminalGeometry()
 			screen.clear(int(cols))
-			// Nothing the user did not see is lost: printed now when
-			// quitting, after the attachment when attaching (whose
-			// first repaint would clear it).
-			if outcome == nil {
-				printUnseen(i.unseen())
-				return nil, nil, nil
-			}
-			return outcome, i.unseen(), nil
+			// Nothing the user did not see is lost.
+			printUnseen(i.unseen())
+			return nil
+		}
+		if done {
+			// Attach, keeping the inbox where it is: the attachment
+			// draws on the alternate screen and leaves it on return,
+			// so the block is still there to redraw over. Hosts go on
+			// being probed and actions go on running meanwhile; what
+			// they report waits for the inbox.
+			ended, err := a.attachFromInbox(outcome)
+			writeOut([]byte(inboxEnterSequence))
+			i.attached(outcome, ended, err)
 		}
 	}
 }
@@ -1622,6 +1625,34 @@ func (i *inbox) messageLines() []line {
 		lines = append(lines, text(style, i.notice.message))
 	}
 	return lines
+}
+
+// attachFromInbox attaches to the chosen session on its host, keeping the
+// inbox's screen (client.fromInbox), and says how the session ended if it
+// did.
+func (a *app) attachFromInbox(o *inboxOutcome) (*protocol.SessionEnded, error) {
+	c := &client{paths: a.paths, host: o.host, fromInbox: true}
+	a.client = c // so a refused key's error explains itself
+	defer c.close()
+	return c.attachLoop(o.id, o.uid)
+}
+
+// attached takes what an attachment from the inbox came back with: the
+// inbox is as it was, and says how the session ended or why it could not
+// attach, and asks the session's host again.
+func (i *inbox) attached(o *inboxOutcome, ended *protocol.SessionEnded, err error) {
+	i.leaving = nil
+	name, address := localHostName, o.id
+	if o.host != nil {
+		name, address = o.host.Name, o.host.Name+"/"+o.id
+	}
+	switch {
+	case err != nil:
+		i.fail("could not attach to %s: %v", address, err)
+	case ended != nil:
+		i.setNotice(&inboxNotice{message: address + " ended: " + formatSessionEnd(ended)})
+	}
+	i.effects = append(i.effects, inboxEffect{reprobe: name})
 }
 
 // unseen is what the user leaves the inbox without seeing: the failures
