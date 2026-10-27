@@ -515,6 +515,7 @@ features both listed. Today there is one protocol version (1), and these capabil
 | `attach-field` | attach stream: `AttachField` asks where the program's input field is, answered with `Field` (see "The input field and local echo") |
 | `terminal-colors` | `CreateSession.Colors` and, on an attach stream, `AttachSession.Colors` carry the client terminal's default colours; the worker answers the program's OSC 10 and 11 queries with the most recent ones itself (see "Terminal queries") |
 | `attach-frames` | attach stream: the screen arrives as `AttachFrame`s instead of `PtyOutput`, each acknowledged with `AttachFrameAck`; `Attached.Snapshot` holds the scrollback rows only and `AttachSnapshot` is answered with a full frame (see "Screen frames") |
+| `attach-frame-window` | attach stream, with `attach-frames`: the worker sizes the frame window from the round trip (2 to `MaxFrameWindow`, 16), and every `AttachFrame` carries a trailing `Acked` u32, the last ack the worker had read when it built it (see "Screen frames") |
 | `attach-compose` | `SendInput.Compose` (written only when set, since the daemon forwards the request to the worker in the base encoding) and, on an attach stream, `AttachCompose`: a whole prompt, or Enter alone, encoded by the worker as the program's terminal modes ask for input (see "Composed input") |
 | `kill-expect-uid` | `KillSession.ExpectUID` appended after the token: the daemon refuses a stop or remove whose UID is not the session's current incarnation, so a remove confirmed in the inbox never deletes a newer session that reused the name |
 | `ssh-agent` | `ssh-agent` streams: `ForwardSSHAgent` and the messages on them. A worker lists it in its answer to `Hello` only when its agent was started with the worker's agent socket as `SSH_AUTH_SOCK` (see "SSH Agent Forwarding") |
@@ -1157,7 +1158,11 @@ at 200 ms, so a client that asks for `attach-frame-window` gets a window the wor
 the minimum round trip it measures between a frame and its ack over the last 10 s: one frame per
 16 ms of it, plus one, between 2 and 16 (`frameRTT` in `internal/worker/frames.go`). The minimum
 and not the mean, since queueing delay raises the mean and a window grown from it would queue
-more. `agt
+more. A sized window no longer says from a frame's number which ack it was built after, so each of
+its frames carries that ack (`Frame.Acked`; `Frame.AckedBy` derives it from the fixed window
+otherwise), and the local echo judges frames by it. A frame waits, up to 150 ms
+(`frameSyncHold`), for a program inside a synchronized-output block (mode 2026) to end it, so it
+never shows half a repaint; the session's final frame does not wait. `agt
 attach` asks for frames from a remote daemon and takes the raw output from the local one (`[attach]
 mode`, "auto"; "frames" or "raw" force it), and `agt bench echo --mode` measures either.
 
