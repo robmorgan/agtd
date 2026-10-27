@@ -1196,7 +1196,7 @@ Lane A: protocol/daemon ExpectUID. Lane B: theme.go move then hostSet and orderi
   - Surfaced by: C3
   - Files: README.md, ARCHITECTURE.md, ROADMAP.md
   - Verify: `grep -n picker README.md ARCHITECTURE.md ROADMAP.md`
-- [ ] **T8 (P2, phase 2, human: ~1 day / CC: ~30 min)** — cli — Attach owns the alternate screen from the inbox; detach returns to the inbox
+- [x] **T8 (P2, phase 2, human: ~1 day / CC: ~30 min)** — cli — Attach owns the alternate screen from the inbox; detach returns to the inbox
   - Surfaced by: S1 → D2, O2 → D11
   - Files: internal/cli/attach.go, inbox.go, cmd/agt/agt_test.go
   - Verify: PTY tests with alternate-screen and primary-screen agents

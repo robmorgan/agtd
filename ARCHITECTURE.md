@@ -1316,8 +1316,17 @@ terminal's height less one line (the list scrolls to keep the selection in view)
 cell narrower than the terminal so none wraps, and widths are measured in terminal cells
 (`uniseg`), so a wide character in a status message cannot wrap a row. Started below 40 columns, the
 inbox prints its own rows as `agt ls --all` does and exits; narrowed below 40 once open, it says so
-on one line until the terminal widens, and actions in flight still report. Phase 2 (actions menu, detach returning to
-the inbox) and later phases are in `docs/designs/agt-inbox.md`.
+on one line until the terminal widens, and actions in flight still report.
+
+An attachment from the inbox runs inside it (`attachFromInbox`): the client is marked `fromInbox`,
+so attach enters the alternate screen itself, prints nothing ("attached to", the session's end),
+and on return pops its keyboard flags and leaves the alternate screen without the detach clear.
+The terminal restores the main screen with the inbox's block as it was, and the inbox redraws
+over it, saying how the session ended or why it could not attach. Hosts go on being probed and
+actions go on running meanwhile; what they report waits for the inbox. An agent that draws on the
+main screen runs on the alternate one when attached from the inbox, so its output there is not in
+the terminal's scrollback; plain `agt attach` is unchanged. The full actions menu (phase 2) and
+later phases are in `docs/designs/agt-inbox.md`.
 
 ## Runtime Root
 

@@ -919,8 +919,8 @@ agt attach devbox-1/auth-tests
       machine and every paired host, needs-you first, filter with `host/` narrowing, Enter attaches
       on the row's host, Tab to attach or remove (by UID, `kill-expect-uid`), hosts probed in the
       background with backoff
-    * [ ] Phase 2: the full actions menu (stop, take over size, diff, history) and detach returning
-          to the inbox (attach owns the alternate screen when launched from it)
+    * [x] Detach returning to the inbox (attach owns the alternate screen when launched from it)
+    * [ ] Phase 2: the full actions menu (stop, take over size, diff, history)
     * [ ] Phase 3: new session anywhere (host, workspace, agent, name), workspaces added and removed inline
     * [ ] Phase 4: peek and inline reply, gated on a timed trial
     * [ ] Phase 5: host health inline
