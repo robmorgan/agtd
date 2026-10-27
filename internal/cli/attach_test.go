@@ -7,7 +7,9 @@ import (
 	"time"
 
 	"agtd.sh/internal/protocol"
+	"agtd.sh/internal/screen"
 	"agtd.sh/internal/session"
+	"agtd.sh/internal/transport"
 )
 
 func TestAttachSequences(t *testing.T) {
@@ -275,6 +277,52 @@ func TestOverlayDetach(t *testing.T) {
 	}
 	if got := testClient(t).sessionAddress("alpha"); got != "local/alpha" {
 		t.Fatalf("address %q", got)
+	}
+	// Value: protects="detached from HOST/NAME" names the remote host to
+	// attach again, with its controls escaped; fails_when=sessionAddress
+	// says local/ for a remote session or writes a host name's controls to
+	// the terminal; why_new=only the local address was checked; seam=none;
+	// no_claim=the end-to-end detach line (TestAttachEndToEnd).
+	remote := testClient(t)
+	remote.host = &transport.Host{Name: "devbox\x1b]0;x\a"}
+	if got := remote.sessionAddress("alpha"); !strings.HasPrefix(got, "devbox") || !strings.HasSuffix(got, "/alpha") || strings.ContainsAny(got, "\x1b\a") {
+		t.Fatalf("remote address %q", got)
+	}
+}
+
+// The overlay opens the alternate screen only over a session painted on
+// the primary one, whose view would scroll the overlay away, and leaves
+// it as it closes; over an agent on the alternate screen it stays there.
+func TestOverlayOwnsTheAlternateScreen(t *testing.T) {
+	// Value: protects=closing the overlay over Claude Code (alternate
+	// screen) does not drop the terminal to the primary screen, and over a
+	// shell it returns from the alternate screen it opened;
+	// fails_when=ownsAlt ignores the painter's screen or leave() writes
+	// ?1049l without having opened it; why_new=no test covered the
+	// overlay's alternate screen; seam=none; no_claim=the backdrop drawn
+	// under it (draw writes to the terminal; manual/e2e).
+	frame := func(prefix string) *screen.Painter {
+		p := screen.New()
+		p.Apply(&protocol.Frame{Seq: 1, Full: true, Cols: 10, Lines: 2, Prefix: []byte(prefix), Rows: []protocol.FrameRow{{Index: 0, VT: []byte("$ ")}}}, nil)
+		return p
+	}
+	for _, c := range []struct {
+		name    string
+		painter *screen.Painter
+		leave   string
+	}{
+		{"raw output", nil, ""},
+		{"no frame yet", screen.New(), ""},
+		{"primary screen", frame("\x1b[H"), "\x1b[?1049l"},
+		{"alternate screen", frame("\x1b[?1049h\x1b[H"), ""},
+	} {
+		o := newOverlay(testClient(t), "alpha", nil, c.painter)
+		if got := string(o.leave()); got != c.leave {
+			t.Errorf("%s: leave %q, want %q", c.name, got, c.leave)
+		}
+		if got := o.framed(); got != (c.painter != nil) {
+			t.Errorf("%s: framed %v", c.name, got)
+		}
 	}
 }
 

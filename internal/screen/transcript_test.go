@@ -136,3 +136,20 @@ func TestRowKey(t *testing.T) {
 		t.Error("a colour difference is lost")
 	}
 }
+
+// A row's cursor-forward count comes from the daemon: one too large to
+// parse, or huge, is bounded, never a panic or a huge key.
+func TestRowKeyBoundsCursorForward(t *testing.T) {
+	// Value: protects=a malformed frame row cannot crash agt or make it
+	// allocate gigabytes; fails_when=RowKey repeats an unbounded count;
+	// why_new=only the formatter's small counts were seen; seam=none;
+	// no_claim=what a daemon sends.
+	for _, row := range []string{"a\x1b[99999999999999999999Cb", "a\x1b[1000000000Cb"} {
+		if k := RowKey([]byte(row)); len(k) > maxCols+2 {
+			t.Fatalf("RowKey(%q) is %d bytes", row, len(k))
+		}
+	}
+	if k := RowKey([]byte("a\x1b[3Cb")); k != "a   b" {
+		t.Fatalf("RowKey kept %q", k)
+	}
+}

@@ -2,7 +2,7 @@ package screen
 
 import (
 	"bytes"
-	"strconv"
+	"slices"
 	"strings"
 )
 
@@ -81,7 +81,7 @@ func (t *Transcript) Update(cur [][]byte, end int) [][]byte {
 	if prev == nil {
 		return nil
 	}
-	if len(old) == len(keys) && keysSame(old, keys) {
+	if slices.Equal(old, keys) {
 		return nil
 	}
 	n := min(len(old), len(keys))
@@ -141,10 +141,13 @@ func (t *Transcript) record(rows [][]byte, keys []string) [][]byte {
 	t.rows = append(t.rows, out...)
 	t.keys = append(t.keys, keys[skip:]...)
 	t.mark = t.pos + int64(len(rows))
-	if t.max > 0 && len(t.rows) > t.max {
+	// The oldest go a quarter of max at a time, so a full record is not
+	// copied on every frame that scrolls.
+	if t.max > 0 && len(t.rows) > t.max+t.max/4 {
 		drop := len(t.rows) - t.max
-		t.rows = append([][]byte(nil), t.rows[drop:]...)
-		t.keys = append([]string(nil), t.keys[drop:]...)
+		t.rows = t.rows[:copy(t.rows, t.rows[drop:])]
+		t.keys = t.keys[:copy(t.keys, t.keys[drop:])]
+		clear(t.rows[len(t.rows):cap(t.rows)])
 		t.dropped += int64(drop)
 	}
 	return out
@@ -250,15 +253,6 @@ func sameRun(old, cur []string) int {
 	return best
 }
 
-func keysSame(a, b []string) bool {
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 // RowKey is a row's VT with empty cells and spaces made the same: cursor
 // moves forward (CSI n C) become spaces, and trailing spaces and pen resets
 // go. "" is a blank row.
@@ -268,18 +262,11 @@ func RowKey(row []byte) string {
 	}
 	var b strings.Builder
 	for i := 0; i < len(row); i++ {
-		if row[i] == 0x1b && i+1 < len(row) && row[i+1] == '[' {
-			j := i + 2
-			for j < len(row) && row[j] >= '0' && row[j] <= '9' {
-				j++
-			}
-			if j < len(row) && row[j] == 'C' {
-				n := 1
-				if j > i+2 {
-					n, _ = strconv.Atoi(string(row[i+2 : j]))
-				}
+		if row[i] == 0x1b {
+			seq := row[i : i+escapeLen(row[i:])]
+			if n, ok := cufCount(seq); ok {
 				b.WriteString(strings.Repeat(" ", n))
-				i = j
+				i += len(seq) - 1
 				continue
 			}
 		}
