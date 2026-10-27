@@ -249,6 +249,11 @@ func newInbox(p *paths.AppPaths, hosts []*hostProbe, locked string) *inbox {
 		pending: map[rowKey]string{}, gone: map[rowKey]bool{}, now: time.Now,
 	}
 	i.loadAgents(p)
+	if w := sshAgentWarning(p); w != "" {
+		// Shown until a key acknowledges it: printed, it would land under
+		// the inbox's raw mode, and be drawn over.
+		i.fail("%s", w)
+	}
 	return i
 }
 

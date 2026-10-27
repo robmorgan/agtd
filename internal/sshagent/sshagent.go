@@ -48,6 +48,18 @@ const (
 	MsgExtensionFailure           byte = 28
 )
 
+// SSH-1 requests, long obsolete. OpenSSH's `ssh-add -D` still sends
+// REMOVE_ALL_RSA_IDENTITIES after REMOVE_ALL_IDENTITIES, in case the agent
+// is old.
+const (
+	msgSSH1RequestRSAIdentities   byte = 1
+	msgSSH1RSAChallenge           byte = 3
+	msgSSH1AddRSAIdentity         byte = 7
+	msgSSH1RemoveRSAIdentity      byte = 8
+	msgSSH1RemoveAllRSAIdentities byte = 9
+	msgSSH1AddRSAIDConstrained    byte = 24
+)
+
 // Extensions a forwarded agent passes on: session-bind@openssh.com, with
 // which ssh (OpenSSH 8.9 and later) binds an agent connection to the server
 // it authenticates to, and query, which asks which extensions an agent
@@ -164,6 +176,9 @@ func Describe(msg []byte) string {
 			return "use the extension " + Printable([]byte(name))
 		}
 		return "use an extension"
+	case msgSSH1RequestRSAIdentities, msgSSH1RSAChallenge, msgSSH1AddRSAIdentity,
+		msgSSH1RemoveRSAIdentity, msgSSH1RemoveAllRSAIdentities, msgSSH1AddRSAIDConstrained:
+		return "use the obsolete SSH-1 agent protocol"
 	}
 	return fmt.Sprintf("send message type %d", Type(msg))
 }
@@ -274,6 +289,22 @@ func ParseSessionBind(msg []byte) (*SessionBind, error) {
 	return b, nil
 }
 
+// Request is b as a session-bind@openssh.com extension request.
+func (b *SessionBind) Request() []byte {
+	var w bytes.Buffer
+	w.WriteByte(MsgExtension)
+	putString(&w, []byte(ExtSessionBind))
+	putString(&w, b.HostKey)
+	putString(&w, b.SessionID)
+	putString(&w, b.Signature)
+	if b.Forwarding {
+		w.WriteByte(1)
+	} else {
+		w.WriteByte(0)
+	}
+	return w.Bytes()
+}
+
 // Purpose is what signed data is for, as far as it can be told from the data.
 type Purpose struct {
 	// Login is set for an SSH user authentication (RFC 4252, section 7):
@@ -354,23 +385,26 @@ func (k Keys) FilterIdentities(answer []byte) []byte {
 
 // KnownHostName names a host key from known_hosts files, the first host
 // name given for it in a plain (not hashed) entry. It returns "" when no
-// file names it.
-func KnownHostName(hostKey []byte, files ...string) string {
+// file names it, with hashed set when an entry lists the key under hashed
+// names only (HashKnownHosts, the default on Debian and Ubuntu), which
+// cannot be read back.
+func KnownHostName(hostKey []byte, files ...string) (name string, hashed bool) {
 	for _, path := range files {
 		f, err := os.Open(path)
 		if err != nil {
 			continue
 		}
-		name := knownHostName(f, hostKey)
+		name, inFile := knownHostName(f, hostKey)
 		f.Close()
 		if name != "" {
-			return name
+			return name, false
 		}
+		hashed = hashed || inFile
 	}
-	return ""
+	return "", hashed
 }
 
-func knownHostName(r io.Reader, hostKey []byte) string {
+func knownHostName(r io.Reader, hostKey []byte) (name string, hashed bool) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	for scanner.Scan() {
@@ -382,11 +416,12 @@ func knownHostName(r io.Reader, hostKey []byte) string {
 		}
 		for _, h := range hosts {
 			if !strings.HasPrefix(h, "|") {
-				return Printable([]byte(h))
+				return Printable([]byte(h)), false
 			}
+			hashed = true
 		}
 	}
-	return ""
+	return "", hashed
 }
 
 // maxPrintable bounds text taken from messages into what people read.

@@ -9,21 +9,37 @@ package cli
 // extensions pass, and only for the keys [ssh_agent] keys lists, when it lists
 // any. The private key never leaves this machine.
 //
-// Goroutines: an agentForwarder owns one goroutine that opens the stream and
-// then reads the worker's frames until the stream ends, and one per program
-// connection the worker numbers (at most maxLocalAgentConns), each holding
-// its own connection to the local agent, since an agent keeps state per
-// connection. stop closes the stream, which ends the reader, and waits for
-// all of them. Writes to the stream are serialised by writeMu.
+// When the session runs on another machine, every connection to this
+// machine's agent is first bound to the agtd hop as a forwarding session
+// (bindHop), as ssh -A binds the connections it forwards, so OpenSSH's
+// destination constraints (ssh-add -h) apply to what the devbox asks. Until
+// the agent has taken that binding, the program's own bindings are refused.
+//
+// Goroutines: an agentForwarder owns one goroutine that keeps a forwarder
+// open while its attachment lives (runForwarders): it asks the local agent
+// whether it has a key to lend, opens the stream, reads the worker's frames
+// until the stream ends, and opens it again after a wait. Each open stream
+// has one goroutine per program connection the worker numbers (at most
+// maxLocalAgentConns, counted until they end), each holding its own
+// connection to the local agent, since an agent keeps state per connection.
+// stop cancels the forwarder, which ends a question to the local agent in
+// progress, closes the stream and ends the reader, and waits for all of
+// them. Writes to the stream are serialised by writeMu.
 
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"fmt"
 	"net"
 	"sync"
 	"time"
 
+	"golang.org/x/crypto/ssh"
+
 	"agtd.sh/internal/config"
+	"agtd.sh/internal/paths"
 	"agtd.sh/internal/protocol"
 	"agtd.sh/internal/sshagent"
 	"agtd.sh/internal/transport"
@@ -31,17 +47,36 @@ import (
 
 const (
 	// maxLocalAgentConns bounds the local agent connections a forwarder
-	// holds; a program connection over it is refused (SSHAgentClose).
-	maxLocalAgentConns = 16
+	// holds, each counted until its goroutine has ended; a program
+	// connection over it is refused (SSHAgentClose). It matches the
+	// worker's bound on a session's agent socket.
+	maxLocalAgentConns = 64
 	// localAgentDialTimeout bounds connecting to the local agent.
 	localAgentDialTimeout = 2 * time.Second
-	// localAgentReplyTimeout bounds the wait for the local agent, which may
-	// be asking the user to confirm a signature; the worker gives up a
-	// little earlier.
+	// localAgentReplyTimeout bounds the wait for the local agent's answer:
+	// to a program's request, to the agtd hop's binding, or to the question
+	// of which keys it holds. It may be asking the user to confirm a
+	// signature, and OpenSSH's agent answers nothing else meanwhile. It
+	// matches the worker's agentReplyTimeout, whose clock starts first
+	// (before the request crosses the network), so the worker gives up
+	// first.
 	localAgentReplyTimeout = 90 * time.Second
 	// forwarderWriteTimeout bounds a write to the worker; a stream that
 	// takes longer is closed.
 	forwarderWriteTimeout = 10 * time.Second
+	// maxForwarderRefusals is how many refusals in a row end forwarding
+	// for an attachment.
+	maxForwarderRefusals = 3
+)
+
+var (
+	// forwarderRetryMin and forwarderRetryMax bound the wait before a
+	// forwarder is opened again while its attachment lives. The longest
+	// stays under the 10 s the worker keeps programs waiting for the one
+	// agt opens in place of one that ended, so they get it rather than the
+	// devbox's agent. Variables for tests.
+	forwarderRetryMin = time.Second
+	forwarderRetryMax = 8 * time.Second
 )
 
 // agentForwarder lends this machine's agent to one attachment.
@@ -51,28 +86,52 @@ type agentForwarder struct {
 }
 
 // forwardAgent starts lending this machine's agent to an attachment, when
-// [ssh_agent] forward is set, there is an agent to lend, and the daemon
-// forwards. It returns at once, nil when there is nothing to do: the stream
-// is opened in the background, so attaching never waits for it, and a
-// session that cannot forward simply goes without.
+// [ssh_agent] forward is set and there is an agent to lend. It returns at
+// once, nil when there is nothing to do: the stream is opened in the
+// background, so attaching never waits for it, and a session that cannot
+// forward simply goes without.
 func (c *client) forwardAgent(id string, attached *protocol.Attached) *agentForwarder {
 	cfg, err := config.Load(c.paths.Config)
-	if err != nil || !cfg.SSHAgent.Forward {
+	if err != nil || !cfg.SSHAgent.Forward || cfg.SSHAgent.Problem != "" {
+		// A mistake in [ssh_agent] could offer every key the agent holds:
+		// nothing is forwarded, and attach and the inbox say why
+		// (sshAgentWarning).
 		return nil
 	}
 	agent := cfg.SSHAgent.AgentSocket()
 	if agent == "" {
 		return nil
 	}
+	var hop ssh.Signer
+	if c.host != nil {
+		// The session runs on another machine: its requests reach this
+		// machine's agent through the agtd hop.
+		if hop, err = newHopSigner(); err != nil {
+			return nil
+		}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	f := &agentForwarder{cancel: cancel, done: make(chan struct{})}
-	r := &agentRelay{agent: agent, keys: sshagent.NewKeys(cfg.SSHAgent.Keys), conns: map[uint32]*localAgentConn{}}
 	req := &protocol.ForwardSSHAgent{SessionID: id, ExpectUID: attached.SessionUID, Attachment: attached.AttachID}
+	keys := sshagent.NewKeys(cfg.SSHAgent.Keys)
 	go func() {
 		defer close(f.done)
-		c.runForwarder(ctx, req, r)
+		c.runForwarders(ctx, req, agent, keys, hop)
 	}()
 	return f
+}
+
+// sshAgentWarning is why agt forwards no SSH agent when [ssh_agent] has a
+// mistake (config.SSHAgentConfig.Problem), or "" when it has none or the
+// file turns forwarding off. attach says it before it takes the screen and
+// again once it gives it back, since its first paint clears the screen; the
+// inbox shows it until a key acknowledges it.
+func sshAgentWarning(p *paths.AppPaths) string {
+	cfg, err := config.Load(p.Config)
+	if err != nil || cfg.SSHAgent.Problem == "" || cfg.SSHAgent.ForwardOff() {
+		return ""
+	}
+	return fmt.Sprintf("not forwarding your SSH agent: %s in %s", cfg.SSHAgent.Problem, p.Config)
 }
 
 // stop ends the forwarder and waits for its goroutines. Safe on nil.
@@ -84,18 +143,66 @@ func (f *agentForwarder) stop() {
 	<-f.done
 }
 
+// runForwarders keeps a forwarder open for the attachment until ctx is
+// cancelled. While this machine's agent has no key to lend (it is not
+// running, or holds none that [ssh_agent] keys allows), none is opened: it
+// would take every agent request in the session and answer none, hiding the
+// agent the devbox has. One that ends while the attachment lives (a write
+// that timed out, a stream that failed to open) is opened again, after a
+// wait that grows to forwarderRetryMax; it starts again from
+// forwarderRetryMin only after a stream has served that long, so one that
+// keeps ending at once is not reopened every second. Refusals from the
+// daemon or the worker (the session cannot forward, the attachment is gone)
+// are final once maxForwarderRefusals come in a row: one alone may only
+// mean the worker has yet to see the last stream end, or a daemon that
+// failed for a moment.
+func (c *client) runForwarders(ctx context.Context, req *protocol.ForwardSSHAgent, agent string, keys sshagent.Keys, hop ssh.Signer) {
+	wait := forwarderRetryMin
+	refusals := 0
+	for {
+		r := newAgentRelay(ctx, agent, keys, hop)
+		if r.lends() {
+			start := time.Now()
+			served, refused := c.runForwarder(ctx, req, r)
+			switch {
+			case refused:
+				if refusals++; refusals >= maxForwarderRefusals {
+					return
+				}
+			case served:
+				refusals = 0
+				if time.Since(start) >= forwarderRetryMax {
+					wait = forwarderRetryMin
+				}
+			}
+		}
+		r.cancel()
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+		wait = min(2*wait, forwarderRetryMax)
+	}
+}
+
 // runForwarder opens the ssh-agent stream and relays on it until it ends or
-// ctx is cancelled.
-func (c *client) runForwarder(ctx context.Context, req *protocol.ForwardSSHAgent, r *agentRelay) {
+// ctx is cancelled. It reports whether the stream opened, and whether the
+// daemon or the worker refused it.
+func (c *client) runForwarder(ctx context.Context, req *protocol.ForwardSSHAgent, r *agentRelay) (opened, refused bool) {
 	open, cancel := context.WithTimeout(ctx, c.requestTimeout())
 	defer cancel()
 	cs, err := c.controlStream(open)
-	if err != nil || !cs.features.Has(protocol.CapSSHAgent) {
-		return
+	if err != nil {
+		return false, false
+	}
+	if !cs.features.Has(protocol.CapSSHAgent) {
+		// An agtd from before forwarding.
+		return false, true
 	}
 	s, err := c.open(open)
 	if err != nil {
-		return
+		return false, false
 	}
 	defer s.Close()
 	stopWatch := context.AfterFunc(ctx, func() { s.Close() })
@@ -105,29 +212,46 @@ func (c *client) runForwarder(ctx context.Context, req *protocol.ForwardSSHAgent
 	}
 	reader := bufio.NewReader(s)
 	if err := protocol.WriteRequest(s, &protocol.Request{ForwardSSHAgent: req}); err != nil {
-		return
+		return false, false
 	}
-	resp, err := protocol.ReadResponse(reader)
-	if err != nil || resp == nil || resp.SSHAgentForwarding == nil {
+	resp, err := protocol.ReadSSHAgentResponse(reader)
+	switch {
+	case err != nil || resp == nil:
+		return false, false
+	case resp.SSHAgentForwarding == nil:
 		// The session cannot forward (started without an agent socket, or
 		// by an older agtd), or the attachment is already gone.
-		return
+		return false, true
 	}
 	s.SetDeadline(time.Time{})
 	r.s = s
 	r.serve(reader)
 	r.closeAll()
+	return true, false
 }
 
 // agentRelay answers the worker's agent requests on one ssh-agent stream.
 type agentRelay struct {
+	// ctx ends with the relay (closeAll) or the forwarder: it ends a
+	// connection to the local agent being made, and the probe, which a
+	// busy agent can hold up for as long as a request.
+	ctx    context.Context
+	cancel context.CancelFunc
+
 	s     transport.Stream
 	agent string
 	keys  sshagent.Keys
+	// hop is the agtd hop's host key, which every local agent connection is
+	// bound to first, for a session on another machine; nil for a local
+	// one, whose programs use the agent from this machine.
+	hop ssh.Signer
 
 	writeMu sync.Mutex
 
-	mu    sync.Mutex
+	mu sync.Mutex
+	// conns holds each program connection's local side until its goroutine
+	// has ended, closed or not, so they all count against
+	// maxLocalAgentConns.
 	conns map[uint32]*localAgentConn
 	wg    sync.WaitGroup
 }
@@ -146,12 +270,21 @@ type localAgentConn struct {
 	// guarded by agentRelay.mu, so ending the relay can close it.
 	agent  net.Conn
 	closed bool
+	// bound is set once the agent has taken the agtd hop's binding on
+	// agent; only the connection's goroutine uses it.
+	bound bool
+}
+
+// newAgentRelay is a relay to the agent at the socket agent, ending with ctx.
+func newAgentRelay(ctx context.Context, agent string, keys sshagent.Keys, hop ssh.Signer) *agentRelay {
+	ctx, cancel := context.WithCancel(ctx)
+	return &agentRelay{ctx: ctx, cancel: cancel, agent: agent, keys: keys, hop: hop, conns: map[uint32]*localAgentConn{}}
 }
 
 // serve reads the worker's frames until the stream ends.
 func (r *agentRelay) serve(reader *bufio.Reader) {
 	for {
-		resp, err := protocol.ReadResponse(reader)
+		resp, err := protocol.ReadSSHAgentResponse(reader)
 		if err != nil || resp == nil {
 			return
 		}
@@ -182,11 +315,15 @@ func (r *agentRelay) serve(reader *bufio.Reader) {
 }
 
 // conn is the local side of program connection id, started on its first
-// request; nil when maxLocalAgentConns are open.
+// request; nil when id was closed already, or when maxLocalAgentConns are
+// open, counting those still winding down.
 func (r *agentRelay) conn(id uint32) *localAgentConn {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if lc := r.conns[id]; lc != nil {
+		if lc.closed {
+			return nil
+		}
 		return lc
 	}
 	if len(r.conns) >= maxLocalAgentConns {
@@ -199,21 +336,22 @@ func (r *agentRelay) conn(id uint32) *localAgentConn {
 	return lc
 }
 
-// drop ends the local side of program connection id.
+// drop ends the local side of program connection id. It keeps its place
+// until its goroutine has ended.
 func (r *agentRelay) drop(id uint32) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if lc := r.conns[id]; lc != nil {
-		delete(r.conns, id)
 		r.endLocked(lc)
 	}
 }
 
-// closeAll ends every connection and waits for their goroutines.
+// closeAll ends every connection, and any being made, and waits for their
+// goroutines.
 func (r *agentRelay) closeAll() {
+	r.cancel()
 	r.mu.Lock()
-	for id, lc := range r.conns {
-		delete(r.conns, id)
+	for _, lc := range r.conns {
 		r.endLocked(lc)
 	}
 	r.mu.Unlock()
@@ -278,18 +416,60 @@ func (r *agentRelay) answer(lc *localAgentConn, msg []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	agent.SetDeadline(time.Now().Add(localAgentReplyTimeout))
-	if err := sshagent.WriteMessage(agent, msg); err != nil {
-		return nil, err
+	if r.hop != nil && !lc.bound {
+		// The connection is bound to the hop before its first request.
+		// Until the agent has taken the binding (it was locked: it answers
+		// nothing until unlocked; it rejected it; or it does not know the
+		// extension), it is tried again before each request and after each
+		// listing (relist), and the program's own bindings are refused: one
+		// would become the first hop, and let the devbox use a key limited
+		// to another host.
+		// OpenSSH's agent keeps such keys to itself once a binding has been
+		// tried, and an agent without the extension has no limits to keep.
+		if lc.bound, err = r.bind(agent); err != nil {
+			return nil, err
+		}
+		if name, ok := sshagent.ExtensionName(msg); !lc.bound && ok && name == sshagent.ExtSessionBind {
+			return sshagent.Failure(), nil
+		}
 	}
-	reply, err := sshagent.ReadMessage(agent)
+	reply, err := askAgent(agent, msg)
 	if err != nil {
 		return nil, err
 	}
 	if sshagent.Type(msg) == sshagent.MsgRequestIdentities {
+		if reply, err = r.relist(agent, &lc.bound, reply); err != nil {
+			return nil, err
+		}
 		reply = r.keys.FilterIdentities(reply)
 	}
 	return reply, nil
+}
+
+// askAgent sends msg to the local agent and reads its reply, waiting as
+// long as a request may.
+func askAgent(agent net.Conn, msg []byte) ([]byte, error) {
+	agent.SetDeadline(time.Now().Add(localAgentReplyTimeout))
+	if err := sshagent.WriteMessage(agent, msg); err != nil {
+		return nil, err
+	}
+	return sshagent.ReadMessage(agent)
+}
+
+// relist checks an identities answer the agent gave on a connection the
+// hop's binding has yet to hold on (bound false). The agent may have been
+// unlocked after the binding was tried, and then listed keys as for local
+// use, those limited to other hosts too. So the binding is tried again, and
+// if it holds now, the agent is asked again, as the hop sees it.
+func (r *agentRelay) relist(agent net.Conn, bound *bool, reply []byte) ([]byte, error) {
+	if r.hop == nil || *bound {
+		return reply, nil
+	}
+	var err error
+	if *bound, err = r.bind(agent); err != nil || !*bound {
+		return reply, err
+	}
+	return askAgent(agent, []byte{sshagent.MsgRequestIdentities})
 }
 
 // dial connects lc to the local agent, once.
@@ -300,7 +480,7 @@ func (r *agentRelay) dial(lc *localAgentConn) (net.Conn, error) {
 	if agent != nil {
 		return agent, nil
 	}
-	agent, err := net.DialTimeout("unix", r.agent, localAgentDialTimeout)
+	agent, err := r.connect()
 	if err != nil {
 		return nil, err
 	}
@@ -310,8 +490,98 @@ func (r *agentRelay) dial(lc *localAgentConn) (net.Conn, error) {
 		agent.Close()
 		return nil, net.ErrClosed
 	}
+	// lc's from now on, before answer binds it to the hop: ending lc (drop,
+	// closeAll) closes it, which ends a binding still waiting on the agent.
 	lc.agent = agent
 	return agent, nil
+}
+
+// connect opens a connection to the local agent.
+func (r *agentRelay) connect() (net.Conn, error) {
+	d := net.Dialer{Timeout: localAgentDialTimeout}
+	return d.DialContext(r.ctx, "unix", r.agent)
+}
+
+// bind binds agent to the agtd hop (bindHop). The binding waits its turn as
+// a request does, since the agent may be asking the user to confirm another
+// request; ending the relay ends the wait.
+func (r *agentRelay) bind(agent net.Conn) (bool, error) {
+	stop := context.AfterFunc(r.ctx, func() { agent.Close() })
+	bound, err := bindHop(agent, r.hop)
+	if !stop() && err == nil {
+		err = net.ErrClosed
+	}
+	return bound, err
+}
+
+// lends reports whether the local agent answers, and holds a key the policy
+// offers, as the session would be offered it: through the hop, so keys
+// limited to other hosts do not count. A busy agent gets a request's time to
+// answer; ending the relay ends the wait.
+func (r *agentRelay) lends() bool {
+	agent, err := r.connect()
+	if err != nil {
+		return false
+	}
+	defer agent.Close()
+	stop := context.AfterFunc(r.ctx, func() { agent.Close() })
+	defer stop()
+	bound := false
+	if r.hop != nil {
+		if bound, err = bindHop(agent, r.hop); err != nil {
+			return false
+		}
+	}
+	reply, err := askAgent(agent, []byte{sshagent.MsgRequestIdentities})
+	if err != nil {
+		return false
+	}
+	if reply, err = r.relist(agent, &bound, reply); err != nil {
+		return false
+	}
+	ids, err := sshagent.ParseIdentities(r.keys.FilterIdentities(reply))
+	return err == nil && len(ids) > 0
+}
+
+// newHopSigner makes the host key a forwarder binds its local agent
+// connections to. It is new for each forwarder, so no destination
+// constraint can name it.
+func newHopSigner() (ssh.Signer, error) {
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	return ssh.NewSignerFromKey(key)
+}
+
+// bindHop binds a local agent connection to the agtd hop as a forwarding
+// session (session-bind@openssh.com with forwarding set), as ssh -A binds
+// the connections it forwards, and reports whether the agent took it.
+// OpenSSH's agent then applies destination constraints (ssh-add -h) to the
+// requests that follow: a key limited to other hosts is left out of the
+// identities answer and refused for signing, since no constraint names the
+// hop. An agent answers with a failure when it does not know the extension,
+// rejects the binding, or is locked; the caller decides what that means.
+func bindHop(agent net.Conn, hop ssh.Signer) (bool, error) {
+	sessionID := make([]byte, 32)
+	if _, err := rand.Read(sessionID); err != nil {
+		return false, err
+	}
+	sig, err := hop.Sign(rand.Reader, sessionID)
+	if err != nil {
+		return false, err
+	}
+	bind := sshagent.SessionBind{HostKey: hop.PublicKey().Marshal(), SessionID: sessionID, Signature: ssh.Marshal(sig), Forwarding: true}
+	agent.SetDeadline(time.Now().Add(localAgentReplyTimeout))
+	defer agent.SetDeadline(time.Time{})
+	if err := sshagent.WriteMessage(agent, bind.Request()); err != nil {
+		return false, err
+	}
+	reply, err := sshagent.ReadMessage(agent)
+	if err != nil {
+		return false, err
+	}
+	return sshagent.Type(reply) == sshagent.MsgSuccess, nil
 }
 
 // write sends one frame to the worker. A stream that does not take it in
