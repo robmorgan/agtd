@@ -61,6 +61,14 @@ const (
 	attachDetachSequence = "\x1b[H\x1b[2J"
 	attachExitTitle      = "agtd"
 
+	// attachOwnScreenSequence enters the alternate screen for an attach
+	// from the inbox (client.fromInbox), so the primary screen, the
+	// inbox's block on it, is kept until attachRestoreSequence leaves it.
+	// The keyboard flags attach pushes are per screen, so they are popped
+	// before that (attachOwnRestorePrefix).
+	attachOwnScreenSequence = "\x1b[?1049h"
+	attachOwnRestorePrefix  = "\x1b[<32u"
+
 	// frameQueue bounds the daemon frames read ahead of the terminal.
 	frameQueue = 16
 )
@@ -98,6 +106,16 @@ func (c *client) attachSession(id string) error {
 // attachSessionUID is attachSession for a session known by its UID too
 // (one just created), refusing any other incarnation under its name.
 func (c *client) attachSessionUID(id, uid string) error {
+	ended, err := c.attachLoop(id, uid)
+	if ended != nil {
+		fmt.Println(formatSessionEnd(ended))
+	}
+	return err
+}
+
+// attachLoop attaches until the user detaches or the session ends (then
+// ended says how), following switches to other sessions on the way.
+func (c *client) attachLoop(id, uid string) (ended *protocol.SessionEnded, err error) {
 	titled := false
 	defer func() {
 		if titled {
@@ -107,17 +125,18 @@ func (c *client) attachSessionUID(id, uid string) error {
 	for {
 		res, err := c.attachOnce(id, uid, &titled)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		switch res.outcome {
 		case outcomeEnded:
-			fmt.Println(formatSessionEnd(res.ended))
-			return nil
+			return res.ended, nil
 		case outcomeSwitch:
 			id, uid = res.next, ""
 		default:
-			fmt.Fprintf(os.Stderr, "detached from %s\n", c.sessionAddress(id))
-			return nil
+			if !c.fromInbox {
+				fmt.Fprintf(os.Stderr, "detached from %s\n", c.sessionAddress(id))
+			}
+			return nil, nil
 		}
 	}
 }
@@ -370,16 +389,27 @@ func (c *client) attachOnce(id, uid string, titled *bool) (res attachResult, err
 
 	writeOut(terminalTitleBytes(id + " - " + attachExitTitle))
 	*titled = true
-	fmt.Fprintf(os.Stderr, "attached to %s (%s); Ctrl-Y overlay, Ctrl-\\\\ detaches, Ctrl-[/Ctrl-] switch running sessions\n", id, attached.AttachID)
+	if !c.fromInbox {
+		fmt.Fprintf(os.Stderr, "attached to %s (%s); Ctrl-Y overlay, Ctrl-\\\\ detaches, Ctrl-[/Ctrl-] switch running sessions\n", id, attached.AttachID)
+	}
 	raw, err := enterRaw(true)
 	if err != nil {
 		return attachResult{}, fmt.Errorf("failed to set raw terminal mode: %w", err)
+	}
+	if c.fromInbox {
+		writeOut([]byte(attachOwnScreenSequence))
 	}
 	var painter *screen.Painter
 	defer func() {
 		raw.restore()
 		if painter != nil {
 			writeOut(painter.Leave())
+		}
+		if c.fromInbox {
+			// Leaving the alternate screen restores the inbox's: no
+			// clear after a detach.
+			writeOut([]byte(attachOwnRestorePrefix + attachRestoreSequence))
+			return
 		}
 		writeOut([]byte(attachRestoreSequence))
 		if err == nil && res.outcome == outcomeDetached {

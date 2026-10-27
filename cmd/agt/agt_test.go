@@ -555,7 +555,8 @@ func TestInboxEndToEnd(t *testing.T) {
 	r := e.remoteEnv("dev")
 	r.startAndDetach("demo")
 
-	// Both rows show; dev/ narrows to dev's, and Enter attaches to it.
+	// Both rows show; dev/ narrows to dev's, and Enter attaches to it, on
+	// the alternate screen, with nothing printed.
 	tm := e.start()
 	m := tm.expect(0, "Filter, or name a new session")
 	m = tm.expectScreen(m, `demo\s+local\s+sh\s+(running|working|idle)`)
@@ -563,18 +564,35 @@ func TestInboxEndToEnd(t *testing.T) {
 	tm.write("dev/")
 	m = tm.expectScreen(m, `dev/`)
 	tm.write("\r")
-	m = tm.expect(m, "attached to demo")
+	m = tm.expect(m, "\x1b[?1049h")
 	tm.write("pwd\r")
-	tm.expect(m, r.work)
-	tm.write("\x1c")
-	tm.wait()
+	m = tm.expect(m, r.work)
+
+	// A detach returns to the inbox: the attachment leaves the alternate
+	// screen without clearing anything, so the inbox's block is where it
+	// was, and the inbox takes keys again. The session drew on the main
+	// screen (sh), then on the alternate one (as a full-screen agent).
+	backToInbox := func(m int) int {
+		t.Helper()
+		tm.write("\x1c")
+		m = tm.expect(m, "\x1b[?1049l")
+		tm.write("\t")
+		end := tm.expectScreen(m, `2\. remove`)
+		if back := tm.output()[m:end]; strings.Contains(back, "\x1b[2J") || strings.Contains(back, "attached to") || strings.Contains(back, "ended") {
+			t.Fatalf("the return to the inbox cleared or printed:\n%q", back)
+		}
+		tm.write("\x1b") // close the menu
+		return end
+	}
+	m = backToInbox(m)
+	tm.write("\r")
+	m = tm.expect(m, "\x1b[?1049h")
+	tm.write("printf '\\033[?1049hfull screen'\r")
+	m = tm.expect(m, "full screen")
+	m = backToInbox(m)
 
 	// Tab, remove, confirm: dev's demo goes, and this machine's keeps
 	// running. Esc clears the filter, then quits.
-	tm = e.start()
-	m = tm.expectScreen(0, `demo\s+dev`)
-	tm.write("dev/")
-	m = tm.expectScreen(m, `dev/`)
 	tm.write("\t")
 	m = tm.expectScreen(m, `2\. remove`)
 	tm.write("2")
@@ -583,11 +601,11 @@ func TestInboxEndToEnd(t *testing.T) {
 	// 500 ms (the inbox's inboxAcknowledgeAfter): read it first.
 	time.Sleep(600 * time.Millisecond) // gstack-timing-ok: waits out the inbox's confirm delay, asserts no timing
 	tm.write("\r")
-	tm.expectScreen(m, `removed session dev/demo`)
+	m = tm.expectScreen(m, `removed session dev/demo`)
 	tm.write("\x1b")
 	tm.write("\x1b")
 	tm.wait()
-	if strings.Contains(tm.output(), "attached to") {
+	if strings.Contains(tm.output()[m:], "\x1b[?1049h") {
 		t.Fatal("the inbox attached on its way out")
 	}
 	if out := r.mustRun("agt", "ls"); strings.Contains(out, "demo") {
