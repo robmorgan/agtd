@@ -473,6 +473,12 @@ below):
 ```toml
 [attach]
 scrollback_rows = 1000
+# The wheel over a fullscreen agent's transcript (remote, under frames) is
+# drawn at once and corrected by the agent's screen; false waits for it.
+#predict_wheel = true
+# A prototype: keep the terminal on its primary screen and push the
+# transcript rows a fullscreen agent scrolls away into its scrollback.
+#alt_scrollback = false
 ```
 
 The agent chooser's order (in the inbox and the overlay) follows the order of the `[agents.*]`
@@ -543,8 +549,10 @@ Alt-Enter newline are drawn locally, and over frames Enter on a prompt empties t
 do something else); Tab, Esc, Ctrl-C, Ctrl-J, Ctrl-Enter and the other keys are never
 predicted, so the agent's own menus, completions and history work as they always did, one round
 trip late. Mouse input reaches the agent as it is, so in a fullscreen agent
-(Claude Code, Codex, `pi --tui-mode fullscreen`) the wheel scrolls its transcript while you type;
-a scroll made in the middle of typing shows once the agent has drawn your keys. The agent's rendering replaces the drawing as soon as it arrives; the one thing you may
+(Claude Code, Codex, pi) the wheel scrolls its transcript while you type; from a remote daemon
+each wheel tick is drawn at once from the rows the agent has shown since you attached, and the
+agent's screen corrects the guess a round trip later (`[attach] predict_wheel`). Rows above
+what it has shown since attaching come at the round trip. The agent's rendering replaces the drawing as soon as it arrives; the one thing you may
 notice is that the screen behind the box stands still for about a round trip after you pause
 typing. ARCHITECTURE.md, "The Input Field And Local Echo", has the details.
 

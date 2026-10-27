@@ -116,7 +116,7 @@ func (c *client) attachSessionUID(id, uid string) error {
 		case outcomeSwitch:
 			id, uid = res.next, ""
 		default:
-			fmt.Printf("detached from %s\n", c.sessionAddress(id))
+			fmt.Fprintf(os.Stderr, "detached from %s\n", c.sessionAddress(id))
 			return nil
 		}
 	}
@@ -491,7 +491,7 @@ func (c *client) newPainterFor(attached *protocol.Attached) *screen.Painter {
 	p := screen.New()
 	if cfg, err := config.Load(c.paths.Config); err == nil {
 		if cfg.Attach.AltScrollback {
-			p.SetAltScrollback(altScrollbackRows)
+			p.SetAltScrollback()
 		}
 		if cfg.Attach.WheelPredicted() {
 			p.SetPredictScroll(c.latency())
@@ -499,10 +499,6 @@ func (c *client) newPainterFor(attached *protocol.Attached) *screen.Painter {
 	}
 	return p
 }
-
-// altScrollbackRows bounds the transcript record of [attach]
-// alt_scrollback.
-const altScrollbackRows = 10000
 
 // sizeOwnership is the attachment's size ownership as it attached, nil when
 // the worker does not track it.
@@ -578,12 +574,7 @@ func (c *client) runAttachment(id string, stream *attachStream, keys <-chan []by
 		if painter == nil {
 			return
 		}
-		if !predictTimer.Stop() {
-			select {
-			case <-predictTimer.C:
-			default:
-			}
-		}
+		predictTimer.Stop()
 		if due := painter.PredictDue(); !due.IsZero() {
 			predictTimer.Reset(max(time.Until(due), 0))
 		}
@@ -667,6 +658,9 @@ func (c *client) runAttachment(id string, stream *attachStream, keys <-chan []by
 			return attachResult{outcome: outcomeDetached}, nil
 		case <-winch:
 			redraw = true
+			if painter != nil {
+				painter.Resized()
+			}
 			if ov != nil {
 				ov.resized()
 			}

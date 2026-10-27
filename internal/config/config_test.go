@@ -223,3 +223,47 @@ func TestSSHAgent(t *testing.T) {
 		t.Fatalf("agent socket = %q", got)
 	}
 }
+
+// The frame options of [attach]: alt scrollback and Submit and switch off,
+// the wheel prediction on, unless set, in the built-in defaults and the
+// written file alike.
+func TestAttachFrameOptions(t *testing.T) {
+	// Value: protects=the alt scrollback prototype and Submit and switch
+	// stay off and the wheel prediction on for anyone who did not set them;
+	// fails_when=a toml key is misspelt, WheelPredicted's nil default
+	// flips, or the written template turns a prototype on; why_new=no test
+	// read these keys; seam=none; no_claim=what the painter does with them
+	// (screen tests).
+	agentsOnPath(t)
+	dir := t.TempDir()
+	written := filepath.Join(dir, "written.toml")
+	if err := WriteDefault(written); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, text         string
+		alt, wheel, submit bool
+	}{
+		{"unset", "", false, true, false},
+		{"written", "", false, true, false},
+		{"alt", "[attach]\nalt_scrollback = true\n", true, true, false},
+		{"no wheel", "[attach]\npredict_wheel = false\n", false, false, false},
+		{"wheel", "[attach]\npredict_wheel = true\n", false, true, false},
+		{"submit", "[attach]\nsubmit_and_switch = true\n", false, true, true},
+	} {
+		path := written
+		if tc.name != "written" {
+			path = filepath.Join(dir, "config.toml")
+			if err := os.WriteFile(path, []byte(tc.text), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if a := cfg.Attach; a.AltScrollback != tc.alt || a.WheelPredicted() != tc.wheel || a.SubmitAndSwitch != tc.submit {
+			t.Errorf("%s: alt %v wheel %v submit %v", tc.name, a.AltScrollback, a.WheelPredicted(), a.SubmitAndSwitch)
+		}
+	}
+}

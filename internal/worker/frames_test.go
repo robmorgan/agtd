@@ -689,3 +689,45 @@ func TestFrameWindowFollowsTheRoundTrip(t *testing.T) {
 		t.Fatalf("after the window's ack: seq %d acked %d", f.Seq, f.Acked)
 	}
 }
+
+// Through the worker: a frame waits for a program's synchronized-output
+// block to end, so it never shows half a repaint, and a block the program
+// never ends holds it only frameSyncHold.
+func TestFrameWaitsForSyncOutput(t *testing.T) {
+	// Value: protects=a frame client never paints half of a mode-2026
+	// repaint, and still gets the screen when a program leaves the mode
+	// set; fails_when=sendFrame ignores frameHold, or the held frame's
+	// timer is never armed; why_new=TestFrameHoldsForSyncOutput checks
+	// frameHold on a rig, not serveAttach; seam=none; no_claim=timing on
+	// a loaded machine beyond the bounds asserted.
+	for _, c := range []struct {
+		name, script, want string
+		ends               bool
+	}{
+		{"ended", `stty -echo; read go; printf '\033[?2026hhalf'; sleep 0.08; printf ' done\033[?2026l'; read x`, "half done", true},
+		{"left set", `stty -echo; read go; printf '\033[?2026hstuck'; read x`, "stuck", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := startWorkerWith(t, c.script)
+			cl, _ := h.attachWith(protocol.AttachSession{Features: []string{protocol.CapAttachFrames}})
+			cl.readFrame()
+			cl.ack(1, false)
+			start := time.Now()
+			cl.input("go\n")
+			for {
+				f := cl.readFrame()
+				text := frameText(f)
+				if c.ends && strings.Contains(text, "half") && !strings.Contains(text, "half done") {
+					t.Fatalf("a frame showed half the repaint: %q", text)
+				}
+				if strings.Contains(text, c.want) {
+					if !c.ends && time.Since(start) < frameSyncHold/2 {
+						t.Fatalf("the screen came %v into a block the program never ended", time.Since(start))
+					}
+					return
+				}
+				cl.ack(f.Seq, false)
+			}
+		})
+	}
+}

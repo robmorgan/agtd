@@ -158,19 +158,26 @@ func (st *frameState) changed() {
 }
 
 // noteFrameOutput marks every frame client's screen changed, and notes
-// whether the program is inside a synchronized-output block.
+// whether the program is inside a synchronized-output block, which only
+// frame clients wait on.
 func (s *ownerState) noteFrameOutput() {
+	clients := false
+	for _, a := range s.attachments {
+		if a.frames != nil {
+			a.frames.changed()
+			clients = true
+		}
+	}
+	if !clients {
+		s.syncSince = time.Time{}
+		return
+	}
 	if syncing, err := s.terminal.term.Mode(libghostty.ModeSyncOutput); err == nil && syncing {
 		if s.syncSince.IsZero() {
 			s.syncSince = time.Now()
 		}
 	} else {
 		s.syncSince = time.Time{}
-	}
-	for _, a := range s.attachments {
-		if a.frames != nil {
-			a.frames.changed()
-		}
 	}
 }
 

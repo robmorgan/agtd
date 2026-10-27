@@ -31,7 +31,7 @@ func TestTranscriptRecordsClaudeScroll(t *testing.T) {
 		}
 	}
 	if data == nil {
-		t.Skip("no claude-scroll stream")
+		t.Fatal("no claude-scroll stream (testdata/streams/claude-scroll.vt.gz)")
 	}
 	repaints := splitAfter(data, []byte("\x1b[?2026l"))
 	cases := []struct {
@@ -199,7 +199,7 @@ func TestFramesAltScrollbackClaudeScroll(t *testing.T) {
 		}
 	}
 	if data == nil {
-		t.Skip("no claude-scroll stream")
+		t.Fatal("no claude-scroll stream (testdata/streams/claude-scroll.vt.gz)")
 	}
 	repaints := splitAfter(data, []byte("\x1b[?2026l"))
 	for _, c := range []struct {
@@ -213,7 +213,7 @@ func TestFramesAltScrollbackClaudeScroll(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r := newFrameRig(t, streamCols, streamRows)
-			r.p.SetAltScrollback(10000)
+			r.p.SetAltScrollback()
 			for _, p := range c.pieces {
 				r.feed(string(p))
 				// The CLI asks for the field in its acks; the rig's
@@ -287,7 +287,7 @@ func TestFramesPredictWheelClaudeScroll(t *testing.T) {
 		}
 	}
 	if data == nil {
-		t.Skip("no claude-scroll stream")
+		t.Fatal("no claude-scroll stream (testdata/streams/claude-scroll.vt.gz)")
 	}
 	var marks map[string]int
 	if err := json.Unmarshal(must(os.ReadFile(filepath.Join("testdata", "streams", "claude-scroll.marks.json"))), &marks); err != nil {
@@ -355,7 +355,7 @@ func TestFramesPredictWheelClaudeScroll(t *testing.T) {
 			r := newFrameRig(t, streamCols, streamRows)
 			now := time.Unix(1e9, 0)
 			if !c.mirror {
-				r.p.SetAltScrollback(10000)
+				r.p.SetAltScrollback()
 			}
 			r.p.SetPredictScroll(0)
 			r.p.SetClock(func() time.Time { return now })
