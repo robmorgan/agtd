@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -251,11 +252,16 @@ func TestEchoForwardsInputThatIsNotText(t *testing.T) {
 		}
 		e.fieldAnswer(claudeField([]string{""}))
 		typeKeys(e, "ab")
-		// Behind the batched keys, not ahead of them.
-		if send, paint := e.input([]byte(in)); send != nil || paint != nil || e.paused || e.unconfirmed() != 2 {
+		// Behind the batched keys, not ahead of them; a plain wheel tick
+		// takes them with it at once (wheelReport).
+		now, later := "", "ab"+in
+		if wheelReport([]byte(in)) {
+			now, later = "ab"+in, ""
+		}
+		if send, paint := e.input([]byte(in)); string(send) != now || paint != nil || e.paused || e.unconfirmed() != 2 {
 			t.Errorf("%q while typing: send %q, paint %q, paused %v, unconfirmed %d", in, send, paint, e.paused, e.unconfirmed())
 		}
-		if send := e.flush(); string(send) != "ab"+in {
+		if send := e.flush(); string(send) != later {
 			t.Errorf("%q: flushed %q", in, send)
 		}
 		// Nothing batched: at once.
@@ -300,12 +306,17 @@ func TestEchoInputThatIsNotTextInEveryState(t *testing.T) {
 
 	e := newEcho(echoConfig{flushAfter: echoFlushAfter})
 	e.fieldAnswer(claudeField([]string{""}))
+	// The wheel takes the keys batched before it, so the agent gets the
+	// tick when the painter draws its guess; the keys after it batch.
 	in := "a" + wheel + "b"
-	if send, _ := e.input([]byte(in)); send != nil || e.paused || e.unconfirmed() != 2 {
+	if send, _ := e.input([]byte(in)); string(send) != "a"+wheel || e.paused || e.unconfirmed() != 2 {
 		t.Fatalf("mixed read: send %q, paused %v, unconfirmed %d", send, e.paused, e.unconfirmed())
 	}
-	if send := e.flush(); string(send) != in {
+	if send := e.flush(); string(send) != "b" {
 		t.Fatalf("mixed read: flushed %q", send)
+	}
+	if !wheelReport([]byte(wheel)) || wheelReport([]byte(click)) || wheelReport([]byte("\x1b[<65;1;1M")) == false {
+		t.Fatal("wheelReport misreads a report")
 	}
 
 	e = newEcho(echoConfig{flushAfter: echoFlushAfter})
@@ -363,13 +374,14 @@ func TestEchoInputThatIsNotTextInEveryState(t *testing.T) {
 		t.Fatalf("click while probing: paint %q, paused %v", paint, e.paused)
 	}
 
-	// Opening the overlay sends what is batched, a scroll queued behind
-	// the keys included, in order.
+	// Opening the overlay sends what is batched, input queued behind the
+	// keys included (a key release), in order.
+	const release = "\x1b[97;1:3u"
 	e = newEcho(echoConfig{flushAfter: echoFlushAfter})
 	e.fieldAnswer(claudeField([]string{""}))
 	typeKeys(e, "ab")
-	e.input([]byte(wheel))
-	if send := e.suspend(); string(send) != "ab"+wheel || len(e.pending) != 0 || e.unconfirmed() != 0 {
+	e.input([]byte(release))
+	if send := e.suspend(); string(send) != "ab"+release || len(e.pending) != 0 || e.unconfirmed() != 0 {
 		t.Fatalf("suspend: sent %q, pending %q, unconfirmed %d", send, e.pending, e.unconfirmed())
 	}
 
@@ -1165,7 +1177,7 @@ func framesEcho(t *testing.T, rows []string) (*echo, time.Time) {
 	t.Helper()
 	e, now := fixedClockEcho(echoFlushAfter)
 	e.frames = true
-	e.frameField(claudeField(rows), 1)
+	e.frameField(claudeField(rows), (&protocol.Frame{Seq: 1}).AckedBy())
 	e.frameAcked(1)
 	if !e.active() {
 		t.Fatal("the first frame's field did not start the echo")
@@ -1173,11 +1185,18 @@ func framesEcho(t *testing.T, rows []string) (*echo, time.Time) {
 	return e, now
 }
 
-// frame feeds the echo frame seq carrying a field with rows, and
-// acknowledges it, as paintFrame does.
+// frame feeds the echo frame seq carrying a field with rows, from a
+// worker with a window of protocol.FrameWindow, and acknowledges it, as
+// paintFrame does.
 func frameWith(e *echo, seq uint32, rows []string) (send []byte) {
-	send, _ = e.frameField(claudeField(rows), seq)
-	e.frameAcked(seq)
+	return frameAfter(e, &protocol.Frame{Seq: seq}, rows)
+}
+
+// frameAfter is frameWith for a frame that may say which ack it was
+// built after (CapAttachFrameWindow).
+func frameAfter(e *echo, f *protocol.Frame, rows []string) (send []byte) {
+	send, _ = e.frameField(claudeField(rows), f.AckedBy())
+	e.frameAcked(f.Seq)
 	return send
 }
 
@@ -1223,6 +1242,40 @@ func TestEchoFramesConfirmOnlyWhatTheyProve(t *testing.T) {
 	frameWith(e, 8, []string{"xyz"})
 	if e.unconfirmed() != 0 || e.field.Rows[0] != "xyz" {
 		t.Fatalf("an unpredicted field: unconfirmed %d, field %q", e.unconfirmed(), e.field.Rows)
+	}
+}
+
+// With CapAttachFrameWindow the window can be wide, so a frame's number
+// no longer says which ack it was built after: the frame does (Acked).
+// A frame built before the ack that followed the keys proves nothing,
+// however far its number is past that ack.
+func TestEchoFramesProveByTheirAck(t *testing.T) {
+	// Value: protects=a wide window does not let a frame built before the
+	// keys arrived confirm or drop them; fails_when=frameField goes back
+	// to deriving the ack from Seq-FrameWindow; why_new=the window
+	// follows the round trip; seam=none; no_claim=the worker's window
+	// sizing (worker tests).
+	e, now := framesEcho(t, []string{""})
+	typeKeys(e, "abc")
+	if send, _ := e.tick(now.Add(time.Second)); string(send) != "abc" {
+		t.Fatalf("batch %q", send)
+	}
+	// The keys went after the ack of frame 1. Frames 2 to 9 were built
+	// with only that ack read, so what they show of the keys may or may
+	// not be all of them; a window of 2 would take 4 to 9 as proof.
+	for seq := uint32(2); seq <= 9; seq++ {
+		rows := []string{"a"}
+		if seq%2 == 1 {
+			rows = []string{"abc"}
+		}
+		frameAfter(e, &protocol.Frame{Seq: seq, Acked: 1, HasAcked: true}, rows)
+		if e.unconfirmed() != 3 || e.paused {
+			t.Fatalf("frame %d: unconfirmed %d, paused %v", seq, e.unconfirmed(), e.paused)
+		}
+	}
+	frameAfter(e, &protocol.Frame{Seq: 10, Acked: 2, HasAcked: true}, []string{"abc"})
+	if e.unconfirmed() != 0 {
+		t.Fatalf("frame 10 built after ack 2: unconfirmed %d", e.unconfirmed())
 	}
 }
 
@@ -1402,5 +1455,220 @@ func TestEchoFramesSettleTheResendAfterAReattach(t *testing.T) {
 	frameWith(e, 3, []string{"abc"})
 	if e.paused || e.field.Rows[0] != "abc" {
 		t.Fatalf("frame 3: paused %v, field %q", e.paused, e.field.Rows)
+	}
+}
+
+// pi moves its box up over a menu of slash commands while the field
+// holds one. The key that empties the field again is drawn over the
+// screen as it last was with the field empty, the box back where it was,
+// unless the agent has written above the box since.
+func TestEchoFramesRestoreTheEmptyScreen(t *testing.T) {
+	// Value: protects=Backspace on pi's "/" collapses the menu at once;
+	// fails_when=the echo draws the emptied field where the menu put the
+	// box, or restores a screen the agent has written over since;
+	// why_new=pi 1.x full-screen menus; seam=screenShown; no_claim=pi's
+	// own layout (live trace).
+	screen := func(top string) [][]byte {
+		rows := make([][]byte, 40)
+		rows[0] = []byte(top)
+		return rows
+	}
+	raised := func(rows []string) *protocol.Field {
+		f := claudeField(rows)
+		f.Top, f.BoxTop, f.BoxBottom, f.Row = 30, 29, 31, 30
+		return f
+	}
+	for _, c := range []struct {
+		name    string
+		written bool
+	}{{"unchanged", false}, {"written since", true}} {
+		e, now := framesEcho(t, []string{""})
+		e.screenShown(claudeField([]string{""}), screen("transcript"))
+		typeKeys(e, "/")
+		e.tick(now.Add(time.Second))
+		send, _ := e.frameField(raised([]string{"/"}), (&protocol.Frame{Seq: 4}).AckedBy())
+		e.frameAcked(4)
+		if len(send) != 0 || e.holding() {
+			t.Fatalf("%s: the raised box did not confirm the slash (unconfirmed %d)", c.name, e.unconfirmed())
+		}
+		top := "transcript"
+		if c.written {
+			top = "new output"
+		}
+		e.screenShown(raised([]string{"/"}), screen(top))
+		_, paint := e.input([]byte{0x7f})
+		restored := strings.Contains(string(paint), "transcript") && strings.Contains(string(paint), cup(36, 2))
+		if restored == c.written {
+			t.Fatalf("%s: restored %v: %q", c.name, restored, paint)
+		}
+		if c.written {
+			continue
+		}
+		// The agent's own empty field, back at the bottom, confirms it.
+		e.tick(now.Add(2 * time.Second))
+		e.frameField(claudeField([]string{""}), (&protocol.Frame{Seq: 8}).AckedBy())
+		if e.holding() || e.restoring || e.field.BoxTop != 35 {
+			t.Fatalf("not confirmed: unconfirmed %d, restoring %v, box at %d", e.unconfirmed(), e.restoring, e.field.BoxTop)
+		}
+	}
+}
+
+// The emptied field is drawn over the rest screen until the agent's field
+// replaces it. A frame that cannot prove the keys after it (built before
+// their ack) may still show the agent has written above the box, which
+// drops the rest screen: the keys typed next are drawn over the agent's
+// screen as it is, without the rest screen, and without a crash.
+func TestEchoFramesRestoreDroppedWhileRestoring(t *testing.T) {
+	// Value: protects=typing after Backspace on pi's "/" while the agent
+	// writes above the box keeps the attachment alive; fails_when=the
+	// echo keeps restoring after screenShown dropped the rest screen and
+	// paintRows dereferences it; why_new=TestEchoFramesRestoreTheEmptyScreen
+	// drops the rest screen only before the emptying key, never while
+	// restoring; seam=none; no_claim=what pi draws (live trace).
+	screen := func(top string) [][]byte {
+		rows := make([][]byte, 40)
+		rows[0] = []byte(top)
+		return rows
+	}
+	raised := func(rows []string) *protocol.Field {
+		f := claudeField(rows)
+		f.Top, f.BoxTop, f.BoxBottom, f.Row = 30, 29, 31, 30
+		return f
+	}
+	e, now := framesEcho(t, []string{""})
+	e.screenShown(claudeField([]string{""}), screen("transcript"))
+	typeKeys(e, "/")
+	e.tick(now.Add(time.Second))
+	e.frameField(raised([]string{"/"}), (&protocol.Frame{Seq: 4}).AckedBy())
+	e.frameAcked(4)
+	e.screenShown(raised([]string{"/"}), screen("transcript"))
+	if _, paint := e.input([]byte{0x7f}); !e.restoring || !strings.Contains(string(paint), "transcript") {
+		t.Fatalf("Backspace did not restore the empty screen: restoring %v, %q", e.restoring, paint)
+	}
+	typeKeys(e, "x")
+	e.tick(now.Add(2 * time.Second))
+	// Built after the keys arrived, before their ack: it proves nothing,
+	// but the agent has written above the box.
+	f := &protocol.Frame{Seq: 6, Acked: 4, HasAcked: true}
+	e.frameField(claudeField([]string{"x"}), f.AckedBy())
+	e.frameAcked(f.Seq)
+	e.screenShown(claudeField([]string{"x"}), screen("new output"))
+	_, paint := typeKeys(e, "y")
+	if strings.Contains(string(paint), "transcript") {
+		t.Fatalf("drew the dropped rest screen: %q", paint)
+	}
+}
+
+// The overlay opening (suspend) or a reattach ends a restore: the drawing
+// it belonged to is dropped, and a reattach's screen is a new one.
+func TestEchoFramesRestoreEndsOnSuspendAndReattach(t *testing.T) {
+	// Value: protects=after Ctrl-Y or a reconnect mid-restore, the next key
+	// is not drawn over the remembered screen; fails_when=suspend or
+	// reattached leave restoring set; why_new=only screenShown and
+	// reconcile were checked to end a restore; seam=none; no_claim=what
+	// the overlay draws (attach.go).
+	screen := func(top string) [][]byte {
+		rows := make([][]byte, 40)
+		rows[0] = []byte(top)
+		return rows
+	}
+	raised := func(rows []string) *protocol.Field {
+		f := claudeField(rows)
+		f.Top, f.BoxTop, f.BoxBottom, f.Row = 30, 29, 31, 30
+		return f
+	}
+	for name, end := range map[string]func(*echo){"suspend": func(e *echo) { e.suspend() }, "reattached": func(e *echo) { e.reattached() }} {
+		e, now := framesEcho(t, []string{""})
+		e.screenShown(claudeField([]string{""}), screen("transcript"))
+		typeKeys(e, "/")
+		e.tick(now.Add(time.Second))
+		e.frameField(raised([]string{"/"}), (&protocol.Frame{Seq: 4}).AckedBy())
+		e.frameAcked(4)
+		e.screenShown(raised([]string{"/"}), screen("transcript"))
+		if e.input([]byte{0x7f}); !e.restoring {
+			t.Fatalf("%s: Backspace did not restore", name)
+		}
+		end(e)
+		if e.restoring {
+			t.Fatalf("%s: still restoring", name)
+		}
+		if _, paint := typeKeys(e, "x"); strings.Contains(string(paint), "transcript") {
+			t.Fatalf("%s: drew the remembered screen: %q", name, paint)
+		}
+	}
+}
+
+// The rest screen matches a screen whose transcript stayed where it was,
+// or moved up with the box (pi in a long conversation), and no other.
+func TestEchoRestAbove(t *testing.T) {
+	// Value: protects=Backspace on pi's "/" collapses the menu when pi
+	// moved the transcript up with the box, and only then;
+	// fails_when=the shift is off by one or has the wrong sign;
+	// why_new=the restore tests keep the transcript in place, so the
+	// shift branch never ran; seam=none; no_claim=pi's own layout.
+	rest := &echoRest{field: claudeField([]string{""}), rows: make([][]byte, 40)}
+	for y := range 35 {
+		rest.rows[y] = []byte("row " + strconv.Itoa(y))
+	}
+	raised := claudeField([]string{"/"})
+	raised.Top, raised.BoxTop, raised.BoxBottom, raised.Row = 30, 29, 31, 30
+	shift := int(rest.field.BoxTop) - int(raised.BoxTop)
+	rows := func(d int) [][]byte {
+		out := make([][]byte, 40)
+		for y := range int(raised.BoxTop) {
+			if y+d >= 0 && y+d < len(rest.rows) {
+				out[y] = rest.rows[y+d]
+			}
+		}
+		return out
+	}
+	for d, want := range map[int]bool{0: true, shift: true, shift - 1: false, shift + 1: false, -shift: false} {
+		if got := rest.above(raised, rows(d)); got != want {
+			t.Errorf("moved up %d: above %v, want %v", d, got, want)
+		}
+	}
+	if rest.above(raised, make([][]byte, 30)) {
+		t.Error("a screen of another height matched")
+	}
+}
+
+// An unpredicted key (pause) or a resize ends a restore.
+func TestEchoFramesRestoreEndsOnPauseAndResize(t *testing.T) {
+	// Value: protects=after Backspace on pi's "/", a Tab or a resize does
+	// not leave the remembered screen drawn under later keys;
+	// fails_when=pause or resized stop clearing restoring or rest;
+	// why_new=only suspend, reattach and screenShown were checked;
+	// seam=none; no_claim=the agent's answer to the Tab.
+	screen := func(top string) [][]byte {
+		rows := make([][]byte, 40)
+		rows[0] = []byte(top)
+		return rows
+	}
+	raised := func(rows []string) *protocol.Field {
+		f := claudeField(rows)
+		f.Top, f.BoxTop, f.BoxBottom, f.Row = 30, 29, 31, 30
+		return f
+	}
+	for name, end := range map[string]func(*echo){
+		"pause":  func(e *echo) { typeKeys(e, "\t") },
+		"resize": func(e *echo) { e.resized() },
+	} {
+		e, now := framesEcho(t, []string{""})
+		e.screenShown(claudeField([]string{""}), screen("transcript"))
+		typeKeys(e, "/")
+		e.tick(now.Add(time.Second))
+		e.frameField(raised([]string{"/"}), (&protocol.Frame{Seq: 4}).AckedBy())
+		e.frameAcked(4)
+		e.screenShown(raised([]string{"/"}), screen("transcript"))
+		if e.input([]byte{0x7f}); !e.restoring {
+			t.Fatalf("%s: Backspace did not restore", name)
+		}
+		end(e)
+		if e.restoring {
+			t.Fatalf("%s: still restoring", name)
+		}
+		if name == "resize" && e.rest != nil {
+			t.Fatal("resize kept the rest screen of the old size")
+		}
 	}
 }

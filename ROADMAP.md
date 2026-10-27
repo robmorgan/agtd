@@ -1124,6 +1124,25 @@ by the client, so lag never flashes.
 
 ---
 
+# Phase 15 — SSH agent forwarding
+
+The design (`docs/designs/ssh-agent-forwarding.md`): an agent on a devbox pushes and signs with
+the keys of the machine the user attaches from, as `ssh -A` allows, without tying the session to a
+connection. Every session has its own agent socket; the forwarder of the attachment that owns the
+size answers on it.
+
+## Deliverables
+
+* [x] Phase 1: each session's agent socket (`SSH_AUTH_SOCK`, `[ssh_agent] session_socket`),
+      routing by size ownership with the wait for the owner's reattach, the inherited fallback,
+      `ssh-agent` streams (`ForwardSSHAgent`), `[ssh_agent] forward` for every attachment, the
+      message and key filters, events, the socket across live handoffs (handoff format 2)
+* [ ] Phase 2: destination policy (verified session bindings, `known_hosts`, `allow_hosts`,
+      `allow_namespaces`), refusing onward forwarding, and asking the user from the overlay
+* [ ] Phase 3, if asked for: the agtd hop in OpenSSH's own destination constraints
+
+---
+
 # Optional compatibility transports
 
 QUIC is the primary remote transport.

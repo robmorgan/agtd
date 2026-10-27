@@ -90,6 +90,12 @@ type Request struct {
 	// HandoffSession asks a session worker to replace its executable
 	// without stopping the agent (CapWorkerHandoff); see handoff.go.
 	HandoffSession *HandoffSession
+	// ForwardSSHAgent opens an ssh-agent stream (CapSSHAgent), on which
+	// the client then sends SSHAgentReply and SSHAgentClose; see
+	// sshagent.go.
+	ForwardSSHAgent *ForwardSSHAgent
+	SSHAgentReply   *SSHAgentMessage
+	SSHAgentClose   *SSHAgentConn
 }
 
 type SessionRef struct{ SessionID string }
@@ -332,9 +338,25 @@ type Frame struct {
 	// Field is the input field, when asked for (FrameAck.Field); nil
 	// otherwise.
 	Field *Field
+	// Acked (CapAttachFrameWindow) is the last frame whose ack the worker
+	// had read when it built this one, so the frame shows the input the
+	// client sent before that ack. HasAcked is whether it is set: only for
+	// a client that asked for the capability, and encoded last.
+	Acked    uint32
+	HasAcked bool
 	// Rows are the rows that changed, by index; every row in a Full frame.
 	// A blank row has empty VT.
 	Rows []FrameRow
+}
+
+// AckedBy is the last ack the worker had read when it built f: Acked
+// under CapAttachFrameWindow, otherwise derived from the fixed window,
+// FrameWindow (it read the ack of Seq-FrameWindow or a later one).
+func (f *Frame) AckedBy() uint32 {
+	if f.HasAcked {
+		return f.Acked
+	}
+	return f.Seq - min(f.Seq, FrameWindow)
 }
 
 // FrameRow is one row of a Frame.
@@ -353,8 +375,14 @@ type FrameAck struct {
 // FrameWindow is how many frames a worker sends unacknowledged: it builds
 // frame N only after reading the ack of frame N-FrameWindow or a later
 // one. Requests are read in order, so frame N shows the input a client
-// sent before that ack, which its local echo relies on.
-const FrameWindow = 2
+// sent before that ack, which its local echo relies on. Under
+// CapAttachFrameWindow the worker sizes the window from the round trip,
+// between FrameWindow and MaxFrameWindow, and each frame says which ack
+// it was built after (Frame.Acked) instead.
+const (
+	FrameWindow    = 2
+	MaxFrameWindow = 16
+)
 
 // HasFeature reports whether the attach stream asked for capability c.
 func (a *AttachSession) HasFeature(c string) bool { return slices.Contains(a.Features, c) }
@@ -456,6 +484,12 @@ type Response struct {
 	// SessionRestarting (CapSessionRestart) ends an attach stream whose
 	// session worker is about to restart; see handoff.go.
 	SessionRestarting *SessionRestarting
+	// SSHAgentForwarding accepts an ssh-agent stream (CapSSHAgent), on
+	// which the worker then sends SSHAgentRequest and SSHAgentClose; see
+	// sshagent.go.
+	SSHAgentForwarding *SSHAgentForwarding
+	SSHAgentRequest    *SSHAgentMessage
+	SSHAgentClose      *SSHAgentConn
 }
 
 type DaemonInfo struct {
@@ -542,6 +576,10 @@ const (
 	kAttachFieldRequest    kind = 52
 	kAttachFrameAckRequest kind = 53
 	kAttachComposeRequest  kind = 54
+	// 80-89: SSH agent forwarding (sshagent.go).
+	kForwardSSHAgentRequest kind = 80
+	kSSHAgentReplyRequest   kind = 81
+	kSSHAgentCloseRequest   kind = 82
 
 	kDaemonInfoResponse     kind = 101
 	kCreateSessionResponse  kind = 102
@@ -583,6 +621,11 @@ const (
 	// Worker handoff (kinds 160-169).
 	kHandedOffResponse         kind = 160
 	kSessionRestartingResponse kind = 161
+
+	// SSH agent forwarding (kinds 180-189).
+	kSSHAgentForwardingResponse kind = 180
+	kSSHAgentRequestResponse    kind = 181
+	kSSHAgentCloseResponse      kind = 182
 )
 
 // ---------------------------------------------------------------------------
@@ -961,6 +1004,21 @@ func encodeRequest(req *Request, f Features) (kind, []byte, error) {
 		e.str(req.HandoffSession.SessionID)
 		e.str(req.HandoffSession.Executable)
 		return kHandoffSessionRequest, e.buf, e.err
+	case req.ForwardSSHAgent != nil:
+		f := req.ForwardSSHAgent
+		e.str(f.SessionID)
+		e.str(f.ExpectUID)
+		e.str(f.Attachment)
+		e.str(f.Client)
+		e.strs(f.Features)
+		return kForwardSSHAgentRequest, e.buf, e.err
+	case req.SSHAgentReply != nil:
+		e.u32(req.SSHAgentReply.Conn)
+		e.bytes(req.SSHAgentReply.Data)
+		return kSSHAgentReplyRequest, e.buf, e.err
+	case req.SSHAgentClose != nil:
+		e.u32(req.SSHAgentClose.Conn)
+		return kSSHAgentCloseRequest, e.buf, e.err
 	}
 	return 0, nil, errors.New("empty request")
 }
@@ -1077,6 +1135,12 @@ func decodeRequest(k kind, payload []byte, f Features) (*Request, error) {
 		req.ListEvents = &ListEvents{AfterID: d.optU64(), SessionID: d.optStr(), Limit: d.u32()}
 	case kHandoffSessionRequest:
 		req.HandoffSession = &HandoffSession{SessionID: d.str(), Executable: d.str()}
+	case kForwardSSHAgentRequest:
+		req.ForwardSSHAgent = &ForwardSSHAgent{SessionID: d.str(), ExpectUID: d.str(), Attachment: d.str(), Client: d.str(), Features: d.strs()}
+	case kSSHAgentReplyRequest:
+		req.SSHAgentReply = &SSHAgentMessage{Conn: d.u32(), Data: d.bytes()}
+	case kSSHAgentCloseRequest:
+		req.SSHAgentClose = &SSHAgentConn{Conn: d.u32()}
 	default:
 		return nil, fmt.Errorf("unexpected message kind `%d` while decoding request", k)
 	}
@@ -1254,6 +1318,16 @@ func encodeResponse(resp *Response, f Features) (kind, []byte, error) {
 		e.str(resp.SessionRestarting.SessionID)
 		e.str(resp.SessionRestarting.Reason)
 		return kSessionRestartingResponse, e.buf, e.err
+	case resp.SSHAgentForwarding != nil:
+		e.strs(resp.SSHAgentForwarding.Features)
+		return kSSHAgentForwardingResponse, e.buf, e.err
+	case resp.SSHAgentRequest != nil:
+		e.u32(resp.SSHAgentRequest.Conn)
+		e.bytes(resp.SSHAgentRequest.Data)
+		return kSSHAgentRequestResponse, e.buf, e.err
+	case resp.SSHAgentClose != nil:
+		e.u32(resp.SSHAgentClose.Conn)
+		return kSSHAgentCloseResponse, e.buf, e.err
 	}
 	return 0, nil, errors.New("empty response")
 }
@@ -1387,6 +1461,12 @@ func decodeResponse(k kind, payload []byte, f Features) (*Response, error) {
 		resp.HandedOff = &HandedOff{SessionID: d.str(), WorkerPID: d.u32(), Executable: d.str(), Handoffs: d.u32()}
 	case kSessionRestartingResponse:
 		resp.SessionRestarting = &SessionRestarting{SessionID: d.str(), Reason: d.str()}
+	case kSSHAgentForwardingResponse:
+		resp.SSHAgentForwarding = &SSHAgentForwarding{Features: d.strs()}
+	case kSSHAgentRequestResponse:
+		resp.SSHAgentRequest = &SSHAgentMessage{Conn: d.u32(), Data: d.bytes()}
+	case kSSHAgentCloseResponse:
+		resp.SSHAgentClose = &SSHAgentConn{Conn: d.u32()}
 	default:
 		return nil, fmt.Errorf("unexpected message kind `%d` while decoding response", k)
 	}
@@ -1529,6 +1609,9 @@ func (e *encoder) frame(f *Frame) {
 	e.length(len(f.History))
 	for _, h := range f.History {
 		e.bytes(h)
+	}
+	if f.HasAcked {
+		e.u32(f.Acked)
 	}
 }
 
@@ -1900,6 +1983,9 @@ func (d *decoder) frame() *Frame {
 	}
 	for i := 0; i < n && d.err == nil; i++ {
 		f.History = append(f.History, d.optBytes())
+	}
+	if d.more() {
+		f.Acked, f.HasAcked = d.u32(), true
 	}
 	return f
 }

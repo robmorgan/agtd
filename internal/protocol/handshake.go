@@ -30,6 +30,11 @@ import (
 //     client closes it. Events are persisted, so each subscriber is a
 //     cursor over state.db: the daemon holds at most one batch of events
 //     for it and never buffers for a slow one (see internal/daemon/events.go).
+//   - ssh-agent: ForwardSSHAgent. An attachment's SSH agent forwarder: the
+//     session's worker passes the agent requests of programs in the session
+//     to the client, which answers them from its own agent (sshagent.go).
+//     It is its own stream so that signing never waits behind terminal
+//     output on a lagging attachment.
 //
 // Over QUIC every stream has its own flow control, so a stalled attachment
 // or a large transfer never blocks another stream on the same connection.
@@ -41,6 +46,7 @@ const (
 	RoleAttach
 	RoleArtifact
 	RoleEvents
+	RoleSSHAgent
 )
 
 func (r StreamRole) String() string {
@@ -53,6 +59,8 @@ func (r StreamRole) String() string {
 		return "artifact"
 	case RoleEvents:
 		return "events"
+	case RoleSSHAgent:
+		return "ssh-agent"
 	}
 	return "request"
 }
@@ -68,6 +76,8 @@ func (r *Request) Role() StreamRole {
 		return RoleArtifact
 	case r.SubscribeEvents != nil:
 		return RoleEvents
+	case r.ForwardSSHAgent != nil:
+		return RoleSSHAgent
 	}
 	return RoleRequest
 }
@@ -217,9 +227,21 @@ const (
 	// scripts, and AttachCompose on an attach stream, for the overlay's
 	// submit and switch. Empty text is Enter alone.
 	CapAttachCompose = "attach-compose"
+	// CapAttachFrameWindow (attach stream, with CapAttachFrames): the
+	// worker sizes the frame window from the round trip it measures
+	// between a frame and its ack (up to MaxFrameWindow), and every Frame
+	// carries Acked, the ack it was built after.
+	CapAttachFrameWindow = "attach-frame-window"
 	// CapKillExpectUID: KillSession ends with ExpectUID, and the daemon
 	// refuses a kill or remove whose UID is not the session's current one.
 	CapKillExpectUID = "kill-expect-uid"
+	// CapSSHAgent: ssh-agent streams (ForwardSSHAgent), on which a client
+	// lends its SSH agent to a session it is attached to. A daemon lists
+	// it when it proxies them; a worker lists it in its answer to Hello
+	// only when its agent was started with the worker's agent socket as
+	// SSH_AUTH_SOCK, which a session started before this feature never
+	// is, even after a handoff.
+	CapSSHAgent = "ssh-agent"
 )
 
 // GlobalSessionID identifies one incarnation of a session across every
@@ -241,13 +263,13 @@ const MinProtocolVersion uint16 = 1
 func Capabilities() []string {
 	return []string{CapControlStream, CapGitState, CapArtifacts, CapSessionUID, CapRequestTokens, CapAttachFeatures, CapAttachReplace, CapAttachResync, CapRuntimeStats,
 		CapEvents, CapSessionActivity, CapSessionStatus, CapDaemonID, CapSessionRestart, CapWorkerHandoff, CapTerminalMemory, CapAttachScrollback, CapAttachSizeOwner,
-		CapAttachField, CapTerminalColors, CapAttachFrames, CapAttachCompose, CapKillExpectUID}
+		CapAttachField, CapTerminalColors, CapAttachFrames, CapAttachCompose, CapAttachFrameWindow, CapKillExpectUID, CapSSHAgent}
 }
 
 // AttachCapabilities are the capabilities that apply to an attach stream,
 // listed in AttachSession.Features.
 func AttachCapabilities() []string {
-	return []string{CapSessionUID, CapAttachReplace, CapAttachResync, CapSessionRestart, CapAttachScrollback, CapAttachSizeOwner, CapAttachField, CapTerminalColors, CapAttachFrames, CapAttachCompose}
+	return []string{CapSessionUID, CapAttachReplace, CapAttachResync, CapSessionRestart, CapAttachScrollback, CapAttachSizeOwner, CapAttachField, CapTerminalColors, CapAttachFrames, CapAttachCompose, CapAttachFrameWindow}
 }
 
 // AttachFeatures is the attach-stream features a client may ask for given

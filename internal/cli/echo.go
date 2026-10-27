@@ -392,8 +392,9 @@ type echoState struct {
 	// asked: it had gone when the field was last asked for, so the field
 	// can show it.
 	sent, asked bool
-	// seenFrom: under frames, the first frame whose field can show the
-	// key (protocol.FrameWindow past the last ack sent before it).
+	// seenFrom: under frames, the first ack a frame must have been built
+	// after for its field to show the key (the one after the last ack
+	// sent before it).
 	seenFrom uint32
 }
 
@@ -459,10 +460,11 @@ type echo struct {
 	// predicted rows are painted over each frame (overlay), and a probe
 	// asks for the field only, never a snapshot.
 	frames bool
-	// ackSeq is the last frame acknowledged, and staleThrough the last
-	// frame whose field predates an unpredicted key or a resize: under
-	// frames the field is in every frame, not an answer to a probe.
-	ackSeq, staleThrough uint32
+	// ackSeq is the last frame acknowledged, and staleBefore the first
+	// ack a frame must have been built after for its field not to predate
+	// an unpredicted key or a resize: under frames the field is in every
+	// frame, not an answer to a probe.
+	ackSeq, staleBefore uint32
 	// resend: after a reattach, the keys the next field proves missing
 	// are sent again; until it answers, every key waits in pending
 	// unpredicted (held), so that none overtakes them.
@@ -479,6 +481,79 @@ type echo struct {
 	focus      string
 	focusUntil time.Time
 	timer      *time.Timer
+	// rest is the screen under frames as it last was with the field
+	// empty: its rows and its field. An agent may lay the screen out
+	// differently while there is text (pi moves its box up over a menu
+	// of slash commands), so the key that empties the field again is
+	// drawn over this screen, with the box back where it was (restoring)
+	// until the agent's field replaces it.
+	rest      *echoRest
+	restoring bool
+}
+
+// echoRest is the screen with the field empty.
+type echoRest struct {
+	field *protocol.Field
+	rows  [][]byte
+}
+
+// wheelReport reports that raw is an SGR mouse report of the plain wheel
+// (button 64 to 67), which the painter predicts (screen.Painter.Wheel).
+func wheelReport(raw []byte) bool {
+	return len(raw) > 5 && string(raw[:4]) == "\x1b[<6" && raw[4] >= '4' && raw[4] <= '7' && raw[5] == ';'
+}
+
+// fieldEmpty reports that a field shows no text.
+func fieldEmpty(f *protocol.Field) bool {
+	for _, r := range f.Rows {
+		if r != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// sameBox reports whether two fields have their box in the same place.
+func sameBox(a, b *protocol.Field) bool {
+	return a.Lines == b.Lines && a.Cols == b.Cols && a.Top == b.Top && a.BoxTop == b.BoxTop && a.BoxBottom == b.BoxBottom
+}
+
+// screenShown notes the screen a frame left (its rows), with its field:
+// one with the field empty and nothing predicted is the rest screen,
+// which any other must still show above the box, where it was or moved
+// up with the box, else the agent has written since and it is dropped.
+func (e *echo) screenShown(f *protocol.Field, rows [][]byte) {
+	if e == nil || !e.frames || f == nil || !f.Found {
+		return
+	}
+	if fieldEmpty(f) {
+		if !e.holding() {
+			e.rest = &echoRest{field: f, rows: rows}
+		}
+		return
+	}
+	if e.rest != nil && !e.rest.above(f, rows) {
+		// The drawing stops painting the dropped screen; the frames
+		// correct the box it left.
+		e.rest, e.restoring = nil, false
+	}
+}
+
+// above reports whether rows show the rest screen above f's box.
+func (r *echoRest) above(f *protocol.Field, rows [][]byte) bool {
+	if len(rows) != len(r.rows) {
+		return false
+	}
+	n, shift := int(f.BoxTop), int(r.field.BoxTop)-int(f.BoxTop)
+	same := func(d int) bool {
+		for y := range n {
+			if y+d < 0 || y+d >= len(r.rows) || !bytes.Equal(rows[y], r.rows[y+d]) {
+				return false
+			}
+		}
+		return true
+	}
+	return same(0) || (shift != 0 && same(shift))
 }
 
 func newEcho(cfg echoConfig) *echo {
@@ -560,11 +635,16 @@ func (e *echo) key(ev keyEvent) (send []byte, drawn bool) {
 		// A wheel scroll, mouse motion, a focus change, a key
 		// release or a query reply edits no text, so the drawing
 		// stands and the field need not be asked for. It goes in
-		// order behind the keys still batched, or at once.
+		// order behind the keys still batched, or at once; a wheel
+		// tick takes the batch with it, since the painter draws its
+		// guess now and times the agent's answer from now.
 		if e.flushDue.IsZero() {
 			return ev.raw, false
 		}
 		e.pending = append(e.pending, ev.raw...)
+		if wheelReport(ev.raw) {
+			return e.flush(), false
+		}
 		return nil, false
 	}
 	if !e.active() || len(e.states) >= echoMaxStates {
@@ -578,6 +658,10 @@ func (e *echo) key(ev keyEvent) (send []byte, drawn bool) {
 		send = e.flush()
 		e.pause()
 		return send, false
+	}
+	if e.rest != nil && !e.restoring && len(e.text.lines) == 1 && len(e.text.lines[0]) == 0 && !sameBox(e.rest.field, e.field) {
+		// Emptied: the screen goes back to how it was when it last was.
+		e.field, e.restoring = e.rest.field, true
 	}
 	lay := layout(e.text, e.field)
 	e.states = append(e.states, echoState{rows: lay.texts(), cRow: lay.cRow, cCol: lay.cCol, key: ev})
@@ -668,9 +752,9 @@ func (e *echo) submits() bool {
 // pause stops drawing until the field is seen again: the agent's output
 // flows, and its own rendering takes over from the drawing.
 func (e *echo) pause() {
-	e.paused = true
+	e.paused, e.restoring = true, false
 	e.epoch++
-	e.staleThrough = e.ackSeq + protocol.FrameWindow
+	e.staleBefore = e.ackSeq + 1
 	e.states = nil
 	if e.painted {
 		e.dirty = true
@@ -705,7 +789,7 @@ func (e *echo) flush() []byte {
 		for i := range e.states {
 			if !e.states[i].sent {
 				e.states[i].sent = true
-				e.states[i].seenFrom = e.ackSeq + protocol.FrameWindow + 1
+				e.states[i].seenFrom = e.ackSeq + 1
 			}
 		}
 		e.probeDue = e.now().Add(echoProbeAfter)
@@ -805,24 +889,24 @@ func (e *echo) fieldAnswer(f *protocol.Field) (send, paint []byte) {
 	return e.reconcile(f)
 }
 
-// frameField takes the field in frame seq. The worker built that frame
-// after reading the ack of frame seq-protocol.FrameWindow, so it shows
-// the keys sent before that ack: those can confirm a prediction, and a
-// field from before an unpredicted key or a resize is ignored.
+// frameField takes the field in a frame the worker built after reading
+// the ack of frame acked (Frame.AckedBy), so it shows the keys sent before
+// that ack: those can confirm a prediction, and a field from before an
+// unpredicted key or a resize is ignored.
 //
 // A frame may also show keys it is not proven to: one built before that
 // ack but after the keys arrived. A field that equals only such a state
 // proves nothing either way, so it is ignored too. Either way the field
 // is asked for again, and each ask makes a frame, so one past both bounds
 // follows.
-func (e *echo) frameField(f *protocol.Field, seq uint32) (send, paint []byte) {
+func (e *echo) frameField(f *protocol.Field, acked uint32) (send, paint []byte) {
 	e.probing = false
-	ignore := seq <= e.staleThrough
+	ignore := acked < e.staleBefore
 	if !ignore {
 		proven, unproven := false, false
 		for i := range e.states {
 			st := &e.states[i]
-			st.asked = st.sent && seq >= st.seenFrom
+			st.asked = st.sent && acked >= st.seenFrom
 			if st.at(f) {
 				proven = proven || st.asked
 				unproven = unproven || (st.sent && !st.asked)
@@ -889,7 +973,7 @@ func (e *echo) reconcile(f *protocol.Field) (send, paint []byte) {
 	}
 	// Replay what is still owed over what the agent shows, so a cursor
 	// or a wrap the agent placed differently is predicted from there on.
-	e.field = f
+	e.field, e.restoring = f, false
 	e.text = textFromField(f)
 	e.states = nil
 	for _, st := range remaining {
@@ -902,7 +986,7 @@ func (e *echo) reconcile(f *protocol.Field) (send, paint []byte) {
 			// Sent on the lost connection, and not drawn: it never
 			// arrived. Those still batched go below, after it.
 			send = append(send, st.key.raw...)
-			next.seenFrom = e.ackSeq + protocol.FrameWindow + 1
+			next.seenFrom = e.ackSeq + 1
 		}
 		e.states = append(e.states, next)
 	}
@@ -979,7 +1063,7 @@ func (e *echo) suspend() (send []byte) {
 	e.noteHeld()
 	send = e.flush()
 	e.states = nil
-	e.paused = false
+	e.paused, e.restoring = false, false
 	e.painted = false
 	e.offset = 0
 	e.schedule()
@@ -989,8 +1073,8 @@ func (e *echo) suspend() (send []byte) {
 // resized: the field moved; ask again once the agent has redrawn.
 func (e *echo) resized() {
 	e.epoch++
-	e.staleThrough = e.ackSeq + protocol.FrameWindow
-	e.field = nil
+	e.staleBefore = e.ackSeq + 1
+	e.field, e.rest, e.restoring = nil, nil, false
 	e.states = nil
 	e.painted = false
 	e.offset = 0
@@ -1012,11 +1096,13 @@ func (e *echo) reattached() {
 	// arrived: the next one goes, whatever it repeats.
 	e.focus = ""
 	e.painted, e.dropped, e.dirty, e.offset = false, 0, false, 0
+	// The screen remembered with the field empty was the old attachment's.
+	e.rest, e.restoring = nil, false
 	e.probeDue = e.now()
 	e.probing, e.snapshotDue = false, false
 	// The new attachment's frames count from 1, and each shows whatever
 	// reached the agent on the lost one.
-	e.ackSeq, e.staleThrough = 0, 0
+	e.ackSeq, e.staleBefore = 0, 0
 	for i := range e.states {
 		e.states[i].seenFrom = 0
 	}
@@ -1054,6 +1140,12 @@ func (e *echo) paintRows(lay echoLayout) []byte {
 	f := e.field
 	lines := int(f.Lines)
 	var b bytes.Buffer
+	if e.restoring {
+		for y, row := range e.rest.rows {
+			b.WriteString(cup(y, 0) + ansiReset + "\x1b[K")
+			b.Write(row)
+		}
+	}
 	// Put the chrome back as it was.
 	chrome := map[int][]byte{}
 	first, last := int(f.BoxTop), int(f.BoxBottom)

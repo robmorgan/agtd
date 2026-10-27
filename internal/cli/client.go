@@ -711,6 +711,12 @@ func describeResponse(r *protocol.Response) string {
 		return "HandedOff"
 	case r.SessionRestarting != nil:
 		return "SessionRestarting"
+	case r.SSHAgentForwarding != nil:
+		return "SSHAgentForwarding"
+	case r.SSHAgentRequest != nil:
+		return "SSHAgentRequest"
+	case r.SSHAgentClose != nil:
+		return "SSHAgentClose"
 	}
 	return "unknown"
 }

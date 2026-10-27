@@ -30,6 +30,7 @@ Both binaries are one Go module at the repository root.
 | `internal/repo` | Read-only views of the git repository a session works in, for the daemon: git state, the diff and patch artifacts. Runs the system `git`; tests use real temporary repositories. |
 | `internal/transport` | The seam between the protocol and the network: `Stream` (one request or attach session), `Listener`, the shared accept loop, the Unix socket transport, and the QUIC transport with pinned-key identities (`quic-go`). `transporttest` has a UDP relay that tests use as the network. |
 | `internal/protocol` | The framed binary protocol and the small daemon management protocol, used by both binaries. Golden-frame tests pin the bytes. |
+| `internal/sshagent` | SSH agent protocol messages, for agent forwarding: framing with OpenSSH's 256 KiB bound, the filter of what a forwarded agent takes, key fingerprints, identities and sign requests, session bindings, host names from `known_hosts`. Pure Go, used by the worker and the CLI. |
 | `internal/session`, `internal/paths`, `internal/config` | The session model (and name rules), runtime-root resolution, and `config.toml`, shared by both binaries. |
 | `internal/db` | `state.db`: schema, the guarded session state transitions the daemon and workers use, and session events. Uses `modernc.org/sqlite` (pure Go). Only the daemon and its workers open it. |
 | `internal/procstat` | A process's resource usage from the OS (libproc on macOS, `/proc` on Linux) and the Go runtime's own numbers, for session stats and the bench. |
@@ -219,7 +220,9 @@ including the exec itself:
    (`waitid(WNOWAIT)` on Linux, kqueue `NOTE_EXIT` on macOS) and reaps under a lock the handoff
    holds until the exec, so the exit status is never collected by an image that is about to
    disappear; an agent that has already exited calls the handoff off.
-3. Stop accepting connections, keeping a duplicate of the listening socket.
+3. Stop accepting connections, keeping a duplicate of the listening socket, and the same for the
+   SSH agent socket, whose open connections are closed (an ssh in the middle of authenticating
+   fails once).
 4. End every attachment with `SessionRestarting` and wait for every connection handler.
 5. Stop the PTY pump. The pump waits for the PTY to be readable (`poll`, or `select` on macOS,
    whose `poll` does not support terminals) before each read rather than blocking in `read`, so it
@@ -232,6 +235,13 @@ including the exec itself:
 The new image (`session-worker --resume-fd`) restores the terminal, starts the owner, pump, agent
 watcher and accept loop, and answers the waiting `HandoffSession` with `HandedOff` (worker pid,
 executable, handoff count). A kill requested just before the exec is carried over.
+
+A session with an SSH agent socket (see "SSH Agent Forwarding") passes its listener the same way,
+so the path the agent's `SSH_AUTH_SOCK` names never stops listening, and writes its state as
+format 2. A binary from before agent sockets resumes only format 1, so the probe refuses it for
+such a session rather than leave the socket listening with nobody to answer, where every program
+asking for keys would hang; a session without the socket is still written as format 1, which any
+binary since handoff resumes.
 
 The shadow terminal crosses the exec as libghostty's binary snapshot (`Terminal.Snapshot`,
 decoded with `NewSnapshotDecoderBytes`): both screens and their scrollback, cursor, modes, title,
@@ -462,6 +472,7 @@ separate negotiation round trip is needed (`protocol.Request.Role`):
 | events | `SubscribeEvents` | `Event` frames, server to client, in id order: the backlog the request asked for, then live ones, until the client closes the stream |
 | artifact | `GetArtifact` | `ArtifactChunk` frames, then `EndOfStream` (or an `Error`: the artifact is incomplete). On a stream of its own, a large transfer never delays the control stream or an attachment |
 | artifact | `GetHistory` | one `History` response holding the whole history (the `history` artifacts stream the same content) |
+| ssh-agent | `ForwardSSHAgent` | `SSHAgentForwarding` (or `Error`), then `SSHAgentRequest` and `SSHAgentClose` from the worker and `SSHAgentReply` and `SSHAgentClose` from the client, until either side ends it or its attachment ends (see "SSH Agent Forwarding") |
 | management | a version-0 frame | one JSON response |
 
 This is the stream taxonomy, and each kind of traffic has its place in it: small commands share the
@@ -504,8 +515,10 @@ features both listed. Today there is one protocol version (1), and these capabil
 | `attach-field` | attach stream: `AttachField` asks where the program's input field is, answered with `Field` (see "The input field and local echo") |
 | `terminal-colors` | `CreateSession.Colors` and, on an attach stream, `AttachSession.Colors` carry the client terminal's default colours; the worker answers the program's OSC 10 and 11 queries with the most recent ones itself (see "Terminal queries") |
 | `attach-frames` | attach stream: the screen arrives as `AttachFrame`s instead of `PtyOutput`, each acknowledged with `AttachFrameAck`; `Attached.Snapshot` holds the scrollback rows only and `AttachSnapshot` is answered with a full frame (see "Screen frames") |
+| `attach-frame-window` | attach stream, with `attach-frames`: the worker sizes the frame window from the round trip (2 to `MaxFrameWindow`, 16), and every `AttachFrame` carries a trailing `Acked` u32, the last ack the worker had read when it built it (see "Screen frames") |
 | `attach-compose` | `SendInput.Compose` (written only when set, since the daemon forwards the request to the worker in the base encoding) and, on an attach stream, `AttachCompose`: a whole prompt, or Enter alone, encoded by the worker as the program's terminal modes ask for input (see "Composed input") |
 | `kill-expect-uid` | `KillSession.ExpectUID` appended after the token: the daemon refuses a stop or remove whose UID is not the session's current incarnation, so a remove confirmed in the inbox never deletes a newer session that reused the name |
+| `ssh-agent` | `ssh-agent` streams: `ForwardSSHAgent` and the messages on them. A worker lists it in its answer to `Hello` only when its agent was started with the worker's agent socket as `SSH_AUTH_SOCK` (see "SSH Agent Forwarding") |
 
 The protocol grows without breaking older peers this way: a new message kind, or a field appended
 to the end of an existing message or struct (a session record, even inside a list), comes with a
@@ -567,11 +580,14 @@ tokened request after a lost remote connection (see "Duplicate And Replayed Requ
 | `AttachFrameAck` | nothing; the next `AttachFrame` once the screen changes (`attach-frames`), on an attach stream | attach |
 | `AttachCompose` | nothing; the text and Enter are typed into the session as the program's modes ask (`attach-compose`), on an attach stream | attach |
 | `HandoffSession` | `HandedOff` (from the new image) | request, agtd to a worker only |
+| `ForwardSSHAgent` | `SSHAgentForwarding`, then `SSHAgentRequest` and `SSHAgentClose` frames, which the client answers with `SSHAgentReply` and `SSHAgentClose` (`ssh-agent`) | ssh-agent |
 
 Any request may instead be answered with `Error`. Kinds are numbered by area so that parallel work
 does not collide: 1-19 and 101-118 are the base protocol, 30-39 and 130-139 git state and
 artifacts, 50-59 and 150-159 attach streams (`AttachTakeSize` is 50, `AttachLeave` 51, `AttachField` 52,
-`AttachResync` 150, `AttachSizeOwner` 151, `Field` 152, `AttachFrameAck` 53, `AttachFrame` 153, `AttachCompose` 54), 60-69 and 160-169 worker handoff.
+`AttachResync` 150, `AttachSizeOwner` 151, `Field` 152, `AttachFrameAck` 53, `AttachFrame` 153, `AttachCompose` 54), 60-69 and 160-169 worker handoff,
+80-89 and 180-189 SSH agent forwarding (`ForwardSSHAgent` 80, `SSHAgentReply` 81, `SSHAgentClose`
+82 from the client and 182 from the worker, `SSHAgentForwarding` 180, `SSHAgentRequest` 181).
 
 `attach` is the bidirectional case. After the initial `AttachSession` request and `Attached`
 response (which carries a snapshot of the current screen), the worker streams `PtyOutput` frames
@@ -604,6 +620,9 @@ happened to a session: an id, the session, a time, a kind, an attention level (`
 | `done` | notice | the worker, when the program reports it finished (OSC 7501) |
 | `error` | action | the worker, when the program reports it failed and stopped (OSC 7501) |
 | `acknowledged` | info | the daemon, when the user looked at the session (below) |
+| `ssh_agent_signed` | info | the worker, for each signature a forwarded SSH agent gave a program in the session: what was signed (a login, as whom and to which host; an SSHSIG namespace), the key and the client (see "SSH Agent Forwarding") |
+| `ssh_agent_refused` | info | the worker, for a request a forwarded agent never takes (adding or removing keys, say), or a signature the client did not give |
+| `ssh_agent_unavailable` | info | the worker, when a program found no agent: once per gap in forwarding, and only in a session that has been forwarded to (never raises attention) |
 | `paired` | notice | the daemon, when a machine paired with a one-time code (host event) |
 | `pair_failed` | notice | the daemon, when a pairing window closed after 3 wrong codes; the summary names the last address that guessed (host event) |
 | `authorized` | notice | `agtd remote authorize`, when it adds a key (host event) |
@@ -776,7 +795,11 @@ over ssh) or has `TERM=dumb` (a login shell there): the agent's terminal is the 
 terminal whatever started the daemon, and without this an agent turns colour off. A `TERM` the
 environment names on purpose is kept. The daemon socket is deliberately not passed in.
 That is not a boundary: agents run as the socket owner and can still find the socket at its
-well-known path, so isolating them needs a sandbox around the agent process.
+well-known path, so isolating them needs a sandbox around the agent process. With `[ssh_agent]
+session_socket` (the default) the worker also binds the session's SSH agent socket before the
+agent starts and sets `SSH_AUTH_SOCK` to it (see "SSH Agent Forwarding"); without it the agent
+inherits the daemon's `SSH_AUTH_SOCK`, which on a devbox is often missing or stale: that of
+whichever ssh login started or upgraded the daemon.
 
 The daemon does not manage git worktrees or branches. That responsibility sits with whatever starts
 the session (the user, a wrapper, a skill, or the agent itself); the README shows the worktree
@@ -971,7 +994,9 @@ viewer, a phone, say, never reflows the agent's screen for everyone by attaching
   owner's reattach inherits the size by `Replaces`. If the owner has not come back within 10
   seconds, the most recently used attachment takes over; so does it when an owner's CLI is killed
   outright. A client without `attach-size-owner` never sends `AttachLeave`, and its end hands the
-  size on at once.
+  size on at once. A remote CLI that is about to close its connection (a detach, not a switch)
+  waits, at most a second, for the worker to end the stream after its `AttachLeave`: closing a
+  QUIC connection drops what has not been sent yet, and a lost `AttachLeave` would read as a cut.
 
 With `attach-size-owner`, a client hears who owns the size: `Attached` carries the ownership, and
 the worker sends `AttachSizeOwner` whenever the owner or the session's size changes. Each
@@ -1096,7 +1121,8 @@ that moves its box while the user types is corrected at the next field. Keys typ
 reconnect are still dropped. Frames (the next phase of the design) remove the hold and the
 repaint by composing the drawing over the agent's live screen.
 
-**Composed input.** A script, or the overlay's Submit and switch, has a whole prompt rather than
+**Composed input.** A script, or the overlay's Submit and switch (offered with `[attach]
+submit_and_switch`), has a whole prompt rather than
 keystrokes, and only the worker knows how the program asked to receive input. `agt send-input
 --compose` (`SendInput.Compose`) and the attach stream's `AttachCompose` (both `attach-compose`)
 hand the worker the text, which it encodes on the owner goroutine from the terminal's modes
@@ -1127,7 +1153,16 @@ least 4 ms after the last, on the owner goroutine at a sequence boundary. At mos
 in flight per attachment (one would make a change landing just after a frame wait a whole round
 trip, and a shell echoes a typed word in several writes): a slow link gets fewer, fresher frames,
 never a queue of stale output and never a drop, and the worker keeps one screen's worth of row
-cache per attachment and nothing else. `agt
+cache per attachment and nothing else. Two in flight allow two frames per round trip, 10 a second
+at 200 ms, so a client that asks for `attach-frame-window` gets a window the worker sizes from
+the minimum round trip it measures between a frame and its ack over the last 10 s: one frame per
+16 ms of it, plus one, between 2 and 16 (`frameRTT` in `internal/worker/frames.go`). The minimum
+and not the mean, since queueing delay raises the mean and a window grown from it would queue
+more. A sized window no longer says from a frame's number which ack it was built after, so each of
+its frames carries that ack (`Frame.Acked`; `Frame.AckedBy` derives it from the fixed window
+otherwise), and the local echo judges frames by it. A frame waits, up to 150 ms
+(`frameSyncHold`), for a program inside a synchronized-output block (mode 2026) to end it, so it
+never shows half a repaint; the session's final frame does not wait. `agt
 attach` asks for frames from a remote daemon and takes the raw output from the local one (`[attach]
 mode`, "auto"; "frames" or "raw" force it), and `agt bench echo --mode` measures either.
 
@@ -1147,9 +1182,11 @@ has an echo) and either the program has settled (`fieldSettle`) or the client ty
 500 ms, so keys typed during a streaming answer are still confirmed. The echo composes over frames:
 while keys are unconfirmed its predicted rows are painted after each frame's rows, and the frame's
 field reconciles the queue, so output is never held and the screen behind the typing keeps moving.
-A frame's field is not an answer to a probe, so what it proves comes from the window: the worker
-reads requests in order and builds frame N only after reading the ack of frame N-2
-(`protocol.FrameWindow`), so frame N shows every key the client sent before that ack. Only those
+A frame's field is not an answer to a probe, so what it proves comes from the ack it was built
+after: the worker reads requests in order, and under `attach-frame-window` each frame carries
+`Acked`, the last ack the worker had read when it built it; without it the window is 2, so frame N
+was built after reading the ack of frame N-2 (`protocol.FrameWindow`). Either way the frame shows
+every key the client sent before that ack. Only those
 keys can be confirmed by it. A field that equals only a later prediction may or may not show it
 and is ignored, and so is a frame built before an unpredicted key or a resize could reach the
 worker; the field is then asked for again, and each ask makes a frame, so a frame past both bounds
@@ -1160,6 +1197,63 @@ reattaches and starts from a full frame. The recorded streams in `internal/worke
 replayed frame by frame through the painter into a second libghostty terminal and compared cell
 for cell (`TestFramesReplayStreams`); what differs is what the formatter cannot express (see "The
 reattach snapshot").
+
+## SSH Agent Forwarding
+
+A program in a session (an agent running `git push`, `ssh`, or signing a commit) can use the SSH
+keys of the machine the user attaches from, as `ssh -A` gives a devbox, without tying the session
+to a connection (`internal/worker/sshagent.go`, `internal/cli/sshagent.go`, `internal/sshagent`;
+the design and its later phases are in `docs/designs/ssh-agent-forwarding.md`). The private key
+never leaves that machine: what crosses the wire is the SSH agent protocol (draft-miller-ssh-agent),
+programs asking for public keys and signatures, relayed whole on a stream of its own.
+
+Every session the daemon starts gets its own agent socket, `ssh/<uid>.sock` in the root
+(`[ssh_agent] session_socket`, on by default). The worker binds it before the agent starts and
+names it in the agent's `SSH_AUTH_SOCK`. The socket belongs to the session, as the PTY does, and
+stays put across reattaches, daemon restarts and live handoffs; it is named by the UID, so a
+process left over from an earlier incarnation of the name never reaches a later one's keys. What
+answers on it does not belong to the session: each connection a program opens is routed, on its
+first message, to
+
+1. the forwarder of the attachment that owns the session's size (see "Size ownership"): taking
+   over the size takes the keys along, and a pending attachment's forwarder is not used;
+2. else, while the owner's id is reserved for its reattach and the owner was forwarding, nowhere
+   yet: the connection waits, at most the reservation's 10 seconds, for the reattached owner's
+   forwarder, so a push made during a daemon restart or a dropped connection goes through once
+   the client is back;
+3. else the agent the worker inherited (the daemon environment's `SSH_AUTH_SOCK`), relayed byte
+   for byte and unfiltered, as sessions got before;
+4. else no agent: an empty identities answer, and `SSH_AGENT_FAILURE` to anything else, so ssh
+   carries on with its own key files.
+
+A connection keeps its route until it closes, even when ownership moves, since the client's agent
+keeps state per connection (the session bindings below).
+
+A forwarder is an `ssh-agent` stream (`ForwardSSHAgent`, `internal/protocol/sshagent.go`) that
+`agt` opens beside every attachment when `[ssh_agent] forward` is set: `agt attach`, `agt new`,
+the inbox, the overlay's switch, and again after every reattach. It names its attachment and ends
+with it. It opens a moment after the attachment, since attaching does not wait for it, and a connection made
+in that moment (outside a reattach, where the wait above covers it) gets the fallback. The daemon
+checks the incarnation (`ExpectUID`) and that the worker has a socket, sets `Client` to who the
+connection is (the client key's name and fingerprint, or `local`), and then copies bytes as for an
+attach. The worker sends each program's messages as `SSHAgentRequest` frames tagged with the
+connection's number; `agt` answers each with `SSHAgentReply` from its own agent (`[ssh_agent]
+agent`, else `$SSH_AUTH_SOCK`), holding one connection to it per program connection, and
+`SSHAgentClose` from either side ends one. `agt` decides what passes: only listing keys, signing,
+and the `session-bind@openssh.com` and `query` extensions reach the user's agent, so nothing on
+the devbox can add, remove or lock keys, and `[ssh_agent] keys` limits the keys offered and used.
+The worker refuses the rest too, to spare the round trip.
+
+Signatures, refusals, and a program finding no agent (once per gap in forwarding, and only in a
+session that has been forwarded to) are info events, `ssh_agent_signed`, `ssh_agent_refused` and
+`ssh_agent_unavailable`, naming the key, the client and what was signed: a login, as whom and to
+which host (the host key ssh binds the connection to, named from the devbox's `known_hosts` when it
+can be), or an SSHSIG namespace such as git's. They never raise attention.
+
+The exposure is that of `ssh -A`: while a forwarding attachment owns a session's size, any process
+running as the daemon's user on that host can ask for signatures (agents are not sandboxed, and
+every session's socket is reachable), and it ends with the attachment. Checking where a key is used
+(only github.com, say) and asking the user are the design's next phase.
 
 ## Duplicate And Replayed Requests
 
@@ -1217,7 +1311,8 @@ repaints from a snapshot anyway. If output keeps arriving faster than the client
 a resync each time it drains, which keeps it as current as its link allows. A frame client
 (`attach-frames`, see "Screen frames") has no queue to overflow: it is sent one frame at a time
 and the next is built from the screen as it is once all but the newest are acknowledged, so it
-falls behind by at most two frames and is never dropped or resynced; one that stops reading
+falls behind by at most its window (2, or up to 16 under `attach-frame-window`) and is never
+dropped or resynced; one that stops reading
 altogether leaves the worker blocked writing a frame to it with nothing queued behind, and is
 released when its connection goes (`TestStalledFrameClientIsBounded`: 67 MB through the PTY with
 the worker's heap flat). A raw client that stalls
@@ -1236,6 +1331,24 @@ dedicated writer. An agent that stops reading its input therefore never stalls P
 requests. Once the queue is full, further input is refused with an error until the agent catches
 up: `send-input` gets the error, and an attachment ends with it rather than silently dropping
 keystrokes.
+
+SSH agent forwarding (see "SSH Agent Forwarding") is bounded at every stage:
+
+| Stage | Bound | When exceeded |
+|---|---|---|
+| One agent message, either way | 256 KiB, OpenSSH's own limit | the connection is closed |
+| Program connections per session (worker) | 16 open at once | further ones are closed as they arrive; ssh carries on without an agent |
+| Requests in flight per program connection | 1: the worker reads the next request only after writing the reply | n/a |
+| Forwarders | one per attachment, ending with it | a second is refused |
+| Waiting for the owner's reattach | 10 s, the size owner's reservation | the connection is routed as ownership then stands |
+| Waiting for a client's reply (worker) | 90 s, room for a confirmation the user's agent asks for over a slow link | `SSH_AGENT_FAILURE` to the program, `SSHAgentClose` to the client, and the connection is closed |
+| A write to a forwarder (worker) | 10 s | the forwarder is dropped and its requests fail |
+| Local agent connections (CLI) | 16, one per program connection, dialled within 2 s | `SSHAgentClose` |
+
+So a forwarder can make the worker hold at most 16 messages of 256 KiB, and in practice a few
+hundred bytes each. A client that stops reading stalls only the program connections routed to it,
+and only until the write deadline, never the PTY, attachments or other forwarders, since each
+forwarder is its own stream.
 
 ## Multiple Hosts
 
@@ -1360,6 +1473,8 @@ The selected root contains:
   milliseconds.
 * `sessions/` (one socket per live session; a handoff's state file is created here and unlinked
   at once, living on only as a descriptor inherited by the new image)
+* `ssh/` (one SSH agent socket per live session, `<uid>.sock`; a starting daemon removes those of
+  incarnations that are no longer running, left by workers that were killed)
 * `agtd.log` (output of a daemonized daemon)
 * `remote/` (`daemon.key`, `authorized_clients`, and the CLI's `client.key`)
 * `hosts.toml` (remote hosts known to the CLI, with pinned daemon keys)

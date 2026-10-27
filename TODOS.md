@@ -141,6 +141,40 @@ unreliable; input itself stays on a reliable ordered stream.
 **Priority:** P3
 **Depends on:** None
 
+### Keep the alt scrollback prototype's rows across the overlay, detach and exit
+
+**What:** With `[attach] alt_scrollback = true`, three paths lose or damage
+what the terminal's scrollback should hold:
+- Rows the agent scrolls off while the Ctrl-Y overlay is open become
+  `History` in the painter, but the overlay owns the alternate screen and the
+  paint is thrown away; closing it restores a full frame that the record has
+  already seen, so those rows never reach the scrollback.
+- Detach and switch write `?1049l` and clear the screen, which erases the last
+  screen from the primary screen the prototype paints on.
+- When the session exits, the closing repaint overwrites the last screen.
+**Why:** The prototype's promise is that the terminal's scrollback holds the
+whole transcript; each path leaves a gap or an erased screen in it.
+**Context:** Found by the PR #81 pre-landing review and deferred to Phase 3
+(docs/designs/alt-screen-scrollback.md), since the mirror mode
+(`alt_scrollback = false`) is the default and the worker record changes how
+the record is seeded. For the overlay: keep the History produced while it is
+open and write it after `ov.leave()`, before the restored frame.
+**Effort:** M
+**Priority:** P2
+**Depends on:** Phase 3 (the worker record)
+
+### Measure the per-frame costs of the record and the overlay backdrop
+
+**What:** `RowKey` is computed for every row of every alternate-screen frame,
+and the overlay repaints the whole backdrop on every frame while it is open.
+**Why:** Both are linear in the screen per frame; neither has been measured
+against a fast-scrolling agent on a large terminal.
+**Context:** Noted by the PR #81 performance review. Cache keys for rows the
+frame did not change; repaint only the backdrop rows a frame changed.
+**Effort:** S
+**Priority:** P3
+**Depends on:** A benchmark showing either matters
+
 ## Completed
 
 ### Keep the echo paused when input pauses it during a field probe

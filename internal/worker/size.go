@@ -41,7 +41,8 @@ func (s *ownerState) ownership(attachID string) protocol.SizeOwnership {
 	return protocol.SizeOwnership{Owner: attachID == s.sizeOwner, OwnerID: s.sizeOwner, Geometry: s.geometry}
 }
 
-// notifySize tells every attachment that the ownership or size changed.
+// notifySize tells every attachment that the ownership or size changed, and
+// wakes agent connections waiting for the owner's forwarder (sshagent.go).
 func (s *ownerState) notifySize() {
 	for _, a := range s.attachments {
 		select {
@@ -49,6 +50,7 @@ func (s *ownerState) notifySize() {
 		default:
 		}
 	}
+	s.agentChanged()
 }
 
 func hasSize(g protocol.Geometry) bool { return g.Cols != 0 && g.Rows != 0 }

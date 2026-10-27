@@ -37,6 +37,9 @@ func seedFrames(f *testing.F) {
 		{AttachTakeSize: &Geometry{Cols: 120, Rows: 40}},
 		{AttachLeave: Empty},
 		{AttachField: Empty},
+		{ForwardSSHAgent: &ForwardSSHAgent{SessionID: "ab", ExpectUID: "u", Attachment: "attach-1", Client: "local", Features: []string{"f"}}},
+		{SSHAgentReply: &SSHAgentMessage{Conn: 2, Data: []byte{12, 0, 0, 0, 0}}},
+		{SSHAgentClose: &SSHAgentConn{Conn: 2}},
 	}
 	resps := []*Response{
 		{Welcome: &Welcome{Version: 1, Capabilities: []string{CapControlStream}, Host: HostInfo{Agents: []string{"a"}}}},
@@ -45,6 +48,7 @@ func seedFrames(f *testing.F) {
 		{Attached: &Attached{AttachID: "attach-1", Features: []string{CapSessionUID, CapAttachResync}, SessionUID: "u"}},
 		{AttachResync: &Bytes{Data: []byte("\x1b[2J")}},
 		{AttachFrame: &Frame{Seq: 2, Full: true, Cols: 80, Lines: 24, Scrolled: 1, CursorRow: 3, CursorCol: 4, CursorShape: 5, Prefix: []byte("\x1b[?2004h\x1b[H"), Keyboard: []byte("\x1b[=1;1u"), Colors: []byte("\x1b]11;#000000\x1b\\"), Effects: []byte("\a"), Field: &Field{Cols: 80, Lines: 24}, Rows: []FrameRow{{Index: 0, VT: []byte("$ ")}, {Index: 1}}, History: [][]byte{[]byte("gone"), nil}}},
+		{AttachFrame: &Frame{Seq: 4, Acked: 2, HasAcked: true}},
 		{AttachSizeOwner: &SizeOwnership{Owner: true, OwnerID: "attach-1", Geometry: Geometry{80, 24, 0, 0}}},
 		{Field: &Field{Found: true, Cols: 120, Lines: 40, Alternate: true, Row: 36, Col: 2, TextCol: 2, Width: 117, GrowsUp: true,
 			Rows: []string{"hello"}, Style: []byte("\x1b[0m"), Chrome: []ScreenRow{{Index: 35, VT: []byte("\u2500")}}}},
@@ -60,6 +64,9 @@ func seedFrames(f *testing.F) {
 		{Events: &[]session.Event{{ID: 1, SessionID: "ab", At: now, Kind: "future-kind", Attention: session.AttentionInfo}}},
 		{HandedOff: &HandedOff{SessionID: "ab", WorkerPID: 7, Executable: "/bin/agtd", Handoffs: 1}},
 		{SessionRestarting: &SessionRestarting{SessionID: "ab", Reason: "upgrade"}},
+		{SSHAgentForwarding: &SSHAgentForwarding{Features: []string{"f"}}},
+		{SSHAgentRequest: &SSHAgentMessage{Conn: 1, Data: []byte{11}}},
+		{SSHAgentClose: &SSHAgentConn{Conn: 1}},
 	}
 	for _, r := range reqs {
 		var buf bytes.Buffer

@@ -3,11 +3,15 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -19,6 +23,7 @@ type Config struct {
 	Remote       RemoteConfig           `toml:"remote"`
 	Attach       AttachConfig           `toml:"attach"`
 	Composer     ComposerConfig         `toml:"composer"`
+	SSHAgent     SSHAgentConfig         `toml:"ssh_agent"`
 
 	// agentOrder lists the Agents keys in file order, which a map loses.
 	agentOrder []string
@@ -44,7 +49,24 @@ type AttachConfig struct {
 	// from a remote daemon, the raw output from the local one), "frames"
 	// or "raw". Unset means auto. See ARCHITECTURE.md, "Screen frames".
 	Mode string `toml:"mode"`
+	// AltScrollback, under frames, keeps the terminal on the primary
+	// screen while an agent runs on the alternate one and pushes the rows
+	// that leave the top of its transcript into the terminal's own
+	// scrollback. A prototype, off unless set: it applies to every
+	// program on the alternate screen. See
+	// docs/designs/alt-screen-scrollback.md.
+	AltScrollback bool `toml:"alt_scrollback"`
+	// PredictWheel, under frames, draws a wheel tick over the transcript
+	// of an agent on the alternate screen at once, and lets the agent's
+	// frames correct it, with or without AltScrollback. Unset means on.
+	PredictWheel *bool `toml:"predict_wheel"`
+	// SubmitAndSwitch offers Submit and switch first in the Ctrl-Y
+	// palette (so Ctrl-Y, Enter is it). Hidden unless set.
+	SubmitAndSwitch bool `toml:"submit_and_switch"`
 }
+
+// WheelPredicted is PredictWheel with its default applied.
+func (a AttachConfig) WheelPredicted() bool { return a.PredictWheel == nil || *a.PredictWheel }
 
 // AttachMode is Mode with its default applied.
 func (a AttachConfig) AttachMode() string {
@@ -100,6 +122,59 @@ func (c ComposerConfig) EchoFlushAfter() time.Duration {
 		return DefaultFlushAfter
 	}
 	return d
+}
+
+// SSHAgentConfig is SSH agent forwarding: a client lends its SSH agent to
+// the sessions it drives (docs/designs/ssh-agent-forwarding.md). The daemon
+// reads SessionSocket; agt reads the rest.
+type SSHAgentConfig struct {
+	// SessionSocket gives each new session its own agent socket, which the
+	// agent's SSH_AUTH_SOCK names: it answers from the agent of the client
+	// that drives the session, else from the agent the daemon was started
+	// with. Unset means true; false leaves SSH_AUTH_SOCK as the daemon
+	// inherited it.
+	SessionSocket *bool `toml:"session_socket"`
+	// Forward makes every attachment agt opens forward this machine's
+	// agent: attach, new, the inbox, the overlay's switch and every
+	// reattach. Off by default.
+	Forward bool `toml:"forward"`
+	// Agent is the socket of the agent forwarded; empty means
+	// $SSH_AUTH_SOCK. A leading ~/ is the home directory.
+	Agent string `toml:"agent"`
+	// Keys are the SHA256 fingerprints of the keys offered (as `ssh-add -l`
+	// prints them); empty offers every key the agent holds.
+	Keys []string `toml:"keys"`
+}
+
+// SessionSocketEnabled is SessionSocket with its default applied.
+func (c SSHAgentConfig) SessionSocketEnabled() bool {
+	return c.SessionSocket == nil || *c.SessionSocket
+}
+
+// AgentSocket is the socket of the agent to forward, or "" when there is
+// none: Agent, else $SSH_AUTH_SOCK.
+func (c SSHAgentConfig) AgentSocket() string {
+	path := c.Agent
+	if path == "" {
+		return os.Getenv("SSH_AUTH_SOCK")
+	}
+	if rest, ok := strings.CutPrefix(path, "~/"); ok {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, rest)
+		}
+	}
+	return path
+}
+
+// validFingerprint reports whether s is a SHA256 key fingerprint as OpenSSH
+// prints it.
+func validFingerprint(s string) bool {
+	b64, ok := strings.CutPrefix(s, "SHA256:")
+	if !ok {
+		return false
+	}
+	sum, err := base64.RawStdEncoding.DecodeString(b64)
+	return err == nil && len(sum) == sha256.Size
 }
 
 type AgentConfig struct {
@@ -167,6 +242,18 @@ scrollback_rows = 1000
 # How the screen reaches the terminal: "auto" (screen frames from a remote
 # daemon, the raw output from the local one), "frames" or "raw".
 mode = "auto"
+# Under frames, keep the terminal on the primary screen while an agent runs
+# on the alternate one (Claude Code, Codex), and push the rows that leave
+# the top of its transcript into this terminal's own scrollback. A
+# prototype: it applies to every program on the alternate screen.
+alt_scrollback = false
+# Under frames, the wheel over the transcript of an agent on the alternate
+# screen scrolls it at once, and the agent's own screen corrects the guess
+# when it arrives.
+#predict_wheel = true
+# Offer Submit and switch in the Ctrl-Y palette, first (so Ctrl-Y, Enter):
+# Enter goes to the agent and you move to the session that needs attention.
+#submit_and_switch = false
 
 # Typing in "agt attach" is drawn in the agent's own input field at once
 # and sent as typed, batched for at most flush_after ("0" sends every key
@@ -175,6 +262,16 @@ mode = "auto"
 [composer]
 enabled = true
 flush_after = "50ms"
+
+# SSH agent forwarding. Each new session gets its own SSH_AUTH_SOCK
+# (session_socket), which answers from the agent of the client driving the
+# session, else from the agent agtd was started with. forward = true lends
+# this machine's agent (agent = "path", else $SSH_AUTH_SOCK) to every
+# session "agt attach" drives; keys = ["SHA256:..."] limits the keys it
+# offers to those listed.
+[ssh_agent]
+session_socket = true
+forward = false
 `
 
 func defaultConfig() *Config {
@@ -227,6 +324,11 @@ func Load(path string) (*Config, error) {
 		d, err := time.ParseDuration(f)
 		if err != nil || d < 0 || d > MaxFlushAfter {
 			return nil, fmt.Errorf("[composer] flush_after must be a duration between 0 and %s in %s", MaxFlushAfter, path)
+		}
+	}
+	for _, fp := range cfg.SSHAgent.Keys {
+		if !validFingerprint(fp) {
+			return nil, fmt.Errorf("[ssh_agent] keys: `%s` is not a key fingerprint (SHA256:..., as `ssh-add -l` prints it) in %s", fp, path)
 		}
 	}
 	if len(cfg.Agents) > 0 {

@@ -75,6 +75,9 @@ type env struct {
 	t    *testing.T
 	root string
 	work string
+	// extraEnv is added to agt's environment, and so the daemon's it
+	// starts.
+	extraEnv []string
 }
 
 func newEnv(t *testing.T, extraConfig string) *env {
@@ -96,7 +99,7 @@ func newEnv(t *testing.T, extraConfig string) *env {
 }
 
 func (e *env) environ() []string {
-	return append(os.Environ(), "AGTD_DIR="+e.root, "AGTD_BIN="+filepath.Join(binDir, "agtd"), "TERM=xterm-256color", "PS1=$ ")
+	return append(append(os.Environ(), "AGTD_DIR="+e.root, "AGTD_BIN="+filepath.Join(binDir, "agtd"), "TERM=xterm-256color", "PS1=$ "), e.extraEnv...)
 }
 
 // run runs a command without a terminal and returns its output.
@@ -311,10 +314,11 @@ func TestAttachEndToEnd(t *testing.T) {
 	tm.write("stty size\r")
 	m = tm.expect(m, "40 120")
 
-	// Ctrl-\ detaches and puts the terminal back.
+	// Ctrl-\ detaches, puts the terminal back and says where to attach
+	// again.
 	tm.write("\x1c")
 	tm.wait()
-	if out := tm.output(); !strings.HasSuffix(out, restoreSequence+detachSequence+"\x1b]0;agtd\x07\x1b]2;agtd\x07") {
+	if out := tm.output(); !strings.HasSuffix(out, restoreSequence+detachSequence+"detached from local/demo\r\n\x1b]0;agtd\x07\x1b]2;agtd\x07") {
 		t.Fatalf("detach did not restore the terminal:\n%q", out[max(len(out)-200, 0):])
 	}
 
@@ -367,11 +371,11 @@ func TestAttachEndToEnd(t *testing.T) {
 	}
 }
 
-// Ctrl-Y, Enter submits what was typed and moves to the session that needs
-// attention, or stays when none does; agt send-input --compose sends a whole
+// Ctrl-Y, Enter (with [attach] submit_and_switch) submits what was typed
+// and moves to the session that needs attention, or stays when none does; agt send-input --compose sends a whole
 // prompt with Enter.
 func TestSubmitAndSwitchEndToEnd(t *testing.T) {
-	e := newEnv(t, "")
+	e := newEnv(t, "\n[attach]\nsubmit_and_switch = true\n")
 	e.startAndDetach("other")
 	tm := e.start("new", "demo")
 	m := tm.expect(0, "attached to demo")

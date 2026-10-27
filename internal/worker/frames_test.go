@@ -614,3 +614,120 @@ func heapInUse() uint64 {
 	goruntime.ReadMemStats(&ms)
 	return ms.HeapInuse
 }
+
+// A sized window follows the minimum round trip: two frames until one is
+// measured, one more per frameInterval of it, at most MaxFrameWindow; a
+// slower sample replaces the minimum only once it has stood frameRTTSpan.
+func TestFrameRTTWindow(t *testing.T) {
+	var r frameRTT
+	if got := r.window(); got != frameWindow {
+		t.Fatalf("unmeasured window %d", got)
+	}
+	now := time.Now()
+	sample := func(seq uint32, rtt time.Duration) uint32 {
+		r.sent(seq, now)
+		now = now.Add(rtt)
+		r.acked(seq, now)
+		return r.window()
+	}
+	if got := sample(1, 200*time.Millisecond); got != 14 {
+		t.Fatalf("200 ms: window %d", got)
+	}
+	if got := sample(2, 40*time.Millisecond); got != 4 {
+		t.Fatalf("40 ms: window %d", got)
+	}
+	if got := sample(3, 300*time.Millisecond); got != 4 {
+		t.Fatalf("a slower sample replaced the minimum at once: window %d", got)
+	}
+	now = now.Add(frameRTTSpan)
+	if got := sample(4, 900*time.Millisecond); got != protocol.MaxFrameWindow {
+		t.Fatalf("900 ms after the span: window %d", got)
+	}
+	if got := sample(5, time.Millisecond); got != frameWindow {
+		t.Fatalf("1 ms: window %d", got)
+	}
+	// An ack of a frame not in the record (a stale or repeated seq) is no
+	// sample.
+	r.acked(5+protocol.MaxFrameWindow, now.Add(time.Hour))
+	if got := r.window(); got != frameWindow {
+		t.Fatalf("a foreign ack moved the window to %d", got)
+	}
+}
+
+// Through the worker: a client that asked for CapAttachFrameWindow gets
+// frames saying which ack they follow, two in flight until a round trip is
+// measured, then a window sized from it; one that did not gets neither.
+func TestFrameWindowFollowsTheRoundTrip(t *testing.T) {
+	const script = `stty -echo; read go; while :; do echo line $RANDOM; done`
+	h := startWorkerWith(t, script)
+	plain, _ := h.attachWith(protocol.AttachSession{Features: []string{protocol.CapAttachFrames}})
+	c, _ := h.attachWith(protocol.AttachSession{Features: []string{protocol.CapAttachFrames, protocol.CapAttachFrameWindow}})
+	if f := plain.readFrame(); f.HasAcked {
+		t.Fatalf("a client without the capability got Acked %d", f.Acked)
+	}
+	f := c.readFrame()
+	if !f.HasAcked || f.Acked != 0 || f.Seq != 1 {
+		t.Fatalf("first frame: seq %d acked %d (%v)", f.Seq, f.Acked, f.HasAcked)
+	}
+	c.input("go\n")
+	if f = c.readFrame(); f.Seq != 2 || f.Acked != 0 {
+		t.Fatalf("second frame: seq %d acked %d", f.Seq, f.Acked)
+	}
+	c.expectNoFrame(100 * time.Millisecond)
+	// A round trip of over 300 ms: the window is MaxFrameWindow past the
+	// ack, and every frame after it says it follows that ack.
+	time.Sleep(250 * time.Millisecond)
+	c.ack(1, false)
+	for seq := uint32(3); seq <= 1+protocol.MaxFrameWindow; seq++ {
+		if f = c.readFrame(); f.Seq != seq || f.Acked != 1 {
+			t.Fatalf("frame %d: seq %d acked %d", seq, f.Seq, f.Acked)
+		}
+	}
+	c.expectNoFrame(200 * time.Millisecond)
+	c.ack(f.Seq, false)
+	if f = c.readFrame(); f.Acked != 1+protocol.MaxFrameWindow {
+		t.Fatalf("after the window's ack: seq %d acked %d", f.Seq, f.Acked)
+	}
+}
+
+// Through the worker: a frame waits for a program's synchronized-output
+// block to end, so it never shows half a repaint, and a block the program
+// never ends holds it only frameSyncHold.
+func TestFrameWaitsForSyncOutput(t *testing.T) {
+	// Value: protects=a frame client never paints half of a mode-2026
+	// repaint, and still gets the screen when a program leaves the mode
+	// set; fails_when=sendFrame ignores frameHold, or the held frame's
+	// timer is never armed; why_new=TestFrameHoldsForSyncOutput checks
+	// frameHold on a rig, not serveAttach; seam=none; no_claim=timing on
+	// a loaded machine beyond the bounds asserted.
+	for _, c := range []struct {
+		name, script, want string
+		ends               bool
+	}{
+		{"ended", `stty -echo; read go; printf '\033[?2026hhalf'; sleep 0.08; printf ' done\033[?2026l'; read x`, "half done", true},
+		{"left set", `stty -echo; read go; printf '\033[?2026hstuck'; read x`, "stuck", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := startWorkerWith(t, c.script)
+			cl, _ := h.attachWith(protocol.AttachSession{Features: []string{protocol.CapAttachFrames}})
+			cl.readFrame()
+			cl.ack(1, false)
+			start := time.Now()
+			cl.input("go\n")
+			for {
+				f := cl.readFrame()
+				text := frameText(f)
+				if c.ends && strings.Contains(text, "half") && !strings.Contains(text, "half done") {
+					t.Fatalf("a frame showed half the repaint: %q", text)
+				}
+				if strings.Contains(text, c.want) {
+					if !c.ends && time.Since(start) < frameSyncHold/2 {
+						t.Fatalf("the screen came %v into a block the program never ended", time.Since(start))
+					}
+					return
+				}
+				cl.ack(f.Seq, false)
+			}
+		})
+	}
+}

@@ -87,6 +87,16 @@ type attachResult struct {
 	next    string                 // outcomeSwitch
 }
 
+// sessionAddress is how to name a session of this client's host to attach
+// to it again: HOST/NAME, or local/NAME on the local daemon.
+func (c *client) sessionAddress(id string) string {
+	host := c.remoteName()
+	if host == "" {
+		host = localHostName
+	}
+	return escapeControls(host + "/" + id)
+}
+
 // attachSession attaches the terminal to a session until the user detaches
 // or the session ends, following switches to other sessions on the way.
 func (c *client) attachSession(id string) error {
@@ -123,6 +133,9 @@ func (c *client) attachLoop(id, uid string) (ended *protocol.SessionEnded, err e
 		case outcomeSwitch:
 			id, uid = res.next, ""
 		default:
+			if !c.fromInbox {
+				fmt.Fprintf(os.Stderr, "detached from %s\n", c.sessionAddress(id))
+			}
 			return nil, nil
 		}
 	}
@@ -209,13 +222,44 @@ func (a *attachStream) send(req *protocol.Request) error { return protocol.Write
 // next attachment takes over at once, then stops the stream. A stream that
 // was cut is stopped without it, which keeps the size reserved for its
 // reattach.
-func (a *attachStream) leave() {
+//
+// With flush, it first waits, at most leaveFlushTimeout, for the worker to
+// end the stream, which it does once it has read everything this client
+// sent: a client about to close its QUIC connection must, since closing it
+// drops whatever QUIC has not sent yet, and an AttachLeave lost that way
+// reads as a cut, leaving the size and the SSH agent waiting for a
+// reattach that never comes.
+func (a *attachStream) leave(flush bool) {
 	if a.announcesLeave {
 		// A stalled stream must not hold up the detach.
 		a.s.SetWriteDeadline(time.Now().Add(time.Second))
-		_ = a.send(&protocol.Request{AttachLeave: protocol.Empty})
+		if err := a.send(&protocol.Request{AttachLeave: protocol.Empty}); err == nil && flush {
+			a.s.CloseWrite()
+			a.awaitEnd(leaveFlushTimeout)
+		}
 	}
 	a.stop()
+}
+
+// leaveFlushTimeout bounds how long a leaving client waits for the worker
+// to end its stream; a round trip, normally.
+const leaveFlushTimeout = time.Second
+
+// awaitEnd waits, at most timeout, for the stream's last frame.
+func (a *attachStream) awaitEnd(timeout time.Duration) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		select {
+		case f := <-a.frames:
+			if f.err != nil || f.resp == nil || f.resp.EndOfStream != nil || f.resp.SessionEnded != nil ||
+				f.resp.SessionRestarting != nil || f.resp.Error != nil {
+				return
+			}
+		case <-timer.C:
+			return
+		}
+	}
 }
 
 // stop half-closes the stream, which tells the daemon this client detached,
@@ -270,7 +314,9 @@ func (c *client) connectAttach(ctx context.Context, id string, prev attachIdenti
 		attach.Colors = terminalColors()
 	}
 	if !c.wantsFrames() {
-		attach.Features = slices.DeleteFunc(attach.Features, func(f string) bool { return f == protocol.CapAttachFrames })
+		attach.Features = slices.DeleteFunc(attach.Features, func(f string) bool {
+			return f == protocol.CapAttachFrames || f == protocol.CapAttachFrameWindow
+		})
 	}
 	req := &protocol.Request{AttachSession: attach}
 	if err := protocol.WriteRequest(s, req); err != nil {
@@ -331,9 +377,15 @@ func (c *client) attachOnce(id, uid string, titled *bool) (res attachResult, err
 	ident.update(attached)
 	defer func() {
 		if stream != nil {
-			stream.leave()
+			// A switch keeps the connection for the next attachment;
+			// anything else may be followed by closing it.
+			stream.leave(c.host != nil && res.outcome != outcomeSwitch)
 		}
 	}()
+	// Each attachment has its own SSH agent forwarder, if any: a reattach
+	// is a new attachment, and needs a new one.
+	fwd := c.forwardAgent(id, attached)
+	defer func() { fwd.stop() }()
 
 	writeOut(terminalTitleBytes(id + " - " + attachExitTitle))
 	*titled = true
@@ -347,8 +399,12 @@ func (c *client) attachOnce(id, uid string, titled *bool) (res attachResult, err
 	if c.fromInbox {
 		writeOut([]byte(attachOwnScreenSequence))
 	}
+	var painter *screen.Painter
 	defer func() {
 		raw.restore()
+		if painter != nil {
+			writeOut(painter.Leave())
+		}
 		if c.fromInbox {
 			// Leaving the alternate screen restores the inbox's: no
 			// clear after a detach.
@@ -373,7 +429,7 @@ func (c *client) attachOnce(id, uid string, titled *bool) (res attachResult, err
 	var parser attachParser
 	snapshot := attached.Snapshot
 	ech := c.newEchoFor(attached)
-	painter := newPainterFor(attached)
+	painter = c.newPainterFor(attached)
 	if ech != nil {
 		ech.frames = painter != nil
 	}
@@ -387,14 +443,17 @@ func (c *client) attachOnce(id, uid string, titled *bool) (res attachResult, err
 		}
 		stream.stop()
 		stream = nil
+		fwd.stop()
+		fwd = nil
 		var r *attachResult
 		stream, attached, r, err = c.reattach(id, ident, keys, &parser, err)
 		if stream == nil {
 			return deref(r), err
 		}
 		ident.update(attached)
+		fwd = c.forwardAgent(id, attached)
 		snapshot = attached.Snapshot
-		painter = newPainterFor(attached)
+		painter = c.newPainterFor(attached)
 		// An overlay that was open when the connection dropped may have
 		// hidden the cursor.
 		writeOut([]byte("\x1b[?25h"))
@@ -455,11 +514,20 @@ func (c *client) wantsFrames() bool {
 
 // newPainterFor is the screen painter for an attachment, nil unless the
 // screen arrives as frames (CapAttachFrames).
-func newPainterFor(attached *protocol.Attached) *screen.Painter {
+func (c *client) newPainterFor(attached *protocol.Attached) *screen.Painter {
 	if !attached.HasFeature(protocol.CapAttachFrames) {
 		return nil
 	}
-	return screen.New()
+	p := screen.New()
+	if cfg, err := config.Load(c.paths.Config); err == nil {
+		if cfg.Attach.AltScrollback {
+			p.SetAltScrollback()
+		}
+		if cfg.Attach.WheelPredicted() {
+			p.SetPredictScroll(c.latency())
+		}
+	}
+	return p
 }
 
 // sizeOwnership is the attachment's size ownership as it attached, nil when
@@ -491,6 +559,13 @@ func (c *client) attachScrollbackRows() int {
 // worker's answers about the input field.
 func (c *client) runAttachment(id string, stream *attachStream, keys <-chan []byte, parser *attachParser, winch, quit <-chan os.Signal, size *protocol.SizeOwnership, ech *echo, painter *screen.Painter) (attachResult, error) {
 	var ov *overlay
+	// An attachment that ends with the overlay open (a switch, the
+	// session's end) leaves the alternate screen the overlay drew on.
+	defer func() {
+		if ov != nil {
+			writeOut(ov.leave())
+		}
+	}()
 	redraw := false
 	// sendInput writes typed bytes to the stream, through the echo when
 	// there is one (which may hold them back for a moment, and draw).
@@ -498,6 +573,9 @@ func (c *client) runAttachment(id string, stream *attachStream, keys <-chan []by
 		if ech != nil {
 			send, paint := ech.input(data)
 			writeOut(paint)
+			if painter != nil && len(paint) > 0 {
+				painter.Overdrawn()
+			}
 			data = send
 		}
 		if len(data) == 0 {
@@ -516,10 +594,25 @@ func (c *client) runAttachment(id string, stream *attachStream, keys <-chan []by
 		}
 		return nil
 	}
+	// The wheel prediction's timer takes back a guess the agent has not
+	// answered (screen/predict.go); it is set after anything that may
+	// have drawn or answered one.
+	predictTimer := time.NewTimer(time.Hour)
+	predictTimer.Stop()
+	defer predictTimer.Stop()
+	schedulePredict := func() {
+		if painter == nil {
+			return
+		}
+		predictTimer.Stop()
+		if due := painter.PredictDue(); !due.IsZero() {
+			predictTimer.Reset(max(time.Until(due), 0))
+		}
+	}
 	for {
 		// The overlay is drawn over the session's screen, which nothing
-		// else writes to while it is open, so it only changes after input
-		// or a resize.
+		// else writes to while it is open, so it only changes after input,
+		// a resize, or the frames that follow a resize.
 		if ov != nil && redraw {
 			ov.draw()
 		}
@@ -544,6 +637,10 @@ func (c *client) runAttachment(id string, stream *attachStream, keys <-chan []by
 			for _, action := range parser.push(chunk) {
 				switch action.kind {
 				case actionData:
+					if painter != nil {
+						writeOut(painter.Wheel(action.data))
+						schedulePredict()
+					}
 					if err := sendInput(action.data); err != nil {
 						return attachResult{}, err
 					}
@@ -554,7 +651,7 @@ func (c *client) runAttachment(id string, stream *attachStream, keys <-chan []by
 					if err := flushEcho(); err != nil {
 						return attachResult{}, err
 					}
-					ov = newOverlay(c, id, size)
+					ov = newOverlay(c, id, size, painter)
 					if err := ov.open(); err != nil {
 						return attachResult{}, err
 					}
@@ -591,6 +688,12 @@ func (c *client) runAttachment(id string, stream *attachStream, keys <-chan []by
 			return attachResult{outcome: outcomeDetached}, nil
 		case <-winch:
 			redraw = true
+			if painter != nil {
+				painter.Resized()
+			}
+			if ov != nil {
+				ov.resized()
+			}
 			if ech != nil {
 				ech.resized()
 			}
@@ -602,6 +705,15 @@ func (c *client) runAttachment(id string, stream *attachStream, keys <-chan []by
 			if err != nil || done {
 				return res, err
 			}
+			if ov != nil && ov.framed() {
+				redraw = true
+			}
+			schedulePredict()
+		case <-predictTimer.C:
+			if paint := painter.PredictExpire(); ov == nil {
+				writeOut(paint)
+			}
+			schedulePredict()
 		}
 	}
 }
@@ -692,7 +804,7 @@ func (c *client) reattach(id string, prev attachIdentity, keys <-chan []byte, pa
 		switch {
 		case !finished:
 			if a.stream != nil {
-				a.stream.leave()
+				a.stream.leave(c.host != nil)
 			}
 			return nil, nil, detached, nil
 		case a.err == nil && a.ended != nil:
@@ -814,6 +926,9 @@ func handleFrame(f frame, overlayOpen bool, size *protocol.SizeOwnership, ech *e
 		if !overlayOpen {
 			writeOut(paint)
 		}
+		if painter != nil && len(paint) > 0 {
+			painter.Overdrawn()
+		}
 		if len(send) > 0 {
 			if err := stream.send(&protocol.Request{AttachInput: &protocol.Bytes{Data: send}}); err != nil {
 				return attachResult{}, true, err
@@ -859,26 +974,29 @@ func paintFrame(fr *protocol.Frame, painter *screen.Painter, ech *echo, stream *
 	var send, overlay []byte
 	if ech != nil {
 		if fr.Field != nil {
-			send, _ = ech.frameField(fr.Field, fr.Seq)
+			send, _ = ech.frameField(fr.Field, fr.AckedBy())
 		}
 		overlay = ech.overlay()
 	}
 	if paint := painter.Apply(fr, overlay); !overlayOpen {
 		writeOut(paint)
 	}
+	if ech != nil && fr.Field != nil {
+		ech.screenShown(fr.Field, painter.Rows())
+	}
 	if len(send) > 0 {
 		if err := stream.send(&protocol.Request{AttachInput: &protocol.Bytes{Data: send}}); err != nil {
 			return err
 		}
 	}
-	return ackFrame(stream, fr.Seq, ech)
+	return ackFrame(stream, fr.Seq, ech, painter)
 }
 
 // ackFrame acknowledges frame seq, asking for the field in the next ones
 // while there is an echo, which notes the ack: the frames that follow it
 // show the keys sent before it.
-func ackFrame(stream *attachStream, seq uint32, ech *echo) error {
-	if err := stream.send(&protocol.Request{AttachFrameAck: &protocol.FrameAck{Seq: seq, Field: ech != nil}}); err != nil {
+func ackFrame(stream *attachStream, seq uint32, ech *echo, painter *screen.Painter) error {
+	if err := stream.send(&protocol.Request{AttachFrameAck: &protocol.FrameAck{Seq: seq, Field: ech != nil || (painter != nil && painter.WantsField())}}); err != nil {
 		return err
 	}
 	ech.frameAcked(seq)
@@ -901,9 +1019,9 @@ func (c *client) overlayInput(ov *overlay, chunk []byte, stream *attachStream, s
 			if err := stream.send(&protocol.Request{AttachTakeSize: &protocol.Geometry{Cols: cols, Rows: rows, PixelWidth: pw, PixelHeight: ph}}); err != nil {
 				return nil, false, err
 			}
-			return closeOverlay(stream, size, ech, painter)
+			return closeOverlay(ov, stream, size, ech, painter)
 		case overlayClose:
-			return closeOverlay(stream, size, ech, painter)
+			return closeOverlay(ov, stream, size, ech, painter)
 		case overlaySubmit:
 			// Enter goes on the attach stream, behind the keys the echo
 			// sent when the overlay opened. The worker encodes it for
@@ -924,16 +1042,19 @@ func (c *client) overlayInput(ov *overlay, chunk []byte, stream *attachStream, s
 				return &attachResult{outcome: outcomeSwitch, next: next}, false, nil
 			}
 			// Nothing else needs attention: stay, and watch the answer.
-			return closeOverlay(stream, size, ech, painter)
+			return closeOverlay(ov, stream, size, ech, painter)
 		case overlaySwitch:
 			return &attachResult{outcome: outcomeSwitch, next: out.session}, false, nil
+		case overlayDetach:
+			return &attachResult{outcome: outcomeDetached}, false, nil
 		}
 	}
 	return nil, false, nil
 }
 
 // closeOverlay restores the session's screen once the overlay has closed.
-func closeOverlay(stream *attachStream, size *protocol.SizeOwnership, ech *echo, painter *screen.Painter) (*attachResult, bool, error) {
+func closeOverlay(ov *overlay, stream *attachStream, size *protocol.SizeOwnership, ech *echo, painter *screen.Painter) (*attachResult, bool, error) {
+	writeOut(ov.leave())
 	restored, ended, err := restoreSnapshot(stream, size, ech, painter)
 	if err != nil {
 		return nil, false, err
@@ -969,9 +1090,9 @@ func restoreSnapshot(stream *attachStream, size *protocol.SizeOwnership, ech *ec
 				return nil, nil, errors.New("unexpected screen frame")
 			}
 			if ech != nil && fr.Field != nil {
-				ech.frameField(fr.Field, fr.Seq)
+				ech.frameField(fr.Field, fr.AckedBy())
 			}
-			if err := ackFrame(stream, fr.Seq, ech); err != nil {
+			if err := ackFrame(stream, fr.Seq, ech, painter); err != nil {
 				return nil, nil, err
 			}
 			if fr.Full {

@@ -16,12 +16,15 @@ benchmarks.
 | `go-test.vt.gz` | `go test -v` | A throwaway module with passing, failing, skipped and panicking tests and subtests. |
 | `clang.vt.gz` | Apple clang 21 | `-fsyntax-only -fcolor-diagnostics` on a generated C file: 750 errors and 500 warnings with notes, about 500 KB of colored diagnostics. |
 | `claude-field.vt.gz` | Claude Code 2.1 | The input field (`field.go`): idle with its placeholder, 176 characters typed past a wrap, an Alt-Enter newline, cleared, three pasted lines, a word longer than a row. Nothing is sent to the model. |
+| `claude-scroll.vt.gz` | Claude Code 2.1 | Transcript scrolling on the alternate screen (`docs/designs/alt-screen-scrollback.md`): bash mode prints "shell row 001" to "shell row 120" in four commands, the wheel up and down (SGR reports, three rows a tick), far up, a click, far down, a three-line message typed and deleted, `/clear`. Nothing is sent to the model (the recording account was logged out, so each command is followed by "Login expired"). `TestTranscriptRecordsClaudeScroll` replays it through the transcript record. |
+| `claude-scroll-stream.vt.gz` | Claude Code 2.1 | Not recorded yet. The same transcript, then one prompt whose answer streams 200 known rows, with the wheel used while it streams. It uses the recording user's account, so record it only with their consent. |
 | `codex-field.vt.gz` | Codex 0.160 | The same. |
 | `pi-field.vt.gz` | pi 0.72 | The same; pi draws on the primary screen and paints its own cursor. |
 | `pi-fullscreen-field.vt.gz` | pi 0.99, `--tui-mode fullscreen` | The same, on the alternate screen with SGR mouse reporting and focus events. pi runs offline with an empty config directory (`PI_CODING_AGENT_DIR`) and no extensions, skills or context files, so no login, setup or changelog shows. |
 
-The `*-field` streams come with `NAME.marks.json`: the byte offset in the stream at which
-each scripted state (`idle`, `typed`, `newline`, `cleared`, `pasted`, `longword`) was on screen.
+The `*-field` and `claude-scroll*` streams come with `NAME.marks.json`: the byte offset in the stream at which
+each scripted state (for the field streams `idle`, `typed`, `newline`, `cleared`, `pasted`,
+`longword`) was on screen.
 `TestFieldFixtures` replays a stream to each mark and checks what the field detector reads off
 the screen. When an agent changes its input box, that test fails: re-record the stream.
 

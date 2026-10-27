@@ -7,7 +7,9 @@ import (
 	"time"
 
 	"agtd.sh/internal/protocol"
+	"agtd.sh/internal/screen"
 	"agtd.sh/internal/session"
+	"agtd.sh/internal/transport"
 )
 
 func TestAttachSequences(t *testing.T) {
@@ -97,14 +99,18 @@ func TestFormatSessionEnd(t *testing.T) {
 }
 
 func TestOverlayKeys(t *testing.T) {
-	o := newOverlay(testClient(t), "alpha", nil)
+	o := newOverlay(testClient(t), "alpha", nil, nil)
 	if out, err := o.handle(keyEvent{code: keyChar, r: 'y', mods: modCtrl}); err != nil || out.kind != overlayStay {
 		t.Fatalf("ctrl-y: %+v %v", out, err)
 	}
 	if out, _ := o.handle(key(keyEsc)); out.kind != overlayClose {
 		t.Fatalf("esc: %+v", out)
 	}
-	// Ctrl-Y, Enter is submit and switch.
+	if items := o.filteredPalette(); items[0].title == submitSwitchItem.title {
+		t.Fatal("Submit and switch offered without [attach] submit_and_switch")
+	}
+	// Ctrl-Y, Enter is submit and switch, when offered.
+	o.submitSwitch = true
 	if out, err := o.handle(key(keyEnter)); err != nil || out.kind != overlaySubmit {
 		t.Fatalf("enter on the fresh palette: %+v %v", out, err)
 	}
@@ -134,7 +140,8 @@ func TestOverlayKeys(t *testing.T) {
 }
 
 func TestOverlayDraws(t *testing.T) {
-	o := newOverlay(testClient(t), "alpha", nil)
+	o := newOverlay(testClient(t), "alpha", nil, nil)
+	o.submitSwitch = true
 	o.sessions = []session.Record{demo("alpha"), demo("beta")}
 	body := o.body(60, 20)
 	if got := stripANSI(body[1].render(60, o.theme)); !strings.HasPrefix(got, " Commands ") || !strings.Contains(got, "/alpha  ") || strings.Contains(got, "╱") {
@@ -211,15 +218,15 @@ func TestOverlayTakeSize(t *testing.T) {
 		}
 		return out
 	}
-	if got := titles(newOverlay(testClient(t), "alpha", nil)); slices.Contains(got, takeSizeItem.title) {
+	if got := titles(newOverlay(testClient(t), "alpha", nil, nil)); slices.Contains(got, takeSizeItem.title) {
 		t.Fatalf("take-size offered without size ownership: %v", got)
 	}
 	owner := &protocol.SizeOwnership{Owner: true, OwnerID: "attach-1"}
-	if got := titles(newOverlay(testClient(t), "alpha", owner)); slices.Contains(got, takeSizeItem.title) {
+	if got := titles(newOverlay(testClient(t), "alpha", owner, nil)); slices.Contains(got, takeSizeItem.title) {
 		t.Fatalf("take-size offered to the owner: %v", got)
 	}
 	pending := &protocol.SizeOwnership{OwnerID: "attach-1", Geometry: protocol.Geometry{Cols: 100, Rows: 30}}
-	o := newOverlay(testClient(t), "alpha", pending)
+	o := newOverlay(testClient(t), "alpha", pending, nil)
 	for _, r := range "take" {
 		o.handle(char(r))
 	}
@@ -253,6 +260,69 @@ func TestSizeOwnerFrames(t *testing.T) {
 	}
 	if _, done, err := handleFrame(frame{resp: &protocol.Response{AttachSizeOwner: &note}}, false, nil, nil, nil, nil); done || err != nil {
 		t.Fatalf("size note without tracking: done %v err %v", done, err)
+	}
+}
+
+// The palette's Detach detaches, as Ctrl-\ does.
+func TestOverlayDetach(t *testing.T) {
+	o := newOverlay(testClient(t), "alpha", nil, nil)
+	for _, r := range "detach" {
+		o.handle(char(r))
+	}
+	if got := o.filteredPalette(); len(got) != 1 || got[0].title != "Detach" {
+		t.Fatalf("filtered %v", got)
+	}
+	if out, err := o.handle(key(keyEnter)); err != nil || out.kind != overlayDetach {
+		t.Fatalf("enter: %+v %v", out, err)
+	}
+	if got := testClient(t).sessionAddress("alpha"); got != "local/alpha" {
+		t.Fatalf("address %q", got)
+	}
+	// Value: protects="detached from HOST/NAME" names the remote host to
+	// attach again, with its controls escaped; fails_when=sessionAddress
+	// says local/ for a remote session or writes a host name's controls to
+	// the terminal; why_new=only the local address was checked; seam=none;
+	// no_claim=the end-to-end detach line (TestAttachEndToEnd).
+	remote := testClient(t)
+	remote.host = &transport.Host{Name: "devbox\x1b]0;x\a"}
+	if got := remote.sessionAddress("alpha"); !strings.HasPrefix(got, "devbox") || !strings.HasSuffix(got, "/alpha") || strings.ContainsAny(got, "\x1b\a") {
+		t.Fatalf("remote address %q", got)
+	}
+}
+
+// The overlay opens the alternate screen only over a session painted on
+// the primary one, whose view would scroll the overlay away, and leaves
+// it as it closes; over an agent on the alternate screen it stays there.
+func TestOverlayOwnsTheAlternateScreen(t *testing.T) {
+	// Value: protects=closing the overlay over Claude Code (alternate
+	// screen) does not drop the terminal to the primary screen, and over a
+	// shell it returns from the alternate screen it opened;
+	// fails_when=ownsAlt ignores the painter's screen or leave() writes
+	// ?1049l without having opened it; why_new=no test covered the
+	// overlay's alternate screen; seam=none; no_claim=the backdrop drawn
+	// under it (draw writes to the terminal; manual/e2e).
+	frame := func(prefix string) *screen.Painter {
+		p := screen.New()
+		p.Apply(&protocol.Frame{Seq: 1, Full: true, Cols: 10, Lines: 2, Prefix: []byte(prefix), Rows: []protocol.FrameRow{{Index: 0, VT: []byte("$ ")}}}, nil)
+		return p
+	}
+	for _, c := range []struct {
+		name    string
+		painter *screen.Painter
+		leave   string
+	}{
+		{"raw output", nil, ""},
+		{"no frame yet", screen.New(), ""},
+		{"primary screen", frame("\x1b[H"), "\x1b[?1049l"},
+		{"alternate screen", frame("\x1b[?1049h\x1b[H"), ""},
+	} {
+		o := newOverlay(testClient(t), "alpha", nil, c.painter)
+		if got := string(o.leave()); got != c.leave {
+			t.Errorf("%s: leave %q, want %q", c.name, got, c.leave)
+		}
+		if got := o.framed(); got != (c.painter != nil) {
+			t.Errorf("%s: framed %v", c.name, got)
+		}
 	}
 }
 
