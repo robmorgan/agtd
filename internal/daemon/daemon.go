@@ -142,6 +142,15 @@ func New(p *paths.AppPaths, workerBin string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	if cfg.SSHAgent.Problem != "" {
+		// agt says so when it attaches; on a machine only reached remotely,
+		// this log is where a mistake in session_socket shows.
+		socket := "sessions get an SSH agent socket of their own"
+		if !cfg.SSHAgent.SessionSocketEnabled() {
+			socket = "sessions get no SSH agent socket of their own"
+		}
+		fmt.Fprintf(os.Stderr, "agtd: %s: %s; %s\n", p.Config, cfg.SSHAgent.Problem, socket)
+	}
 	// The daemon's id is its key's fingerprint, the identity remote clients
 	// pin, so local and remote clients see one id per runtime root.
 	id, err := transport.LoadOrCreateIdentity(p.RemoteKeyPath())
