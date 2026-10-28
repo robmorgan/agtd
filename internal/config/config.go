@@ -183,7 +183,15 @@ type AgentConfig struct {
 	// ModelFlag is passed before the model name when a session requests a
 	// model. Empty disables it; unset means DefaultModelFlag.
 	ModelFlag *string `toml:"model_flag"`
+	// LoginShell starts the agent through the user's login shell ($SHELL,
+	// interactive), so it gets the environment of the user's own shells,
+	// rc files included, read afresh for each session. Unset means true;
+	// false starts the command directly with the daemon's environment.
+	LoginShell *bool `toml:"login_shell"`
 }
+
+// LoginShellEnabled is LoginShell with its default applied.
+func (a AgentConfig) LoginShellEnabled() bool { return a.LoginShell == nil || *a.LoginShell }
 
 const DefaultModelFlag = "--model"
 
@@ -219,6 +227,9 @@ const defaultTextFormat = `# The agent "agt new" starts without --agent: the fir
 # and pi that was installed when this file was written.
 default_agent = %q
 
+# Each agent is started through your login shell ($SHELL -l -i), so it sees
+# what your profile and rc files set, as in an ssh login. login_shell = false
+# in an agent's table starts its command directly with agtd's environment.
 [agents.claude]
 command = "claude"
 args = []

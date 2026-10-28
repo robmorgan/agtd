@@ -223,3 +223,20 @@ func TestSSHAgent(t *testing.T) {
 		t.Fatalf("agent socket = %q", got)
 	}
 }
+
+func TestAgentLoginShell(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	os.WriteFile(path, []byte("[agents.a]\ncommand = \"a\"\n[agents.b]\ncommand = \"b\"\nlogin_shell = false\n[agents.c]\ncommand = \"c\"\nlogin_shell = true\n"), 0o600)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]bool{"a": true, "b": false, "c": true} {
+		if got := cfg.Agents[name].LoginShellEnabled(); got != want {
+			t.Errorf("agent %s: LoginShellEnabled() = %v, want %v", name, got, want)
+		}
+	}
+	if !defaultConfig().Agents["claude"].LoginShellEnabled() {
+		t.Error("built-in claude does not start through the login shell")
+	}
+}
