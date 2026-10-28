@@ -117,6 +117,13 @@ type Args struct {
 	// SSH_AUTH_SOCK, which forwards to the client driving the session
 	// (sshagent.go).
 	SSHAgentSocket bool
+	// LoginShell starts the agent through the user's login shell ($SHELL)
+	// rather than directly (shell.go).
+	LoginShell bool
+	// LaunchShell is the shell the agent was started through, empty when
+	// it was started directly. Set by Run; it crosses handoffs, so the
+	// session's end is explained the same way on any image.
+	LaunchShell string
 }
 
 type sessionEnded struct {
@@ -271,20 +278,20 @@ func Run(args Args) error {
 	} else if !info.IsDir() {
 		return fail(fmt.Errorf("working directory `%s` is not a directory", args.Cwd))
 	}
-	cmd := exec.Command(args.Command, args.Args...)
-	cmd.Dir = args.Cwd
-	cmd.Env = append(agentTerminalEnv(os.Environ()),
+	env := append(agentTerminalEnv(os.Environ()),
 		"AGTD_SESSION_ID="+args.SessionID,
 		"AGTD_SESSION_NAME="+args.SessionID,
 		"AGTD_CWD="+args.Cwd,
 	)
+	// pinned is what a login shell's rc files must not undo (shell.go).
+	var pinned []string
 	// The agent socket is bound before the agent starts, so SSH_AUTH_SOCK
 	// names a socket that answers from the first moment. Without one the
 	// session keeps the SSH_AUTH_SOCK the daemon was started with, unless
 	// that is another session's socket (inheritedAgent).
 	inherited := inheritedAgent(p)
 	if inherited == "" {
-		cmd.Env = slices.DeleteFunc(cmd.Env, func(kv string) bool { return strings.HasPrefix(kv, "SSH_AUTH_SOCK=") })
+		env = slices.DeleteFunc(env, func(kv string) bool { return strings.HasPrefix(kv, "SSH_AUTH_SOCK=") })
 	}
 	var agentListener *transport.UnixListener
 	var agentSocket os.FileInfo
@@ -294,9 +301,23 @@ func Run(args Args) error {
 			fmt.Fprintf(os.Stderr, "session worker: no SSH agent socket, the session keeps the SSH_AUTH_SOCK it inherited, unless that is another session's: %v\n", err)
 		} else {
 			// The last of a repeated variable is the one exec passes on.
-			cmd.Env = append(cmd.Env, "SSH_AUTH_SOCK="+agentPath)
+			env = append(env, "SSH_AUTH_SOCK="+agentPath)
+			pinned = append(pinned, "SSH_AUTH_SOCK="+agentPath)
 		}
 	}
+	name, argv := args.Command, args.Args
+	if args.LoginShell {
+		shell := os.Getenv("SHELL")
+		if kind := loginShellKind(shell); kind != shellUnknown {
+			name, argv = shell, loginShellArgs(kind, args.Command, args.Args, pinned)
+			args.LaunchShell = shell
+		} else {
+			fmt.Fprintf(os.Stderr, "session worker: starting the agent directly, not through a login shell: $SHELL is %q\n", shell)
+		}
+	}
+	cmd := exec.Command(name, argv...)
+	cmd.Dir = args.Cwd
+	cmd.Env = env
 	// closeAgentSocket undoes the agent socket on the way out of a failed
 	// start.
 	closeAgentSocket := func() {
@@ -645,6 +666,9 @@ func (rt *runtime) finalizeExit(exitCode *int32) error {
 	msg := "agent exited unexpectedly"
 	if exitCode != nil {
 		msg = fmt.Sprintf("agent exited with code %d", *exitCode)
+		if rt.args.LaunchShell != "" {
+			msg += launchFailureHint(rt.args.LaunchShell, rt.args.Command, *exitCode)
+		}
 	}
 	return rt.db.MarkFailed(rt.sessionID, msg)
 }

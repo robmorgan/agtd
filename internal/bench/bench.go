@@ -165,8 +165,9 @@ func (b *bench) writeConfig() error {
 	if err := os.MkdirAll(b.workDir(), 0o700); err != nil {
 		return err
 	}
+	// Started directly: the bench measures agtd, not the user's rc files.
 	agent := func(name, script string) string {
-		return fmt.Sprintf("[agents.%s]\ncommand = \"/bin/sh\"\nargs = [\"-c\", '''%s''']\n\n", name, script)
+		return fmt.Sprintf("[agents.%s]\ncommand = \"/bin/sh\"\nargs = [\"-c\", '''%s''']\nlogin_shell = false\n\n", name, script)
 	}
 	config := "default_agent = \"idle\"\n\n" + agent("idle", idleAgent) + agent("flood", floodAgent) +
 		agent("fill", fmt.Sprintf("BENCH_FILL_LINES=%d; %s", b.opts.FillLines, fillAgent))

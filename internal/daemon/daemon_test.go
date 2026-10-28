@@ -34,6 +34,9 @@ const testTimeout = 15 * time.Second
 var workerBin string
 
 func TestMain(m *testing.M) {
+	// Without $SHELL the workers start their agents directly, so the tests
+	// do not run the developer's rc files (worker/shell.go).
+	os.Unsetenv("SHELL")
 	dir, err := os.MkdirTemp("", "agtd-bin-")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

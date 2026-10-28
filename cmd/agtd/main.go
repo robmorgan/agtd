@@ -565,6 +565,7 @@ func runSessionWorker(argv []string) int {
 	fs.StringVar(&args.Model, "model", "", "model")
 	colors := fs.String("colors", "", "default colours of the creating terminal, foreground/background as rrggbb/rrggbb")
 	fs.BoolVar(&args.SSHAgentSocket, "ssh-agent-socket", false, "give the agent its own SSH agent socket as SSH_AUTH_SOCK, forwarding to the client driving the session")
+	fs.BoolVar(&args.LoginShell, "login-shell", false, "start the agent through the user's login shell ($SHELL)")
 	fs.Var(&extra, "arg", "agent argument (repeatable)")
 	probe := fs.Bool("handoff-probe", false, "print the handoff formats this binary can resume from")
 	resumeFD := fs.Int("resume-fd", -1, "resume a session handed off by a previous image (internal)")

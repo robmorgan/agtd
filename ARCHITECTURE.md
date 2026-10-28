@@ -800,8 +800,25 @@ When you create a session (`agt new [--cwd DIR] [NAME]`), the daemon:
 4. Spawns `agtd session-worker` in a new process session.
 5. Waits for the worker to report the session running and bind its socket.
 
-The worker spawns the configured agent inside a PTY in `cwd`, with `AGTD_SESSION_ID`,
-`AGTD_SESSION_NAME` and `AGTD_CWD` injected, and with `TERM=xterm-256color` and
+The worker spawns the configured agent inside a PTY in `cwd`, through the user's login shell
+unless the agent's `login_shell = false` (`internal/worker/shell.go`): `$SHELL -l -i -c 'exec
+"$0" "$@"' COMMAND ARGS...`, interactive because the PTY is a terminal. The daemon's environment
+is fixed when it starts, and a daemon started by systemd, launchd or `agt` from a script never
+read the rc files only interactive shells read (a stock Debian `~/.bashrc` returns at once
+otherwise), where installers put `PATH` entries and credential variables. Running the shell per
+session gives every new agent the environment of an ssh login, re-read each time, with no
+restart. The `exec` keeps the shell's pid, so the agent is still the PTY session's leader and
+process group (kills, reaping, the foreground watch and handoffs depend on it). The command
+string sets `SSH_AUTH_SOCK` again after the rc files, as the worker pins it. A `$SHELL` the worker
+does not know (or none) starts the agent directly. A failed `exec` is exit 127 or 126 from the
+shell, which the failure message explains, since it is no longer a spawn error. Only
+environments reach a running agent at its start: a value that rotates belongs behind a stable
+pointer (a socket, a loopback URL, a file), as `SSH_AUTH_SOCK` and llmd-style credential proxies
+do.
+
+The agent gets `AGTD_SESSION_ID`,
+`AGTD_SESSION_NAME` and `AGTD_CWD`, set before the shell runs so rc files can tell a session
+apart, and `TERM=xterm-256color` and
 `COLORTERM=truecolor` when the daemon's environment has no `TERM` (it was started by systemd or
 over ssh) or has `TERM=dumb` (a login shell there): the agent's terminal is the worker's shadow
 terminal whatever started the daemon, and without this an agent turns colour off. A `TERM` the

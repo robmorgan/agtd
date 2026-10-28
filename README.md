@@ -359,8 +359,8 @@ at any time:
   handed over to the new binary without stopping (`AGTD_NO_UPGRADE=1` leaves the daemon alone).
 - On Linux with systemd it installs and enables a user unit (`~/.config/systemd/user/agtd.service`)
   and turns on lingering, so the daemon starts at boot without anyone logging in, and a rebooted
-  devbox takes remote connections again. The unit only starts the daemon, from your login shell so
-  sessions get your `PATH`; `agt daemon restart` and `upgrade` still manage it, and stopping the
+  devbox takes remote connections again. The unit only starts the daemon, from your login shell
+  (sessions start through your login shell too, rc files included); `agt daemon restart` and `upgrade` still manage it, and stopping the
   unit never stops the daemon or a session. A daemon that crashes is not restarted by systemd. If
   lingering cannot be turned on, the unit is left disabled.
   `AGTD_NO_SERVICE=1` skips this.
@@ -492,6 +492,27 @@ tables in this file. `default_agent` must name one of those configured agents. W
 otherwise the first agent listed. With no `config.toml` at all, the built-in defaults are the
 ones written above.
 
+Each agent starts through your login shell, as an interactive login shell on the session's
+terminal (`$SHELL -l -i -c 'exec "$0" "$@"' claude ...`, the way an ssh login starts a program):
+the shell reads your profile and rc files, then execs the agent in its place. So an agent sees
+what your own shells see, read afresh for every new session: `PATH`, version managers, and
+variables that installers append to `~/.bashrc` or `~/.zshrc`, such as the base URL and token of
+a local credential proxy. Those exports sit below the interactive guard of a stock `~/.bashrc`,
+which a daemon started at boot never reaches, and a session started earlier keeps the
+environment it started with. `sh`, `bash`, `zsh`, `dash`, `ksh` and `fish` are supported; any
+other `$SHELL`, or none, starts the agent directly with the daemon's environment, as
+`login_shell = false` in an agent's table does:
+
+```toml
+[agents.codex]
+command = "codex"
+login_shell = false
+```
+
+An rc file runs for every session, so one that takes over the shell (`exec tmux`, say) should
+skip sessions, which have `AGTD_SESSION_ID` set. An agent the shell cannot find ends the session
+with exit code 127 and a hint about the shell's `PATH`.
+
 The daemon injects:
 
 - `AGTD_SESSION_ID`
@@ -501,7 +522,8 @@ The daemon injects:
   (a daemon started at boot or over ssh) or `TERM=dumb`: the agent's terminal is agtd's own,
   whatever started the daemon, and without them agents turn colour off
 - `SSH_AUTH_SOCK`, naming the session's own SSH agent socket (see [Forwarding Your SSH
-  Agent](#forwarding-your-ssh-agent))
+  Agent](#forwarding-your-ssh-agent)), set again after the login shell's rc files so one that
+  points it elsewhere does not undo it
 
 The daemon socket is not passed to agents. They are not sandboxed, though: an agent runs as your
 user, so it can still reach the daemon at its usual path. There is no structured event channel for

@@ -77,7 +77,7 @@ type env struct {
 	root string
 	work string
 	// extraEnv is added to agt's environment, and so the daemon's it
-	// starts.
+	// starts. It comes last, so it overrides.
 	extraEnv []string
 }
 
@@ -100,7 +100,9 @@ func newEnv(t *testing.T, extraConfig string) *env {
 }
 
 func (e *env) environ() []string {
-	return append(append(os.Environ(), "AGTD_DIR="+e.root, "AGTD_BIN="+filepath.Join(binDir, "agtd"), "TERM=xterm-256color", "PS1=$ "), e.extraEnv...)
+	// An empty SHELL starts agents directly, so the tests do not run the
+	// developer's rc files (worker/shell.go).
+	return append(append(os.Environ(), "AGTD_DIR="+e.root, "AGTD_BIN="+filepath.Join(binDir, "agtd"), "TERM=xterm-256color", "PS1=$ ", "SHELL="), e.extraEnv...)
 }
 
 // run runs a command without a terminal and returns its output.
@@ -1454,4 +1456,39 @@ func TestMeasureResumeAfterBlackHole(t *testing.T) {
 	t.Logf("input answered %v after the network came back", time.Since(back).Round(100*time.Millisecond))
 	tm.write("\x1c")
 	tm.wait()
+}
+
+// Agents start through the user's login shell, so they get what an
+// interactive shell's rc files export: on Debian, ~/.bashrc below its
+// interactive guard, which a daemon started through `bash -l -c` never
+// reads. An agent with login_shell = false starts directly.
+func TestLoginShellEndToEnd(t *testing.T) {
+	if _, err := os.Stat("/bin/bash"); err != nil {
+		t.Skip("no /bin/bash")
+	}
+	e := newEnv(t, "\n[agents.direct]\ncommand = \"/bin/sh\"\nlogin_shell = false\n")
+	home := filepath.Join(e.root, "home")
+	os.Mkdir(home, 0o700)
+	os.WriteFile(filepath.Join(home, ".profile"), []byte(`. "$HOME/.bashrc"`+"\n"), 0o600)
+	os.WriteFile(filepath.Join(home, ".bashrc"), []byte("case $- in *i*) ;; *) return;; esac\nexport LLMD_PROBE=from-rc\n"), 0o600)
+	e.extraEnv = []string{"SHELL=/bin/bash", "HOME=" + home, "BASH_ENV=", "ENV=", "TERM_PROGRAM=", "LLMD_PROBE="}
+
+	probe := func(name, want string) {
+		t.Helper()
+		e.mustRun("agt", "send-input", name, `echo "probe:[$LLMD_PROBE]"`+"\r")
+		deadline := time.Now().Add(5 * time.Second)
+		for out := ""; !strings.Contains(out, want); out = e.mustRun("agt", "history", name) {
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: no %q in history:\n%s", name, want, out)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	e.startAndDetach("demo")
+	probe("demo", "probe:[from-rc]")
+	tm := e.start("new", "--agent", "direct", "plain")
+	tm.expect(0, "attached to plain")
+	tm.write("\x1c")
+	tm.wait()
+	probe("plain", "probe:[]")
 }

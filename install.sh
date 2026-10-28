@@ -393,9 +393,10 @@ upgrade_daemon() {
 # with KillMode=process (its only process has exited long before any stop).
 # A daemon that crashes is not restarted by systemd.
 #
-# The daemon passes its environment on to every session, so it starts from
-# the user's login shell: the PATH an agent needs (~/.local/bin for claude,
-# for example) usually comes from the shell's profile, not from systemd.
+# The daemon starts from the user's login shell, so it and anything it runs
+# outside a session (git, tailscale) get the profile's PATH rather than
+# systemd's. Sessions start through an interactive login shell of their own,
+# rc files included (internal/worker/shell.go).
 install_service() {
   local bindir="$1"
   [[ "${OS}" == Linux ]] || return 0

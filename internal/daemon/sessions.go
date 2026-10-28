@@ -357,6 +357,9 @@ func (s *Server) createSession(req *protocol.CreateSession) (*session.CreateResu
 	if s.config.SSHAgent.SessionSocketEnabled() {
 		args = append(args, "--ssh-agent-socket")
 	}
+	if agent.LoginShellEnabled() {
+		args = append(args, "--login-shell")
+	}
 	launchArgs := append([]string(nil), agent.Args...)
 	if req.Model != nil && agent.Flag() != "" {
 		launchArgs = append(launchArgs, agent.Flag(), *req.Model)
