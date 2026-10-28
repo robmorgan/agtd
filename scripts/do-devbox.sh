@@ -30,6 +30,7 @@
 #   --user NAME     the user agtd runs as (default: your local user name)
 #   --ref REF       build this branch, tag or commit of github.com/robmorgan/agtd (default main)
 #   --local         build this checkout's working tree instead (tracked files, uncommitted changes included)
+#   --release       install the latest release's binaries with https://agtd.sh/install.sh, as a user would
 #   --no-claude     do not install Claude Code
 #
 # Needs doctl (authenticated: `doctl auth init`), ssh, and the agt CLI.
@@ -44,6 +45,7 @@ FIREWALL="agtd"
 PORT=7433              # agtd's default QUIC port
 IMAGE="ubuntu-24-04-x64"
 REPO_RAW="https://raw.githubusercontent.com/robmorgan/agtd"
+INSTALL_URL="https://agtd.sh/install.sh"
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -o LogLevel=ERROR)
 
 step() { printf '==> %s\n' "$*" >&2; }
@@ -144,11 +146,14 @@ fi
 EOF
 }
 
-# install_agtd builds and installs agtd as the droplet's user, from the
-# ref on GitHub or from this checkout.
+# install_agtd installs agtd as the droplet's user: the latest release, or
+# built from the ref on GitHub or from this checkout.
 install_agtd() {
-  local target="$1" ref="$2" local_src="$3"
-  if [[ "${local_src}" == 1 ]]; then
+  local target="$1" ref="$2" local_src="$3" release="$4"
+  if [[ "${release}" == 1 ]]; then
+    step "Installing agtd (latest release, ${INSTALL_URL})"
+    ssh "${SSH_OPTS[@]}" "${target}" "curl -fsSL '${INSTALL_URL}' | bash"
+  elif [[ "${local_src}" == 1 ]]; then
     local root
     root="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
     step "Installing agtd from this checkout (${root})"
@@ -208,7 +213,7 @@ pair() {
 
 cmd_create() {
   local name="" region="${DO_REGION:-sgp1}" size="${DO_SIZE:-s-2vcpu-4gb}"
-  local user ref="main" local_src=0 claude=1
+  local user ref="main" local_src=0 release=0 claude=1
   user="$(id -un)"
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -217,6 +222,7 @@ cmd_create() {
       --user) user="${2:?--user needs a value}"; shift ;;
       --ref) ref="${2:?--ref needs a value}"; shift ;;
       --local) local_src=1 ;;
+      --release) release=1 ;;
       --no-claude) claude=0 ;;
       -*) die "unknown option $1 (see --help)" ;;
       *) [[ -z "${name}" ]] || die "unexpected argument $1"; name="$1" ;;
@@ -224,6 +230,7 @@ cmd_create() {
     shift
   done
   [[ -n "${name}" ]] || die "usage: $0 create NAME [options]"
+  [[ "${release}" == 0 || ( "${local_src}" == 0 && "${ref}" == main ) ]] || die "--release installs the published binaries; it does not take --ref or --local"
   # A droplet name becomes its hostname, and the agt CLI's host name.
   [[ "${name}" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || die "NAME must be lowercase letters, digits and dashes"
   [[ "${user}" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "--user ${user} is not a valid user name"
@@ -253,7 +260,7 @@ cmd_create() {
   step "Setting up user ${user}"
   bootstrap "${ip}" "${user}"
   local target="${user}@${ip}"
-  install_agtd "${target}" "${ref}" "${local_src}"
+  install_agtd "${target}" "${ref}" "${local_src}" "${release}"
   [[ "${claude}" == 1 ]] && install_claude "${target}"
 
   step "Accepting remote clients on ${ip}:${PORT}"
