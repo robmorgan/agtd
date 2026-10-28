@@ -116,6 +116,15 @@ func (c *client) attachSessionUID(id, uid string) error {
 // attachLoop attaches until the user detaches or the session ends (then
 // ended says how), following switches to other sessions on the way.
 func (c *client) attachLoop(id, uid string) (ended *protocol.SessionEnded, err error) {
+	if !c.fromInbox {
+		// Said before the attach takes the screen, and again once it has
+		// given it back, since its first paint clears the screen. The
+		// inbox shows it itself.
+		if w := sshAgentWarning(c.paths); w != "" {
+			fmt.Fprintln(os.Stderr, "agt: "+w)
+			defer fmt.Fprintln(os.Stderr, "agt: "+w)
+		}
+	}
 	titled := false
 	defer func() {
 		if titled {
@@ -375,17 +384,20 @@ func (c *client) attachOnce(id, uid string, titled *bool) (res attachResult, err
 		return attachResult{outcome: outcomeEnded, ended: ended}, nil
 	}
 	ident.update(attached)
+	// Each attachment has its own SSH agent forwarder, if any: a reattach
+	// is a new attachment, and needs a new one.
+	var fwd *agentForwarder
 	defer func() {
 		if stream != nil {
 			// A switch keeps the connection for the next attachment;
 			// anything else may be followed by closing it.
 			stream.leave(c.host != nil && res.outcome != outcomeSwitch)
 		}
+		// The forwarder stops after the leave, so the worker has handed
+		// the size on before agent requests stop finding it.
+		fwd.stop()
 	}()
-	// Each attachment has its own SSH agent forwarder, if any: a reattach
-	// is a new attachment, and needs a new one.
-	fwd := c.forwardAgent(id, attached)
-	defer func() { fwd.stop() }()
+	fwd = c.forwardAgent(id, attached)
 
 	writeOut(terminalTitleBytes(id + " - " + attachExitTitle))
 	*titled = true

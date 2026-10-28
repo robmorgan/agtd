@@ -12,10 +12,13 @@ package worker
 //     an ssh-agent stream that client opened, which relays the request to
 //     the client's own agent;
 //  2. else, while the owner's id is reserved for its reattach and the owner
-//     was forwarding, nowhere yet: the connection waits, at most
-//     sizeOwnerGrace, for the reattached owner's forwarder;
+//     was forwarding, or while the owner's forwarder has lately ended
+//     (whether or not it owned the size then) and agt opens another, nowhere
+//     yet: the connection waits, at most sizeOwnerGrace, for the owner's
+//     next forwarder, and is dropped if the program gave up meanwhile;
 //  3. else the agent the worker inherited (SSH_AUTH_SOCK in its own
-//     environment), relayed byte for byte, as sessions got before;
+//     environment, unless that is another session's socket: inheritedAgent),
+//     relayed byte for byte, as sessions got before;
 //  4. else no agent: an empty identities answer, and SSH_AGENT_FAILURE to
 //     anything else.
 //
@@ -25,20 +28,34 @@ package worker
 // itself, to spare the round trip; the client enforces its own policy too.
 //
 // Bounds: maxAgentConns program connections at once (more are closed as
-// they arrive); messages of sshagent.MaxMessageLen; one request in flight
-// per connection, since the worker reads the next only after writing the
-// reply; one forwarder per attachment; a reply waited for agentReplyTimeout;
-// a write to a forwarder given agentWriteTimeout, after which the forwarder
-// is dropped. A forwarder that stops reading stalls only the connections
-// routed to it, never the PTY, the attachments or other forwarders.
+// they arrive, before a goroutine starts for them, and logged);
+// agentIdleTimeout for each request, the first one too, except on a
+// connection relayed to the inherited agent after its first; messages of
+// sshagent.MaxMessageLen, and
+// frames from a forwarder of protocol.MaxSSHAgentFramePayload; one request
+// in flight per connection, since the worker reads the next only after
+// writing the reply; one forwarder per attachment; a client's reply waited
+// for agentReplyTimeout; a write to a forwarder given agentWriteTimeout,
+// after which the forwarder is dropped, and a reply to a program the same,
+// after which its connection is closed. A connection relayed to the
+// inherited agent has none of these past its first message: it is relayed
+// byte for byte, as before. A forwarder that stops reading stalls only the
+// connections routed to it, never the PTY, the attachments or other
+// forwarders. Refusals are paced (record): one like another in its quiet
+// time, which starts at agentEventQuiet and doubles while they keep coming,
+// is held back and counted, and so is any once maxAgentEventKeys different
+// ones are held, so a program looping on a refused request writes about
+// ten events in its first hour and one an hour after, not one a request.
+// Every signature is recorded.
 //
 // Goroutines: the accept loop, which ends when the listener closes (at the
-// session's end or a handoff); one per program connection (at most
-// maxAgentConns), ending with its connection, which stop closes; and for a
-// connection relayed to the inherited agent one more, copying the other
-// direction. A forwarder is served by a session-socket connection handler
-// (serveForwarder), which reads the client's replies until the stream ends,
-// as it does with its attachment.
+// session's end or a handoff); one per program connection, ending with its
+// connection, which stop closes; the timers that end the refusals' quiet
+// times, at most maxAgentEventKeys and one more, each running briefly when
+// its time is up; and for a connection relayed to the inherited agent one
+// more, copying the other direction. A forwarder is served by a
+// session-socket connection handler (serveForwarder), which reads the
+// client's replies until the stream ends, as it does with its attachment.
 
 import (
 	"bufio"
@@ -48,12 +65,12 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"agtd.sh/internal/db"
+	"agtd.sh/internal/paths"
 	"agtd.sh/internal/protocol"
 	"agtd.sh/internal/session"
 	"agtd.sh/internal/sshagent"
@@ -62,10 +79,26 @@ import (
 
 const (
 	// maxAgentConns bounds the program connections open on a session's
-	// agent socket.
-	maxAgentConns = 16
+	// agent socket. It matches agt's bound on a forwarder's connections to
+	// its agent.
+	maxAgentConns = 64
 	// agentDialTimeout bounds connecting to the inherited agent.
 	agentDialTimeout = 2 * time.Second
+	// maxAgentBindings bounds the session bindings remembered per
+	// connection, as OpenSSH's agent bounds them.
+	maxAgentBindings = 16
+	// maxAgentEventKeys bounds the different refusals in their quiet time
+	// at once (record); more are counted together. A flush writes at most
+	// this many counts and one more, and as many first refusals can follow
+	// it at once: twice it and one more must fit the recorder's queue
+	// (maxPendingEvents), or events are dropped.
+	maxAgentEventKeys = 16
+	// agentAcceptBackoff bounds the wait before accepting again after the
+	// agent socket failed to accept.
+	agentAcceptBackoff = time.Second
+	// agentQuiesceTimeout bounds the wait, at the session's end, for the
+	// events of requests whose replies the programs have (quiesce).
+	agentQuiesceTimeout = time.Second
 )
 
 var (
@@ -73,9 +106,20 @@ var (
 	// for its agent to ask the user to confirm (a key's touch, 1Password)
 	// over a slow link. A variable for tests.
 	agentReplyTimeout = 90 * time.Second
-	// agentWriteTimeout bounds a write to a forwarder; one that takes
-	// longer is dropped.
+	// agentWriteTimeout bounds a write to a forwarder, or to a program; one
+	// that takes longer is dropped.
 	agentWriteTimeout = 10 * time.Second
+	// agentIdleTimeout bounds the wait for each of a program connection's
+	// requests, so one that never speaks, or stays open unused, cannot hold
+	// one of the socket's places for good. Its first request gets as long:
+	// ssh-add connects before it asks for a passphrase or a PIN. A variable
+	// for tests.
+	agentIdleTimeout = 15 * time.Minute
+	// agentEventQuiet is how long a refusal holds back those like it at
+	// first, and agentEventQuietMax how long at most, as the time doubles
+	// while they keep coming (record). Variables for tests.
+	agentEventQuiet    = 10 * time.Second
+	agentEventQuietMax = time.Hour
 )
 
 var (
@@ -109,15 +153,86 @@ type agentServer struct {
 	handlers sync.WaitGroup
 
 	nextID atomic.Uint32
+
+	// events paces refusals (record): those in their quiet time, by
+	// summary; overflow is the quiet time of those held back for want of
+	// room, nil while there is none.
+	eventsMu sync.Mutex
+	events   map[string]*agentEvent
+	overflow *agentEvent
+	// recording counts forwarded requests between their reply and their
+	// event: from just before the reply reaches the program until note has
+	// recorded what the client's agent did. recorded is closed when it
+	// falls to zero. The session's end waits for them (quiesce) before the
+	// recorder closes. Every other event, a flush's counts too, goes to the
+	// recorder under eventsMu, or before the program has its reply.
+	recording int
+	recorded  chan struct{}
+}
+
+// agentEvent is a quiet time: how long it is, how many refusals it has held
+// back so far, and the timer that ends it (endQuiet).
+type agentEvent struct {
+	quiet time.Duration
+	held  int
+	timer *time.Timer
 }
 
 // agentConn is one program connection to the agent socket.
 type agentConn struct {
 	id   uint32
 	conn transport.Stream
+	// r reads conn, so a program's next message can be looked for without
+	// taking it.
+	r *bufio.Reader
 	// up is the inherited agent's connection, for a connection relayed
 	// there; guarded by agentServer.mu.
 	up net.Conn
+}
+
+// inheritedAgent is the agent a worker relays to when no forwarder serves:
+// SSH_AUTH_SOCK in its environment, unless that is itself another session's
+// socket, as a daemon started from inside a session hands its workers.
+// Relaying there would let one session sign with the keys forwarded to
+// another, recorded under the other's name. A symlink is kept: where it
+// leads is judged at each dial (resolveAgentSocket), since it moves.
+func inheritedAgent(p *paths.AppPaths) string {
+	sock := os.Getenv("SSH_AUTH_SOCK")
+	if sock != "" && inAgentSocketDir(p, sock) {
+		return ""
+	}
+	return sock
+}
+
+// inAgentSocketDir reports whether path is in the runtime's ssh/ directory,
+// where sessions' agent sockets are.
+func inAgentSocketDir(p *paths.AppPaths, path string) bool {
+	dir := filepath.Dir(filepath.Clean(path))
+	if dirInfo, err := os.Stat(dir); err == nil {
+		if sshInfo, err := os.Stat(p.SSHDir); err == nil {
+			return os.SameFile(dirInfo, sshInfo)
+		}
+	}
+	return dir == filepath.Clean(p.SSHDir)
+}
+
+// resolveAgentSocket follows path through any symlinks to the socket it
+// names now, and reports false when that is a session's agent socket. A link
+// is the usual way to keep a fixed SSH_AUTH_SOCK (`ln -sf "$SSH_AUTH_SOCK"
+// ~/.ssh/ssh_auth_sock` in a shell's startup), a shell in a session points
+// it at that session's socket, and the next login points it back.
+func resolveAgentSocket(p *paths.AppPaths, path string) (string, bool) {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	} else if target, err := os.Readlink(path); err == nil {
+		// A link to a socket that is not there: judge it by where it
+		// points.
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(path), target)
+		}
+		path = target
+	}
+	return path, !inAgentSocketDir(p, path)
 }
 
 // listenAgentSocket binds a session's agent socket at path.
@@ -138,10 +253,13 @@ func listenAgentSocket(path string) (*transport.UnixListener, os.FileInfo, error
 }
 
 func newAgentServer(rt *runtime, path string, ownSocket os.FileInfo, inherited string, l *transport.UnixListener) *agentServer {
-	return &agentServer{rt: rt, path: path, ownSocket: ownSocket, inherited: inherited, listener: l, conns: map[*agentConn]struct{}{}}
+	return &agentServer{rt: rt, path: path, ownSocket: ownSocket, inherited: inherited, listener: l,
+		conns: map[*agentConn]struct{}{}, events: map[string]*agentEvent{}}
 }
 
-// start serves the socket's listener.
+// start serves the socket's listener. Each connection is admitted (track)
+// before a goroutine starts for it, so one over maxAgentConns costs no more
+// than closing it.
 func (a *agentServer) start() {
 	if a.listener == nil {
 		return
@@ -155,7 +273,43 @@ func (a *agentServer) start() {
 	l := a.listener
 	go func() {
 		defer close(done)
-		a.accept(l, quit)
+		var backoff time.Duration
+		// Connections refused over the bound are logged at most once a
+		// minute, with how many there were since.
+		var dropped int
+		var droppedLogged time.Time
+		for {
+			s, err := l.Accept()
+			if err != nil {
+				if errors.Is(err, net.ErrClosed) {
+					return
+				}
+				backoff = min(max(2*backoff, 5*time.Millisecond), agentAcceptBackoff)
+				fmt.Fprintf(os.Stderr, "session worker: accept on the SSH agent socket: %v; retrying in %v\n", err, backoff)
+				time.Sleep(backoff)
+				continue
+			}
+			backoff = 0
+			c, full := a.track(s, quit)
+			if c == nil {
+				// Over the bound, or closing: the program carries on
+				// without an agent.
+				if full {
+					dropped++
+					if time.Since(droppedLogged) >= time.Minute {
+						fmt.Fprintf(os.Stderr, "session worker: refused %d SSH agent connections: %d are open\n", dropped, maxAgentConns)
+						dropped, droppedLogged = 0, time.Now()
+					}
+				}
+				s.Close()
+				continue
+			}
+			a.handlers.Add(1)
+			go func() {
+				defer a.handlers.Done()
+				a.serve(c, quit)
+			}()
+		}
 	}()
 }
 
@@ -177,6 +331,11 @@ func (a *agentServer) stop() {
 	}
 	a.mu.Unlock()
 	a.handlers.Wait()
+	// The counts of refusals held back go to the recorder before a
+	// handoff's exec, which loses what it has not written yet. At the
+	// session's end those were written before the recorder closed
+	// (onChildExited); any since are not recorded.
+	a.flushEvents()
 }
 
 // relisten serves the socket again from the duplicate kept for an exec that
@@ -203,48 +362,22 @@ func (a *agentServer) removeOwnSocket() {
 	}
 }
 
-func (a *agentServer) accept(l *transport.UnixListener, quit chan struct{}) {
-	backoff := time.Duration(0)
-	for {
-		s, err := l.Accept()
-		if err != nil {
-			if errors.Is(err, net.ErrClosed) {
-				return
-			}
-			// Out of descriptors, say: retry rather than give the socket up.
-			backoff = min(max(2*backoff, 5*time.Millisecond), time.Second)
-			fmt.Fprintf(os.Stderr, "session worker: accept on the SSH agent socket: %v; retrying in %v\n", err, backoff)
-			time.Sleep(backoff)
-			continue
-		}
-		backoff = 0
-		c := a.track(s, quit)
-		if c == nil {
-			// Over the bound: the program carries on without an agent.
-			s.Close()
-			continue
-		}
-		go a.serve(c, quit)
-	}
-}
-
-// track registers a program connection, unless maxAgentConns are open or
-// the socket is closing.
-func (a *agentServer) track(s transport.Stream, quit chan struct{}) *agentConn {
+// track registers a program connection. It returns nil when the socket is
+// closing, or, with full set, when maxAgentConns are open.
+func (a *agentServer) track(s transport.Stream, quit chan struct{}) (c *agentConn, full bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	select {
 	case <-quit:
-		return nil
+		return nil, false
 	default:
 	}
 	if len(a.conns) >= maxAgentConns {
-		return nil
+		return nil, true
 	}
-	c := &agentConn{id: a.nextID.Add(1), conn: s}
+	c = &agentConn{id: a.nextID.Add(1), conn: s, r: bufio.NewReader(s)}
 	a.conns[c] = struct{}{}
-	a.handlers.Add(1)
-	return c
+	return c, false
 }
 
 func (a *agentServer) untrack(c *agentConn) {
@@ -256,20 +389,27 @@ func (a *agentServer) untrack(c *agentConn) {
 	if up != nil {
 		up.Close()
 	}
-	a.handlers.Done()
 }
 
 // serve routes a program connection on its first message and serves it
 // there until it closes.
 func (a *agentServer) serve(c *agentConn, quit <-chan struct{}) {
 	defer a.untrack(c)
-	first, err := sshagent.ReadMessage(c.conn)
+	c.conn.SetReadDeadline(time.Now().Add(agentIdleTimeout))
+	first, err := sshagent.ReadMessage(c.r)
 	if err != nil {
 		return
 	}
+	c.conn.SetReadDeadline(time.Time{})
 	for {
-		f, err := a.route(quit)
+		f, waited, err := a.route(quit)
 		if err != nil {
+			return
+		}
+		if waited && c.gone() {
+			// The program gave up while it waited: its request goes
+			// nowhere, so no agent asks anyone to confirm a signature
+			// nobody waits for.
 			return
 		}
 		if f == nil {
@@ -280,36 +420,54 @@ func (a *agentServer) serve(c *agentConn, quit <-chan struct{}) {
 		}
 		// The forwarder ended after it was picked; route again.
 	}
-	if a.inherited != "" && a.relayInherited(c, first) {
+	if a.inherited != "" && a.relayInherited(c, first, quit) {
 		return
 	}
 	a.serveUnavailable(c, first)
 }
 
-// route picks a new connection's forwarder, waiting while the session's
-// size owner is a forwarding owner yet to reattach. A nil forwarder means
-// none: the inherited agent, or no agent.
-func (a *agentServer) route(quit <-chan struct{}) (*forwarder, error) {
+// answer writes a reply to the program. One that does not take it within
+// agentWriteTimeout (it sends requests and never reads the answers) loses
+// its connection, so it cannot hold one of the socket's places by never
+// reading.
+func (c *agentConn) answer(reply []byte) error {
+	c.conn.SetWriteDeadline(time.Now().Add(agentWriteTimeout))
+	return sshagent.WriteMessage(c.conn, reply)
+}
+
+// gone reports whether the program has closed its connection, without
+// taking anything it sent.
+func (c *agentConn) gone() bool {
+	c.conn.SetReadDeadline(time.Now().Add(time.Millisecond))
+	_, err := c.r.Peek(1)
+	c.conn.SetReadDeadline(time.Time{})
+	return err != nil && !errors.Is(err, os.ErrDeadlineExceeded)
+}
+
+// route picks a new connection's forwarder, waiting while the size owner's
+// next forwarder is awaited (agentRoute), and reports whether it waited. A
+// nil forwarder means none: the inherited agent, or no agent.
+func (a *agentServer) route(quit <-chan struct{}) (f *forwarder, waited bool, err error) {
 	for {
-		var f *forwarder
 		var until time.Time
 		var wake <-chan struct{}
 		if err := a.rt.owner.do(func(s *ownerState) error {
 			f, until, wake = s.agentRoute(time.Now())
 			return nil
 		}); err != nil {
-			return nil, err
+			return nil, waited, err
 		}
 		if f != nil || until.IsZero() {
-			return f, nil
+			return f, waited, nil
 		}
+		waited = true
 		timer := time.NewTimer(time.Until(until))
 		select {
 		case <-wake:
 		case <-timer.C:
 		case <-quit:
 			timer.Stop()
-			return nil, errAgentStopping
+			return nil, waited, errAgentStopping
 		}
 		timer.Stop()
 	}
@@ -325,43 +483,59 @@ func (a *agentServer) serveForwarded(c *agentConn, f *forwarder, msg []byte, qui
 	}
 	defer f.remove(fc)
 	for {
-		reply, keep := a.exchange(f, fc, msg, quit)
-		if reply != nil {
-			if err := sshagent.WriteMessage(c.conn, reply); err != nil {
-				return true
-			}
-		}
-		if !keep {
-			return true
+		reply, keep, answered := a.exchange(f, fc, msg, quit)
+		if answered {
+			// What the client's agent did is recorded once the program has
+			// its reply, since naming where a login goes reads known_hosts,
+			// which must not hold up a signature. The session's end waits
+			// for it (quiesce).
+			a.beginRecording()
 		}
 		var err error
-		if msg, err = sshagent.ReadMessage(c.conn); err != nil {
+		if reply != nil {
+			err = c.answer(reply)
+		}
+		if f.settle(fc) {
+			// The client closed the connection, or the forwarder ended,
+			// while the reply was on its way: the program has its answer,
+			// then its connection closes.
+			keep = false
+		}
+		if answered {
+			a.note(f, fc, msg, reply)
+			a.endRecording()
+		}
+		if err != nil || !keep {
+			return true
+		}
+		c.conn.SetReadDeadline(time.Now().Add(agentIdleTimeout))
+		if msg, err = sshagent.ReadMessage(c.r); err != nil {
 			return true
 		}
 	}
 }
 
 // exchange passes one request from a program to the client, and returns the
-// reply to write back and whether the connection carries on. A request a
-// forwarded agent never takes is refused here. When the client cannot
-// answer (the forwarder ended, it closed this connection, it took too long)
-// the program gets SSH_AGENT_FAILURE and its connection is closed, since
-// the client's agent connection, and any session binding on it, is gone.
-func (a *agentServer) exchange(f *forwarder, fc *forwardedConn, msg []byte, quit <-chan struct{}) (reply []byte, keep bool) {
+// reply to write back, whether the connection carries on, and whether the
+// client answered. A request a forwarded agent never takes is refused here.
+// When the client cannot answer (the forwarder ended, it closed this
+// connection, it took too long) the program gets SSH_AGENT_FAILURE and its
+// connection is closed, since the client's agent connection, and any session
+// binding on it, is gone.
+func (a *agentServer) exchange(f *forwarder, fc *forwardedConn, msg []byte, quit <-chan struct{}) (reply []byte, keep, answered bool) {
 	if !sshagent.Forwardable(msg) {
-		a.rt.recorder.event(db.NewEvent{Kind: session.EventSSHAgentRefused,
-			Summary: fmt.Sprintf("refused a request to %s on the agent %s forwards: a forwarded agent only lists keys and signs", sshagent.Describe(msg), describeAgentClient(f.client))})
-		return sshagent.Failure(), true
+		a.record(session.EventSSHAgentRefused,
+			fmt.Sprintf("refused a request to %s on the agent %s forwards: a forwarded agent only lists keys and signs", sshagent.Describe(msg), describeAgentClient(f.client)))
+		return sshagent.Failure(), true, false
 	}
 	reply, err := f.request(fc, msg, quit)
 	switch {
 	case errors.Is(err, errAgentStopping):
-		return nil, false
+		return nil, false, false
 	case err != nil:
-		return sshagent.Failure(), false
+		return sshagent.Failure(), false, false
 	}
-	a.note(f, fc, msg, reply)
-	return reply, true
+	return reply, true, true
 }
 
 // note records what a forwarded request did: the host a connection is bound
@@ -369,23 +543,178 @@ func (a *agentServer) exchange(f *forwarder, fc *forwardedConn, msg []byte, quit
 func (a *agentServer) note(f *forwarder, fc *forwardedConn, msg, reply []byte) {
 	switch sshagent.Type(msg) {
 	case sshagent.MsgExtension:
-		if b, err := sshagent.ParseSessionBind(msg); err == nil {
-			fc.boundHost = b.HostKey
+		// A binding counts once the client's agent has accepted it, which
+		// OpenSSH's does only after checking the host key's signature over
+		// the session id.
+		if b, err := sshagent.ParseSessionBind(msg); err == nil && sshagent.Type(reply) == sshagent.MsgSuccess {
+			fc.bind(b.SessionID, b.HostKey)
 		}
 	case sshagent.MsgSignRequest:
 		req, err := sshagent.ParseSignRequest(msg)
 		if err != nil {
 			return
 		}
-		what, key := describeSigned(req.Data, fc.boundHost), sshagent.Fingerprint(req.Key)
+		what, key := describeSigned(req.Data, fc.bindings), sshagent.Fingerprint(req.Key)
 		switch sshagent.Type(reply) {
 		case sshagent.MsgSignResponse:
-			a.rt.recorder.event(db.NewEvent{Kind: session.EventSSHAgentSigned,
-				Summary: fmt.Sprintf("%s signed %s using key %s", describeAgentClient(f.client), what, key)})
+			a.record(session.EventSSHAgentSigned, fmt.Sprintf("%s signed %s using key %s", describeAgentClient(f.client), what, key))
 		case sshagent.MsgFailure:
-			a.rt.recorder.event(db.NewEvent{Kind: session.EventSSHAgentRefused,
-				Summary: fmt.Sprintf("%s refused to sign %s using key %s", describeAgentClient(f.client), what, key)})
+			a.record(session.EventSSHAgentRefused, fmt.Sprintf("%s refused to sign %s using key %s", describeAgentClient(f.client), what, key))
 		}
+	}
+}
+
+// record records one of the socket's events. Every signature is recorded:
+// it is the trail of what the client's agent signed. Refusals are paced: a
+// refusal starts a quiet time of agentEventQuiet, and those like it that
+// come within it are held back. When it ends an event counts them, and if
+// there were any, another quiet time follows, twice as long, up to
+// agentEventQuietMax; if there were none, the refusal is forgotten. While
+// maxAgentEventKeys refusals are in their quiet time, any other is held
+// back in the overflow's quiet time instead, counted with the rest of them
+// on the same doubling clock, and while that holds any back, other
+// refusals join it rather than start their own. So a program looping on a
+// refused request writes about ten events in its first hour and one an
+// hour after, and one varying what it asks maxAgentEventKeys more. Events
+// go to the recorder under eventsMu, so none is between the two when the
+// session's end flushes the rest.
+func (a *agentServer) record(kind session.EventKind, summary string) {
+	if kind != session.EventSSHAgentRefused {
+		a.rt.recorder.event(db.NewEvent{Kind: kind, Summary: summary})
+		return
+	}
+	a.eventsMu.Lock()
+	defer a.eventsMu.Unlock()
+	switch e := a.events[summary]; {
+	case e != nil:
+		e.held++
+	case a.overflow == nil && len(a.events) < maxAgentEventKeys:
+		a.events[summary] = startQuiet(func(e *agentEvent) { a.endQuiet(summary, e) })
+		a.rt.recorder.event(db.NewEvent{Kind: kind, Summary: summary})
+	default:
+		if a.overflow == nil {
+			a.overflow = startQuiet(a.endOverflow)
+		}
+		a.overflow.held++
+	}
+}
+
+// startQuiet starts a quiet time of agentEventQuiet, which calls end when
+// it is over.
+func startQuiet(end func(*agentEvent)) *agentEvent {
+	e := &agentEvent{quiet: agentEventQuiet}
+	e.timer = time.AfterFunc(e.quiet, func() { end(e) })
+	return e
+}
+
+// again starts the quiet time after e, twice as long, up to
+// agentEventQuietMax, once what e held back is counted.
+func (e *agentEvent) again() {
+	e.held, e.quiet = 0, min(2*e.quiet, agentEventQuietMax)
+	e.timer.Reset(e.quiet)
+}
+
+// endQuiet ends quiet time e of the refusal summary: those it held back are
+// counted, and another follows; if it held none back, the refusal is
+// forgotten.
+func (a *agentServer) endQuiet(summary string, e *agentEvent) {
+	a.eventsMu.Lock()
+	defer a.eventsMu.Unlock()
+	switch {
+	case a.events[summary] != e:
+		// Flushed meanwhile (flushEvents).
+	case e.held == 0:
+		delete(a.events, summary)
+	default:
+		a.countHeld(summary, e.held)
+		e.again()
+	}
+}
+
+// endOverflow ends the overflow's quiet time e likewise.
+func (a *agentServer) endOverflow(e *agentEvent) {
+	a.eventsMu.Lock()
+	defer a.eventsMu.Unlock()
+	switch {
+	case a.overflow != e:
+	case e.held == 0:
+		a.overflow = nil
+	default:
+		a.countOverflow(e.held)
+		e.again()
+	}
+}
+
+// countHeld and countOverflow record how many refusals a quiet time held
+// back. Called with eventsMu held.
+func (a *agentServer) countHeld(summary string, n int) {
+	a.rt.recorder.event(db.NewEvent{Kind: session.EventSSHAgentRefused,
+		Summary: fmt.Sprintf("%s (and %d more like it)", summary, n)})
+}
+
+func (a *agentServer) countOverflow(n int) {
+	a.rt.recorder.event(db.NewEvent{Kind: session.EventSSHAgentRefused,
+		Summary: fmt.Sprintf("refused %d more requests, too many different ones to list each", n)})
+}
+
+// flushEvents counts every refusal held back, and forgets them all: at the
+// session's end, and when the socket stops.
+func (a *agentServer) flushEvents() {
+	a.eventsMu.Lock()
+	defer a.eventsMu.Unlock()
+	for summary, e := range a.events {
+		e.timer.Stop()
+		if e.held > 0 {
+			a.countHeld(summary, e.held)
+		}
+		delete(a.events, summary)
+	}
+	if e := a.overflow; e != nil {
+		e.timer.Stop()
+		if e.held > 0 {
+			a.countOverflow(e.held)
+		}
+		a.overflow = nil
+	}
+}
+
+// beginRecording marks a forwarded request between its reply and its event
+// (recording); endRecording marks its event recorded.
+func (a *agentServer) beginRecording() {
+	a.eventsMu.Lock()
+	if a.recording == 0 {
+		a.recorded = make(chan struct{})
+	}
+	a.recording++
+	a.eventsMu.Unlock()
+}
+
+func (a *agentServer) endRecording() {
+	a.eventsMu.Lock()
+	if a.recording--; a.recording == 0 {
+		close(a.recorded)
+	}
+	a.eventsMu.Unlock()
+}
+
+// quiesce waits, at most d, for the forwarded requests whose replies the
+// programs have but whose events are not yet recorded, so a signature given
+// before the session's end is on record. It waits on nothing else: not the
+// connections' goroutines, which may wait for the owner goroutine that
+// calls it, or for a client's reply.
+func (a *agentServer) quiesce(d time.Duration) {
+	a.eventsMu.Lock()
+	if a.recording == 0 {
+		a.eventsMu.Unlock()
+		return
+	}
+	recorded := a.recorded
+	a.eventsMu.Unlock()
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-recorded:
+	case <-t.C:
 	}
 }
 
@@ -397,15 +726,17 @@ func describeAgentClient(client string) string {
 	return client
 }
 
-// describeSigned says what signed data was for: a login, as whom and to
-// where (the host key the connection's session binding names, from this
-// machine's known_hosts when it can be), or an SSHSIG namespace.
-func describeSigned(data, boundHost []byte) string {
+// describeSigned says what signed data was for: a login, as whom, and to
+// where when the login's session is one the client's agent accepted a
+// binding for (the host key it names, from this machine's known_hosts when
+// it can be), or an SSHSIG namespace.
+func describeSigned(data []byte, bindings map[string][]byte) string {
 	p := sshagent.ParsePurpose(data)
 	switch {
-	case p.Login && boundHost != nil:
-		return fmt.Sprintf("a login as %s to %s", p.User, hostName(boundHost))
 	case p.Login:
+		if host, ok := bindings[string(p.SessionID)]; ok {
+			return fmt.Sprintf("a login as %s to %s", p.User, hostName(host))
+		}
 		return "a login as " + p.User
 	case p.Namespace != "":
 		return "data in the namespace " + p.Namespace
@@ -421,8 +752,12 @@ func hostName(key []byte) string {
 		files = append(files, filepath.Join(home, ".ssh", "known_hosts"))
 	}
 	files = append(files, "/etc/ssh/ssh_known_hosts")
-	if name := sshagent.KnownHostName(key, files...); name != "" {
+	name, hashed := sshagent.KnownHostName(key, files...)
+	switch {
+	case name != "":
 		return name
+	case hashed:
+		return "a known host (hashed in known_hosts; key " + sshagent.Fingerprint(key) + ")"
 	}
 	return "an unknown host (key " + sshagent.Fingerprint(key) + ")"
 }
@@ -430,13 +765,30 @@ func hostName(key []byte) string {
 // relayInherited relays a connection to the agent the worker inherited, byte
 // for byte and unfiltered: the session's programs could reach that agent
 // before, so it gives them nothing new. It reports false, having written
-// nothing to the program, when that agent cannot be reached.
-func (a *agentServer) relayInherited(c *agentConn, first []byte) bool {
-	up, err := net.DialTimeout("unix", a.inherited, agentDialTimeout)
+// nothing to the program, when that agent cannot be reached, or when its
+// path now leads to a session's socket: a link moved since the worker
+// started.
+func (a *agentServer) relayInherited(c *agentConn, first []byte, quit <-chan struct{}) bool {
+	// The socket the path names now is the one dialled, so a link moved
+	// between the check and the dial cannot lead elsewhere.
+	target, ok := resolveAgentSocket(a.rt.paths, a.inherited)
+	if !ok {
+		return false
+	}
+	up, err := net.DialTimeout("unix", target, agentDialTimeout)
 	if err != nil {
 		return false
 	}
 	a.mu.Lock()
+	select {
+	case <-quit:
+		// stop has closed the connections it knew of; this one would
+		// escape it, and could hold stop up.
+		a.mu.Unlock()
+		up.Close()
+		return true
+	default:
+	}
 	c.up = up
 	a.mu.Unlock()
 	if err := sshagent.WriteMessage(up, first); err != nil {
@@ -445,7 +797,7 @@ func (a *agentServer) relayInherited(c *agentConn, first []byte) bool {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_, _ = io.Copy(up, c.conn)
+		_, _ = io.Copy(up, c.r)
 		if uc, ok := up.(*net.UnixConn); ok {
 			_ = uc.CloseWrite()
 		}
@@ -466,11 +818,12 @@ func (a *agentServer) serveUnavailable(c *agentConn, msg []byte) {
 		if sshagent.Type(msg) == sshagent.MsgRequestIdentities {
 			reply = sshagent.NoIdentities()
 		}
-		if err := sshagent.WriteMessage(c.conn, reply); err != nil {
+		if err := c.answer(reply); err != nil {
 			return
 		}
+		c.conn.SetReadDeadline(time.Now().Add(agentIdleTimeout))
 		var err error
-		if msg, err = sshagent.ReadMessage(c.conn); err != nil {
+		if msg, err = sshagent.ReadMessage(c.r); err != nil {
 			return
 		}
 	}
@@ -499,8 +852,7 @@ func (a *agentServer) noteUnavailable() {
 // SSHAgentReply frames go back to whichever connection waits for them, one
 // slot each since a connection has one request in flight.
 type forwarder struct {
-	conn     transport.Stream
-	attachID string
+	conn transport.Stream
 	// client names the client (ForwardSSHAgent.Client, set by the daemon).
 	client string
 
@@ -525,13 +877,24 @@ type forwardedConn struct {
 	// answered the program; an idle one by whoever ends it.
 	inFlight     bool
 	clientClosed bool
-	// boundHost is the host key of the connection's session binding; only
-	// the connection's goroutine touches it.
-	boundHost []byte
+	// bindings are the session bindings the client's agent accepted on the
+	// connection, host keys by session id; only the connection's goroutine
+	// touches them.
+	bindings map[string][]byte
 }
 
-func newForwarder(conn transport.Stream, attachID, client string) *forwarder {
-	return &forwarder{conn: conn, attachID: attachID, client: client, conns: map[uint32]*forwardedConn{}, done: make(chan struct{})}
+// bind remembers a session binding the client's agent accepted.
+func (fc *forwardedConn) bind(sessionID, hostKey []byte) {
+	if fc.bindings == nil {
+		fc.bindings = map[string][]byte{}
+	}
+	if len(fc.bindings) < maxAgentBindings {
+		fc.bindings[string(sessionID)] = hostKey
+	}
+}
+
+func newForwarder(conn transport.Stream, client string) *forwarder {
+	return &forwarder{conn: conn, client: client, conns: map[uint32]*forwardedConn{}, done: make(chan struct{})}
 }
 
 // ended reports whether f has ended, though its attachment may not have
@@ -573,25 +936,28 @@ func (f *forwarder) request(fc *forwardedConn, msg []byte, quit <-chan struct{})
 		f.mu.Unlock()
 		return nil, errForwarderGone
 	}
+	select {
+	case <-fc.reply:
+		// A duplicate of the last reply, taken before that request ended.
+	default:
+	}
+	// In flight until the program has the answer (settle), so the
+	// client's close cannot take the connection from under the reply.
 	fc.inFlight = true
 	f.mu.Unlock()
-	defer func() {
-		f.mu.Lock()
-		fc.inFlight = false
-		f.mu.Unlock()
-	}()
 	if err := f.write(&protocol.Response{SSHAgentRequest: &protocol.SSHAgentMessage{Conn: fc.id, Data: msg}}); err != nil {
 		return nil, err
 	}
 	timer := time.NewTimer(agentReplyTimeout)
 	defer timer.Stop()
+	var err error
 	select {
 	case reply := <-fc.reply:
 		return reply, nil
 	case <-fc.gone:
-		return nil, errClientClosed
+		err = errClientClosed
 	case <-f.done:
-		return nil, errForwarderGone
+		err = errForwarderGone
 	case <-quit:
 		return nil, errAgentStopping
 	case <-timer.C:
@@ -601,6 +967,25 @@ func (f *forwarder) request(fc *forwardedConn, msg []byte, quit <-chan struct{})
 		_ = f.write(&protocol.Response{SSHAgentClose: &protocol.SSHAgentConn{Conn: fc.id}})
 		return nil, errClientTimeout
 	}
+	// The client's reply came before its close or the stream's end
+	// (readLoop takes frames in order), though the select picked the
+	// latter: it still answers the request, a signature the client made.
+	select {
+	case reply := <-fc.reply:
+		return reply, nil
+	default:
+		return nil, err
+	}
+}
+
+// settle ends fc's request once its answer has been written to the
+// program, and reports whether fc takes no more: f ended, or the client
+// closed fc, meanwhile.
+func (f *forwarder) settle(fc *forwardedConn) (finished bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	fc.inFlight = false
+	return f.closed || fc.clientClosed
 }
 
 // write sends one frame to the client. A client that does not take it
@@ -640,7 +1025,7 @@ func (f *forwarder) close() {
 // something else.
 func (f *forwarder) readLoop(r *bufio.Reader) {
 	for {
-		req, err := protocol.ReadRequest(r)
+		req, err := protocol.ReadSSHAgentRequest(r)
 		if err != nil || req == nil {
 			return
 		}
@@ -650,16 +1035,17 @@ func (f *forwarder) readLoop(r *bufio.Reader) {
 			if len(m.Data) == 0 || len(m.Data) > sshagent.MaxMessageLen {
 				return
 			}
+			// Only a connection waiting for its reply takes one; any other
+			// reply is dropped, or it would answer the next request.
 			f.mu.Lock()
-			fc := f.conns[m.Conn]
-			f.mu.Unlock()
-			if fc != nil {
+			if fc := f.conns[m.Conn]; fc != nil && fc.inFlight {
 				select {
 				case fc.reply <- m.Data:
 				default:
-					// A reply nobody asked for: drop it.
+					// A second reply to one request: drop it.
 				}
 			}
+			f.mu.Unlock()
 		case req.SSHAgentClose != nil:
 			f.mu.Lock()
 			if fc := f.conns[req.SSHAgentClose.Conn]; fc != nil && !fc.clientClosed {
@@ -677,8 +1063,9 @@ func (f *forwarder) readLoop(r *bufio.Reader) {
 }
 
 // serveForwarder serves an ssh-agent stream: once the attachment it names is
-// found live in this incarnation and has no forwarder yet, it is the
-// attachment's forwarder until the stream or the attachment ends.
+// found live in this incarnation and has no live forwarder (one that has
+// ended gives way), it is the attachment's forwarder until the stream or the
+// attachment ends.
 func (rt *runtime) serveForwarder(conn transport.Stream, reader *bufio.Reader, req *protocol.ForwardSSHAgent) error {
 	refuse := func(err error) error {
 		_ = protocol.WriteResponse(conn, protocol.ErrorResponsef("%v", err))
@@ -690,7 +1077,7 @@ func (rt *runtime) serveForwarder(conn transport.Stream, reader *bufio.Reader, r
 	if req.ExpectUID != "" && req.ExpectUID != rt.uid {
 		return refuse(errors.New(protocol.SessionReplacedMessage(rt.sessionID)))
 	}
-	f := newForwarder(conn, req.Attachment, req.Client)
+	f := newForwarder(conn, req.Client)
 	// Registered and acknowledged under writeMu, so no request reaches the
 	// client before its acknowledgement does.
 	f.writeMu.Lock()
@@ -711,17 +1098,26 @@ func (rt *runtime) serveForwarder(conn transport.Stream, reader *bufio.Reader, r
 }
 
 // agentRoute is where a new connection to the agent socket goes: the size
-// owner's forwarder; else, while the owner's id is reserved for the reattach
-// of an owner that was forwarding, nowhere yet, until the time returned;
-// else neither (the inherited agent, or none). wake is closed when the
-// answer may have changed.
+// owner's forwarder; else nowhere yet, until the time returned, while the
+// owner's next forwarder is awaited: its forwarder ended within
+// sizeOwnerGrace (removed or not yet, and whether or not it owned the size
+// then), so agt opens another, or its id is reserved for the reattach of an
+// owner that was forwarding (agentWaitFor); else neither (the inherited
+// agent, or none). wake is closed when the answer may have changed.
 func (s *ownerState) agentRoute(now time.Time) (f *forwarder, until time.Time, wake <-chan struct{}) {
 	if s.agentWake == nil {
 		s.agentWake = make(chan struct{})
 	}
-	if a := s.attachments[s.sizeOwner]; a != nil && a.forwarder != nil && !a.forwarder.ended() {
-		s.agentGap = false
-		return a.forwarder, time.Time{}, s.agentWake
+	if a := s.attachments[s.sizeOwner]; a != nil {
+		switch {
+		case a.forwarder != nil && !a.forwarder.ended():
+			return a.forwarder, time.Time{}, s.agentWake
+		case a.forwarder != nil:
+			// Ended, and yet to be removed (removeForwarder).
+			return nil, now.Add(sizeOwnerGrace), s.agentWake
+		case now.Before(a.forwarderEnded.Add(sizeOwnerGrace)):
+			return nil, a.forwarderEnded.Add(sizeOwnerGrace), s.agentWake
+		}
 	}
 	if s.sizeOwner != "" && s.sizeOwner == s.agentWaitFor && now.Before(s.agentWaitUntil) {
 		return nil, s.agentWaitUntil, s.agentWake
@@ -729,21 +1125,29 @@ func (s *ownerState) agentRoute(now time.Time) (f *forwarder, until time.Time, w
 	return nil, time.Time{}, s.agentWake
 }
 
-// agentChanged wakes connections waiting for a route.
+// agentChanged runs whenever a new connection's route may have changed: it
+// ends the gap in forwarding once the size owner forwards again, and wakes
+// connections waiting for a route.
 func (s *ownerState) agentChanged() {
+	if a := s.attachments[s.sizeOwner]; a != nil && a.forwarder != nil && !a.forwarder.ended() {
+		// The next program to find no agent starts a new gap.
+		s.agentGap = false
+	}
 	if s.agentWake != nil {
 		close(s.agentWake)
 	}
 	s.agentWake = make(chan struct{})
 }
 
-// addForwarder makes f the forwarder of a live attachment.
+// addForwarder makes f the forwarder of a live attachment. One that has
+// ended, which its stream's handler has yet to remove, gives way to f, as
+// when agt opens a forwarder again.
 func (s *ownerState) addForwarder(attachID string, f *forwarder) error {
 	a, ok := s.attachments[attachID]
 	switch {
 	case !ok:
 		return fmt.Errorf("attachment `%s` of session `%s` not found", attachID, s.sessionID)
-	case a.forwarder != nil:
+	case a.forwarder != nil && !a.forwarder.ended():
 		return errForwarderExists
 	}
 	a.forwarder, a.forwarded = f, true
@@ -752,10 +1156,14 @@ func (s *ownerState) addForwarder(attachID string, f *forwarder) error {
 	return nil
 }
 
-// removeForwarder forgets an attachment's forwarder once it has ended.
+// removeForwarder forgets an attachment's forwarder once it has ended. If
+// the attachment lives on, agt opens another (a stream that failed, a write
+// that timed out): while the attachment owns the size, or once it takes it,
+// new agent connections wait for that one (agentRoute), as for an owner's
+// reattach, rather than turn to the devbox's own agent meanwhile.
 func (s *ownerState) removeForwarder(attachID string, f *forwarder) {
 	if a, ok := s.attachments[attachID]; ok && a.forwarder == f {
-		a.forwarder = nil
+		a.forwarder, a.forwarderEnded = nil, time.Now()
 		s.agentChanged()
 	}
 }
@@ -782,15 +1190,4 @@ func (s *ownerState) agentHandoffWaitFor() string {
 		return s.agentWaitFor
 	}
 	return ""
-}
-
-// withEnv is env with key set to value, replacing any value it had.
-func withEnv(env []string, key, value string) []string {
-	out := make([]string, 0, len(env)+1)
-	for _, kv := range env {
-		if !strings.HasPrefix(kv, key+"=") {
-			out = append(out, kv)
-		}
-	}
-	return append(out, key+"="+value)
 }

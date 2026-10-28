@@ -621,8 +621,8 @@ happened to a session: an id, the session, a time, a kind, an attention level (`
 | `done` | notice | the worker, when the program reports it finished (OSC 7501) |
 | `error` | action | the worker, when the program reports it failed and stopped (OSC 7501) |
 | `acknowledged` | info | the daemon, when the user looked at the session (below) |
-| `ssh_agent_signed` | info | the worker, for each signature a forwarded SSH agent gave a program in the session: what was signed (a login, as whom and to which host; an SSHSIG namespace), the key and the client (see "SSH Agent Forwarding") |
-| `ssh_agent_refused` | info | the worker, for a request a forwarded agent never takes (adding or removing keys, say), or a signature the client did not give |
+| `ssh_agent_signed` | info | the worker, for each signature a forwarded SSH agent gave a program in the session: what was signed (a login, as whom, and to which host when the client's agent accepted a binding for the login's session; an SSHSIG namespace), the key and the client (see "SSH Agent Forwarding") |
+| `ssh_agent_refused` | info | the worker, for a request a forwarded agent never takes (adding or removing keys, say), or a signature the client did not give; refusals held back are counted in a later one ("... (and 4 more like it)", or "refused 9 more requests, too many different ones to list each") |
 | `ssh_agent_unavailable` | info | the worker, when a program found no agent: once per gap in forwarding, and only in a session that has been forwarded to (never raises attention) |
 | `paired` | notice | the daemon, when a machine paired with a one-time code (host event) |
 | `pair_failed` | notice | the daemon, when a pairing window closed after 3 wrong codes; the summary names the last address that guessed (host event) |
@@ -800,7 +800,8 @@ well-known path, so isolating them needs a sandbox around the agent process. Wit
 session_socket` (the default) the worker also binds the session's SSH agent socket before the
 agent starts and sets `SSH_AUTH_SOCK` to it (see "SSH Agent Forwarding"); without it the agent
 inherits the daemon's `SSH_AUTH_SOCK`, which on a devbox is often missing or stale: that of
-whichever ssh login started or upgraded the daemon.
+whichever ssh login started or upgraded the daemon. One that names another session's socket (a
+daemon started from inside a session) is dropped either way.
 
 The daemon does not manage git worktrees or branches. That responsibility sits with whatever starts
 the session (the user, a wrapper, a skill, or the agent itself); the README shows the worktree
@@ -1236,17 +1237,30 @@ first message, to
 
 1. the forwarder of the attachment that owns the session's size (see "Size ownership"): taking
    over the size takes the keys along, and a pending attachment's forwarder is not used;
-2. else, while the owner's id is reserved for its reattach and the owner was forwarding, nowhere
-   yet: the connection waits, at most the reservation's 10 seconds, for the reattached owner's
-   forwarder, so a push made during a daemon restart or a dropped connection goes through once
-   the client is back;
+2. else, while the owner's id is reserved for its reattach and the owner was forwarding, or while
+   `agt` opens another forwarder in place of the owner's, which ended in the last 10 seconds
+   (whether or not it owned the size then), nowhere yet: the connection waits, at most 10
+   seconds, for the owner's next forwarder, so a push made during a daemon restart or a dropped
+   connection goes through once the client is back, and never meanwhile with the devbox's own
+   keys;
 3. else the agent the worker inherited (the daemon environment's `SSH_AUTH_SOCK`), relayed byte
-   for byte and unfiltered, as sessions got before;
+   for byte and unfiltered, as sessions got before, unless that is a socket in the root's `ssh/`,
+   another session's (a daemon started from inside a session inherits one), which is ignored and
+   kept out of the agent's environment; the path is followed through symlinks, and again for each
+   connection, since a shell's `ln -sf "$SSH_AUTH_SOCK" ~/.ssh/ssh_auth_sock` can point a fixed
+   path at a session's socket;
 4. else no agent: an empty identities answer, and `SSH_AGENT_FAILURE` to anything else, so ssh
    carries on with its own key files.
 
+So with the socket on, a session always has an agent at `SSH_AUTH_SOCK`, one that may hold no
+keys: `ssh-add -l` exits 1 (no identities) where it used to exit 2 (no agent), and a shell setup
+that starts its own agent only when none answers no longer does. While a forwarding owner holds
+the size, the inherited agent is not asked at all.
+
 A connection keeps its route until it closes, even when ownership moves, since the client's agent
-keeps state per connection (the session bindings below).
+keeps state per connection (the session bindings below). One that waited for an owner's reattach
+is dropped if its program closed it meanwhile, so the client is never asked for a signature nobody
+waits for.
 
 A forwarder is an `ssh-agent` stream (`ForwardSSHAgent`, `internal/protocol/sshagent.go`) that
 `agt` opens beside every attachment when `[ssh_agent] forward` is set: `agt attach`, `agt new`,
@@ -1261,13 +1275,35 @@ agent`, else `$SSH_AUTH_SOCK`), holding one connection to it per program connect
 `SSHAgentClose` from either side ends one. `agt` decides what passes: only listing keys, signing,
 and the `session-bind@openssh.com` and `query` extensions reach the user's agent, so nothing on
 the devbox can add, remove or lock keys, and `[ssh_agent] keys` limits the keys offered and used.
-The worker refuses the rest too, to spare the round trip.
+The worker refuses the rest too, to spare the round trip. For a session on another host, `agt`
+first binds each connection to its agent to the agtd hop, as a forwarding session to a host key it
+makes for that forwarder (`session-bind@openssh.com`, as `ssh -A` binds what it forwards), so
+OpenSSH's destination constraints apply: a key added with `ssh-add -h` is hidden and refused on the
+devbox. Until the agent has taken that binding (a locked agent takes none), it is tried again
+before each request and after each listing, which is asked again once it holds, since an agent
+unlocked in between lists every key, and the program's own bindings are refused. `agt` opens a
+forwarder only when its agent, asked the same way, answers and holds a key `keys` allows, since a
+forwarder that can answer nothing would hide the devbox's own agent. It opens one again, with a
+wait that grows from 1 to 8 s (under the worker's 10 s wait for it, and starting over only after a
+stream has served 8 s), when one ends while its attachment lives; three refusals in a row from the
+daemon or the worker are final.
 
 Signatures, refusals, and a program finding no agent (once per gap in forwarding, and only in a
 session that has been forwarded to) are info events, `ssh_agent_signed`, `ssh_agent_refused` and
-`ssh_agent_unavailable`, naming the key, the client and what was signed: a login, as whom and to
-which host (the host key ssh binds the connection to, named from the devbox's `known_hosts` when it
-can be), or an SSHSIG namespace such as git's. They never raise attention.
+`ssh_agent_unavailable`, naming the key, the client and what was signed: a login, as whom, and to
+which host when the login's session is one the client's agent accepted a binding for (OpenSSH's
+checks the binding's signature; the host key is named from the devbox's `known_hosts` when it can
+be), or an SSHSIG namespace such as git's. Every signature is recorded, and the session's end waits
+up to a second for one given just before it. Refusals are paced: a refusal starts a quiet time of
+10 seconds, and those like it within it are held back; when it ends an event counts them, and if
+there were any, another quiet time follows, twice as long, up to an hour; if not, the refusal is
+forgotten. While 16 different refusals are in their quiet time, any other is held back in one
+shared quiet time on the same doubling clock, and while that holds any back, new refusals join it.
+So a program looping on a refused request writes about ten events in its first hour and one an
+hour after, and one varying what it asks 16 more; a session keeps its newest 500 events. The
+session's end or a handoff writes the counts at once. Refusals after the session's end are not
+recorded, and counts still queued when a handoff execs the new binary are lost. They never raise
+attention.
 
 The exposure is that of `ssh -A`: while a forwarding attachment owns a session's size, any process
 running as the daemon's user on that host can ask for signatures (agents are not sandboxed, and
@@ -1356,15 +1392,24 @@ SSH agent forwarding (see "SSH Agent Forwarding") is bounded at every stage:
 | Stage | Bound | When exceeded |
 |---|---|---|
 | One agent message, either way | 256 KiB, OpenSSH's own limit | the connection is closed |
-| Program connections per session (worker) | 16 open at once | further ones are closed as they arrive; ssh carries on without an agent |
+| A frame on an open `ssh-agent` stream, either way | one message and its fields (`MaxSSHAgentFramePayload`), checked at the frame's header | the stream ends |
+| Program connections per session (worker) | 64 open at once | further ones are closed as they arrive, and logged at most once a minute; ssh carries on without an agent |
+| Waiting for a program's request (worker; the first too, so ssh-add can ask for a passphrase; not on a relay to the inherited agent after its first) | 15 min | the connection is closed |
 | Requests in flight per program connection | 1: the worker reads the next request only after writing the reply | n/a |
-| Forwarders | one per attachment, ending with it | a second is refused |
-| Waiting for the owner's reattach | 10 s, the size owner's reservation | the connection is routed as ownership then stands |
+| Session bindings remembered per program connection (worker) | 16, OpenSSH's own limit | later ones are not remembered, and a login they bound is recorded without its host |
+| Forwarders | one per attachment, ending with it | a second is refused, unless the first has ended |
+| Waiting for the owner's next forwarder: its reattach, or another in place of one that ended | 10 s from the owner's cut or its forwarder's end | the connection is routed as ownership then stands, or dropped if the program has gone |
 | Waiting for a client's reply (worker) | 90 s, room for a confirmation the user's agent asks for over a slow link | `SSH_AGENT_FAILURE` to the program, `SSHAgentClose` to the client, and the connection is closed |
-| A write to a forwarder (worker) | 10 s | the forwarder is dropped and its requests fail |
-| Local agent connections (CLI) | 16, one per program connection, dialled within 2 s | `SSHAgentClose` |
+| A write to a forwarder (worker) | 10 s | the forwarder is dropped and its requests fail; agt opens another |
+| A reply to a program (worker) | 10 s | the connection is closed, so a program that never reads its answers cannot hold a place |
+| Dialling the inherited agent (worker) | 2 s | the program gets no agent: no keys, and `SSH_AGENT_FAILURE` to anything else |
+| A connection relayed to the inherited agent (worker) | none past its first message: it is relayed byte for byte, as before | n/a |
+| Refusal events (worker) | each different one once per quiet time, 10 s doubling to 1 h while it repeats, 16 different ones at most; every signature is recorded | held back, and counted in an event when its quiet time is up |
+| Waiting at the session's end for a signature's event (worker) | 1 s | the event is not recorded |
+| Local agent connections (CLI) | 64, one per program connection, each counted until its goroutine ends, dialled within 2 s; the hop's binding, like a request, waits up to 90 s for an agent busy confirming another, and ending the forwarder ends the wait | `SSHAgentClose` |
+| A write to the worker (CLI) | 10 s | the stream is closed, and agt opens another |
 
-So a forwarder can make the worker hold at most 16 messages of 256 KiB, and in practice a few
+So a forwarder can make the worker hold at most 64 messages of 256 KiB, and in practice a few
 hundred bytes each. A client that stops reading stalls only the program connections routed to it,
 and only until the write deadline, never the PTY, attachments or other forwarders, since each
 forwarder is its own stream.

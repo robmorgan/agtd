@@ -280,15 +280,21 @@ func Run(args Args) error {
 	)
 	// The agent socket is bound before the agent starts, so SSH_AUTH_SOCK
 	// names a socket that answers from the first moment. Without one the
-	// session keeps the SSH_AUTH_SOCK the daemon was started with.
+	// session keeps the SSH_AUTH_SOCK the daemon was started with, unless
+	// that is another session's socket (inheritedAgent).
+	inherited := inheritedAgent(p)
+	if inherited == "" {
+		cmd.Env = slices.DeleteFunc(cmd.Env, func(kv string) bool { return strings.HasPrefix(kv, "SSH_AUTH_SOCK=") })
+	}
 	var agentListener *transport.UnixListener
 	var agentSocket os.FileInfo
 	agentPath := p.SSHAgentSocketPath(args.UID)
 	if args.SSHAgentSocket {
 		if agentListener, agentSocket, err = listenAgentSocket(agentPath); err != nil {
-			fmt.Fprintf(os.Stderr, "session worker: no SSH agent socket, the session keeps the SSH_AUTH_SOCK it inherited: %v\n", err)
+			fmt.Fprintf(os.Stderr, "session worker: no SSH agent socket, the session keeps the SSH_AUTH_SOCK it inherited, unless that is another session's: %v\n", err)
 		} else {
-			cmd.Env = withEnv(cmd.Env, "SSH_AUTH_SOCK", agentPath)
+			// The last of a repeated variable is the one exec passes on.
+			cmd.Env = append(cmd.Env, "SSH_AUTH_SOCK="+agentPath)
 		}
 	}
 	// closeAgentSocket undoes the agent socket on the way out of a failed
@@ -339,7 +345,7 @@ func Run(args Args) error {
 	rt := newRuntime(args, p, store, agentPID, ptmx, socketPath, ownSocket, listener)
 	rt.startedAt = startedAt
 	if agentListener != nil {
-		rt.agent = newAgentServer(rt, agentPath, agentSocket, os.Getenv("SSH_AUTH_SOCK"), agentListener)
+		rt.agent = newAgentServer(rt, agentPath, agentSocket, inherited, agentListener)
 	}
 	if err := store.MarkRunning(args.SessionID, args.CreatedAt, os.Getpid(), agentPID); err != nil {
 		listener.Close()
@@ -601,8 +607,14 @@ func (rt *runtime) onChildExited(s *ownerState, exitCode *int32) {
 	if err := os.WriteFile(rt.paths.LogPath(rt.sessionID), []byte(vt), 0o600); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to write VT history for %s: %v\n", rt.sessionID, err)
 	}
-	// Events the agent caused before exiting come before its end.
+	// Events the agent caused before exiting come before its end: a
+	// signature it was given and the counts of refusals its agent socket
+	// held back too. Those after the recorder closes are not recorded.
 	s.activity = nil
+	if rt.agent != nil {
+		rt.agent.quiesce(agentQuiesceTimeout)
+		rt.agent.flushEvents()
+	}
 	rt.recorder.close()
 	if err := rt.finalizeExit(exitCode); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to finalize %s: %v\n", rt.sessionID, err)

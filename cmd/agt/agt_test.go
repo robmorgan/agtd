@@ -500,6 +500,35 @@ func TestSizeOwnershipEndToEnd(t *testing.T) {
 	b.wait()
 }
 
+// A remote owner's detach reaches the worker before agt closes its QUIC
+// connection: the pending attachment takes the size at once, not after the
+// 10 s the size is kept for a reattach. Closing the connection right after
+// the leave used to drop it, which reads as a cut.
+func TestRemoteDetachHandsTheSizeOn(t *testing.T) {
+	e := newEnv(t, "")
+	r := e.remoteEnv("dev")
+	r.startAndDetach("demo")
+	owner := e.start("attach", "dev/demo")
+	owner.expect(0, "attached to demo")
+	pending := r.startSized(40, 120, "attach", "demo")
+	mp := pending.expect(0, "attached to demo")
+	if out := r.mustRun("agt", "attachments", "demo"); !strings.Contains(out, "size-owner\t100x30") {
+		t.Fatalf("attachments:\n%s", out)
+	}
+	owner.write("\x1c")
+	owner.wait()
+	deadline := time.Now().Add(3 * time.Second) // the size is kept 10 s for a reattach
+	for !strings.Contains(r.mustRun("agt", "attachments", "demo"), "size-owner\t120x40") {
+		if time.Now().After(deadline) {
+			t.Fatalf("the pending attachment did not take the size at once:\n%s", r.mustRun("agt", "attachments", "demo"))
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	pending.write("exit\r")
+	pending.expect(mp, "session demo finished")
+	pending.wait()
+}
+
 // startAndDetach creates a session and detaches from it at once.
 func (e *env) startAndDetach(name string) {
 	e.t.Helper()

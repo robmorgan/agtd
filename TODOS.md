@@ -175,6 +175,208 @@ frame did not change; repaint only the backdrop rows a frame changed.
 **Priority:** P3
 **Depends on:** A benchmark showing either matters
 
+## SSH Agent Forwarding
+
+### Tie each forwarder to the attachment that opened it
+
+**What:** Put a per-attachment token in `Attached`, which `ForwardSSHAgent`
+must send back, so only the client holding an attachment can forward for it.
+Have agt report a forwarder it was refused instead of dropping it.
+**Why:** Any client that can reach the daemon can register as the forwarder
+of another client's attachment before that client's own forwarder opens.
+So can a local process talking to the worker's socket, which can also set
+`Client`. Either can then see and answer the session's agent requests.
+**Context:** From the security review of PR #82. All authorized clients are
+trusted alike today, so this belongs with per-client permissions (ROADMAP,
+Next). It is a protocol change: a field in `Attached` and `ForwardSSHAgent`,
+a capability, and golden frames.
+**Effort:** M
+**Priority:** P2
+**Depends on:** Per-client permissions
+
+### Keep a session's forwarder after switching away
+
+**What:** While an agt process and its connection live, keep the forwarders
+of sessions it switched away from (submit and switch, the inbox, Ctrl-]).
+When a session's size owner has no forwarder, route its agent requests to
+the most recently active of those.
+**Why:** Submit and switch hands a session work and moves on. That work
+often ends in `git commit` or `git push`, which then finds no keys, because
+forwarding follows the size owner.
+**Context:** From the red-team review of PR #82. This changes design
+decision 3 (the size owner's forwarder serves), so decide before building.
+**Effort:** M
+**Priority:** P2
+**Depends on:** None
+
+### Record relayed signatures on the laptop
+
+**What:** Have agt keep its own record of each signature it relays: the
+time, host, session, key and purpose.
+**Why:** Today the record lives only in the devbox's `state.db`, on the
+side whose processes the policy guards against. Any process running as the
+daemon's user can edit or flood it.
+**Context:** From the red-team review of PR #82. Phase 2's asking flow is
+the natural place for it.
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+### Say when agt does not forward
+
+**What:** When `[ssh_agent] forward` is set but agt does not forward, say
+so once, before raw mode or in the overlay. The causes are no agent at the
+socket, no key that `[ssh_agent] keys` allows, or a session that cannot
+forward.
+**Why:** Skipping a dead or keyless agent keeps the devbox's own agent
+usable, but the user cannot tell why their keys are missing.
+**Context:** A follow-up to the review fix in which agt probes its agent
+before forwarding. A mistake in `[ssh_agent]` itself is already reported
+this way (sshAgentWarning: around an attach, and in the inbox until a key).
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+### Rename the worker's SSH agent state
+
+**What:** Rename `rt.agent` to `rt.sshAgent`, and the `agent*` fields and
+methods of ownerState to `sshAgent*`, as handoffState's `SSHAgent*` fields
+already read.
+**Why:** In the same structs, "agent" already means the coding agent
+(`agentPID`, `agentExited`).
+**Context:** From the maintainability review of PR #82.
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+### Parse SSH agent messages with ssh.Marshal
+
+**What:** Replace internal/sshagent's hand-rolled wire reader with
+x/crypto/ssh's `Marshal` and `Unmarshal` over tagged structs.
+**Why:** About 50 fewer lines.
+**Context:** From the simplification review of PR #82. `FuzzParse` guards
+the parser.
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+### Remaining SSH agent tests
+
+**What:** Cover the cells the review left untested:
+- a replacement owner whose reservation expires, or the socket stopping,
+  while a connection waits
+- an owner that never forwarded leaving, being cut, being replaced, or
+  ending at a handoff
+- an attachment ending with a request in flight
+- a session without a socket whose exec fails
+- agt leaving no agent connection behind when the session ends
+- agt counting closing connections against its bound
+**Context:** From the state-machines and testing reviews of PR #82; the
+review output has a stub for each.
+**Effort:** M
+**Priority:** P3
+**Depends on:** None
+
+### Tell the worker when agt will not forward
+
+**What:** When a reattached size owner's agt decides not to lend its agent
+(no key `keys` allows, the agent locked or gone), say so to the worker, so
+new agent connections stop waiting for that owner's forwarder.
+**Why:** The worker waits up to 10 s for the forwarder of an owner that
+forwarded before (after a cut, or while one is reopened). agt opens none
+when its agent has nothing to lend, so every program in that window waits
+out the 10 s before falling back.
+**Context:** From the adversarial review of the PR #82 fixes. It needs a
+frame, or a field in an existing one, so a capability.
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+### Notice keys leaving the local agent
+
+**What:** Have agt look again at its agent's keys while it forwards, and
+end the forwarder once none that `keys` allows is left, opening it again
+when one comes back.
+**Why:** agt checks for a key only when it opens a forwarder. A key added
+for a while (`ssh-add -t`, `AddKeysToAgent 1h`) or removed later leaves a
+forwarder that answers every request with no keys, hiding the devbox's own
+agent until the next reattach.
+**Context:** From the adversarial review of the PR #82 fixes. An answer
+that lists no allowed key is a cheap trigger to look again.
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+### Agent sockets reached from inside a session
+
+**What:** Decide what agt does when its own `SSH_AUTH_SOCK` is a session's
+socket (agt run inside a session), and refuse to lend a session its own
+socket.
+**Why:** Lending another session's socket chains forwarding, as `ssh -A`
+from inside a forwarded session does, and may be wanted. Attaching a
+session to itself from inside it makes each agent request loop back until
+both 64-connection bounds fill.
+**Context:** From the adversarial review of the PR #82 fixes; the worker
+side (an inherited `SSH_AUTH_SOCK`) is handled by `inheritedAgent` and `resolveAgentSocket`.
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+### Allocate agent messages as they arrive
+
+**What:** Have `sshagent.ReadMessage` grow its buffer as the body arrives,
+rather than allocating the length the header claims.
+**Why:** A program in the session can send a header claiming 256 KiB and
+nothing more: 64 such connections hold 16 MiB of the worker for as long as
+their deadline, about twice the worker's own memory.
+**Context:** From the performance review of the PR #82 fixes; the bound is
+documented, its cost is not.
+**Effort:** S
+**Priority:** P3
+**Depends on:** A measurement showing it matters
+
+### A deterministic test for the remote detach's leave
+
+**What:** Test at the CLI, with a fake QUIC remote that answers
+`AttachLeave` late, that agt does not close its connection before the
+worker has the leave.
+**Why:** `cmd/agt`'s TestRemoteDetachHandsTheSizeOn catches a lost leave
+only by luck: with the flush removed it failed 5 times in 25.
+**Context:** From the testing review of the PR #82 fixes;
+`internal/cli/retry_test.go`'s fake remote is the pattern.
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+### A leave that loses to a failed write
+
+**What:** When the worker's write to an attachment fails, read the requests
+the client already sent before taking it for a cut, so an `AttachLeave`
+among them still counts.
+**Why:** A client that leaves while output is flowing can be taken for a
+cut: the size stays reserved for 10 s for a reattach that never comes, and
+agent connections wait as long. `internal/worker`'s
+TestOwnerLeavingPromotesMostRecentlyUsed fails this way about 2 runs in
+100 on Linux, on main as well.
+**Context:** Found while checking a Linux test failure in the review of the
+PR #82 fixes. The attach loop selects between output and requests, and an
+output write that fails returns before a queued leave is read.
+**Effort:** S
+**Priority:** P2
+**Depends on:** None
+
+### Write queued events before a handoff's exec
+
+**What:** Drain the worker's event recorder before a live handoff execs the
+new binary.
+**Why:** Events still queued at the exec, the counts of held-back SSH agent
+refusals among them, are lost.
+**Context:** From the red-team review of the PR #82 fixes; true of every
+event, not only the SSH agent's.
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
 ## Completed
 
 ### Keep the echo paused when input pauses it during a field probe

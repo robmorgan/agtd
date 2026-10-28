@@ -202,7 +202,8 @@ func TestSSHAgentForwardingOverQUICNamesTheClient(t *testing.T) {
 }
 
 // A daemon configured without session sockets starts sessions as before:
-// no agent socket, and forwarders are refused.
+// no agent socket, and forwarders are refused. Such a session hands off as
+// before too, as handoff format 1, and comes back still without a socket.
 func TestSSHAgentNeedsASessionSocket(t *testing.T) {
 	h := newHarnessWithConfig(t, "\n[ssh_agent]\nsession_socket = false\n")
 	id := h.mustCreate("plain")
@@ -214,6 +215,29 @@ func TestSSHAgentNeedsASessionSocket(t *testing.T) {
 	}
 	if _, err := os.Stat(h.paths.SSHAgentSocketPath(attached.SessionUID)); !os.IsNotExist(err) {
 		t.Fatalf("agent socket of a session started without one: %v", err)
+	}
+
+	// Value: protects=a session without an agent socket (made before this
+	// feature, or with session_socket = false) survives a live handoff as
+	// format 1, still without one; fails_when=Resume refuses
+	// format 1 or resumeRuntime mishandles a state with no SSHAgentFD, so
+	// the upgrade loses the session; why_new=every other real handoff,
+	// daemon and e2e, carries a socket (format 2); seam=none; no_claim=a
+	// state written by a binary from before this feature (this build writes
+	// the format 1 state here).
+	if results := h.handoff(nextBinary(t)); len(results) != 1 || results[0].HandedOff == nil {
+		t.Fatalf("handoff of a session without a socket: %+v", results)
+	}
+	a.expectRestarting()
+	a2, _ := mustAttachOn(t, h.dial(), id, protocol.AttachSession{Features: allAttachFeatures, ExpectUID: attached.SessionUID, Replaces: a.attachID})
+	a2.input("after\n")
+	a2.expectOutput("got:after")
+	req.Attachment = a2.attachID
+	if f, resp := forwardOn(t, h.dial(), req, ring); f != nil || resp.Error == nil || !strings.Contains(resp.Error.Message, "cannot forward an SSH agent") {
+		t.Fatalf("forwarder after the handoff: %#v", resp)
+	}
+	if _, err := os.Stat(h.paths.SSHAgentSocketPath(attached.SessionUID)); !os.IsNotExist(err) {
+		t.Fatalf("agent socket after the handoff: %v", err)
 	}
 }
 
@@ -306,5 +330,166 @@ func TestDaemonStartSweepsStaleAgentSockets(t *testing.T) {
 	}
 	if _, err := os.Stat(live); err != nil {
 		t.Fatalf("a running session's agent socket: %v", err)
+	}
+}
+
+// A session without an agent socket hands off as format 1, so a binary that
+// resumes only format 1 (one from before the socket) still takes it over.
+func TestSocketlessSessionHandsOffAsFormat1(t *testing.T) {
+	h := newHarnessWithConfig(t, "\n[ssh_agent]\nsession_socket = false\n")
+	id := h.mustCreate("plain")
+	c := h.attachRestartable(id)
+	// Lists format 1 only, as a binary from before the agent socket does,
+	// then resumes with this build.
+	exe := writeScript(t, "format1", `if [ "$2" = --handoff-probe ]; then echo "agtd session-worker handoff 1"; exit 0; fi; exec "`+nextBinary(t)+`" "$@"`)
+	if results := h.handoff(exe); len(results) != 1 || results[0].HandedOff == nil {
+		t.Fatalf("handoff to a binary that resumes format 1 only: %+v", results)
+	}
+	c.expectRestarting()
+	c2 := h.attachRestartable(id)
+	c2.input("after\n")
+	c2.expectOutput("got:after")
+}
+
+// A live handoff while a program's request waits on a forwarder that has not
+// answered: the old image stops the agent socket at once, so the request
+// fails rather than holding the handoff for agentReplyTimeout.
+func TestSSHAgentHandoffWithARequestInFlight(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "")
+	h := newHarness(t)
+	id := h.mustCreate("inflight")
+	a, attached := mustAttachOn(t, h.dial(), id, protocol.AttachSession{Features: allAttachFeatures})
+	s := h.dial()
+	defer s.Close()
+	if err := protocol.WriteRequest(s, &protocol.Request{ForwardSSHAgent: &protocol.ForwardSSHAgent{
+		SessionID: id, ExpectUID: attached.SessionUID, Attachment: a.attachID}}); err != nil {
+		t.Fatal(err)
+	}
+	r := bufio.NewReader(s)
+	s.SetReadDeadline(time.Now().Add(testTimeout))
+	if resp, err := protocol.ReadResponse(r); err != nil || resp == nil || resp.SSHAgentForwarding == nil {
+		t.Fatalf("forward: %#v, %v", resp, err)
+	}
+	prog, err := net.Dial("unix", h.paths.SSHAgentSocketPath(attached.SessionUID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prog.Close()
+	prog.SetDeadline(time.Now().Add(testTimeout))
+	if err := sshagent.WriteMessage(prog, []byte{sshagent.MsgRequestIdentities}); err != nil {
+		t.Fatal(err)
+	}
+	// The request reaches this forwarder, which never answers it.
+	if resp, err := protocol.ReadResponse(r); err != nil || resp == nil || resp.SSHAgentRequest == nil {
+		t.Fatalf("request: %#v, %v", resp, err)
+	}
+
+	start := time.Now()
+	if results := h.handoff(nextBinary(t)); len(results) != 1 || results[0].HandedOff == nil {
+		t.Fatalf("handoff with a request in flight: %+v", results)
+	}
+	// Without the socket's stop ending the request, the handoff would wait
+	// out the daemon's 60 s for it.
+	if took := time.Since(start); took > 30*time.Second {
+		t.Fatalf("the handoff waited %v on a request in flight", took)
+	}
+	if reply, err := sshagent.ReadMessage(prog); err == nil && sshagent.Type(reply) != sshagent.MsgFailure {
+		t.Fatalf("the request in flight was answered % x", reply)
+	}
+	a.expectRestarting()
+}
+
+// A forwarder for a session id that could never have been created is
+// refused before any path is built from it: the socket "../x" would name,
+// beside sessions/, is never dialled.
+func TestSSHAgentForwarderRefusesBadSessionIDs(t *testing.T) {
+	h := newHarness(t)
+	l, err := net.Listen("unix", filepath.Join(h.paths.Root, "x.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	ring, _ := newKeyring(t)
+	// No ExpectUID, so only the name check stands before the worker is
+	// dialled.
+	f, resp := forwardOn(t, h.dial(), protocol.ForwardSSHAgent{SessionID: "../x", Attachment: "attach-1"}, ring)
+	if f != nil || resp.Error == nil || !strings.Contains(resp.Error.Message, "not found") {
+		t.Fatalf("a forwarder for ../x: %#v", resp)
+	}
+	l.(*net.UnixListener).SetDeadline(time.Now().Add(100 * time.Millisecond))
+	if c, err := l.Accept(); err == nil {
+		c.Close()
+		t.Fatal("the daemon dialled the socket a bad session id names")
+	}
+}
+
+// A gap in forwarding recorded before a live handoff is the same gap after
+// it: it is recorded once.
+func TestSSHAgentGapAcrossAHandoffIsRecordedOnce(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "")
+	h := newHarness(t)
+	id := h.mustCreate("gap")
+	a, attached := mustAttachOn(t, h.dial(), id, protocol.AttachSession{Features: allAttachFeatures})
+	ring, _ := newKeyring(t)
+	if f, resp := forwardOn(t, h.dial(), protocol.ForwardSSHAgent{SessionID: id, ExpectUID: attached.SessionUID, Attachment: a.attachID}, ring); f == nil {
+		t.Fatalf("forward: %#v", resp)
+	}
+	a.send(&protocol.Request{AttachLeave: protocol.Empty})
+	a.conn.Close()
+	h.eventually("the owner to leave", func() bool { return len(h.attachments(id)) == 0 })
+	path := h.paths.SSHAgentSocketPath(attached.SessionUID)
+	keyFingerprints(t, agentClient(t, path)) // the gap begins
+	h.waitEvent(id, session.EventSSHAgentUnavailable)
+	if results := h.handoff(nextBinary(t)); len(results) != 1 || results[0].HandedOff == nil {
+		t.Fatalf("handoff: %+v", results)
+	}
+	keyFingerprints(t, agentClient(t, path)) // the same gap
+	time.Sleep(300 * time.Millisecond)       // room for an event, were one recorded
+	n := 0
+	for _, ev := range h.events(id) {
+		if ev.Kind == session.EventSSHAgentUnavailable {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("%d ssh_agent_unavailable events for one gap", n)
+	}
+}
+
+// A failed exec in a handoff (the new binary vanished after its probe)
+// leaves the agent socket as it was: the same file, accepting, and
+// forwarding through the reattached owner.
+func TestHandoffExecFailureKeepsTheAgentSocket(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "")
+	h := newHarness(t)
+	id := h.mustCreate("")
+	c := h.attachRestartable(id)
+	rec := h.control().call(&protocol.Request{GetSession: &protocol.SessionRef{SessionID: id}})
+	if rec.Session == nil {
+		t.Fatalf("get session: %#v", rec.Error)
+	}
+	uid := rec.Session.UID
+	path := h.paths.SSHAgentSocketPath(uid)
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exe := writeScript(t, "vanishing", `printf 'agtd session-worker handoff 1\nagtd session-worker handoff 2\n'; rm -f "$0"`)
+	if results := h.handoff(exe); len(results) != 1 || results[0].Err == nil {
+		t.Fatalf("results = %+v", results)
+	}
+	c.expectRestarting()
+	// Back as the CLI comes back from SessionRestarting: replacing its
+	// attachment, whose id the size is reserved for.
+	c2, _ := mustAttachOn(t, h.dial(), id, protocol.AttachSession{Features: allAttachFeatures, ExpectUID: uid, Replaces: c.attachID})
+	if after, err := os.Stat(path); err != nil || !os.SameFile(before, after) {
+		t.Fatalf("agent socket after a failed exec: %v", err)
+	}
+	ring, key := newKeyring(t)
+	if f, resp := forwardOn(t, h.dial(), protocol.ForwardSSHAgent{SessionID: id, ExpectUID: uid, Attachment: c2.attachID}, ring); f == nil {
+		t.Fatalf("forward after a failed exec: %#v", resp)
+	}
+	if got := keyFingerprints(t, agentClient(t, path)); !slices.Equal(got, []string{ssh.FingerprintSHA256(key)}) {
+		t.Fatalf("keys after a failed exec = %v", got)
 	}
 }

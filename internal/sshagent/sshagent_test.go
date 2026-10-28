@@ -116,7 +116,10 @@ func TestForwardable(t *testing.T) {
 		{message(MsgUnlock, "pw"), false, "unlock the agent"},
 		{message(MsgAddSmartcardKey, "id", "pin"), false, "add a smartcard key"},
 		{message(MsgRemoveSmartcardKey, "id", "pin"), false, "remove a smartcard key"},
-		{[]byte{1}, false, "send message type 1"},
+		// ssh-add -D follows its request with SSH-1's.
+		{[]byte{msgSSH1RemoveAllRSAIdentities}, false, "use the obsolete SSH-1 agent protocol"},
+		{[]byte{msgSSH1RequestRSAIdentities}, false, "use the obsolete SSH-1 agent protocol"},
+		{[]byte{99}, false, "send message type 99"},
 		{nil, false, "send message type 0"},
 	} {
 		if got := Forwardable(tc.msg); got != tc.want {
@@ -226,9 +229,13 @@ func TestSignRequestsAndTheirPurpose(t *testing.T) {
 
 func TestSessionBind(t *testing.T) {
 	host := newKey(t)
-	b, err := ParseSessionBind(message(MsgExtension, ExtSessionBind, host.Marshal(), []byte("sid"), []byte("sig"), true))
+	msg := message(MsgExtension, ExtSessionBind, host.Marshal(), []byte("sid"), []byte("sig"), true)
+	b, err := ParseSessionBind(msg)
 	if err != nil || !bytes.Equal(b.HostKey, host.Marshal()) || string(b.SessionID) != "sid" || string(b.Signature) != "sig" || !b.Forwarding {
 		t.Fatalf("parsed %+v, %v", b, err)
+	}
+	if got := b.Request(); !bytes.Equal(got, msg) {
+		t.Fatalf("Request() = % x, want % x", got, msg)
 	}
 	for _, bad := range [][]byte{
 		message(MsgExtension, ExtQuery),
@@ -243,12 +250,13 @@ func TestSessionBind(t *testing.T) {
 
 func TestKnownHostName(t *testing.T) {
 	dir := t.TempDir()
-	github, devbox, revoked, other := newKey(t), newKey(t), newKey(t), newKey(t)
+	github, devbox, gitlab, revoked, other := newKey(t), newKey(t), newKey(t), newKey(t), newKey(t)
 	hashed := filepath.Join(dir, "known_hosts")
 	plain := filepath.Join(dir, "ssh_known_hosts")
 	os.WriteFile(hashed, []byte(
 		"# a comment\n"+
 			knownhosts.Line([]string{knownhosts.HashHostname("devbox")}, devbox)+"\n"+
+			knownhosts.Line([]string{knownhosts.HashHostname("gitlab.com")}, gitlab)+"\n"+
 			"@revoked "+knownhosts.Line([]string{"bad.example"}, revoked)+"\n"+
 			"garbage line\n"), 0o600)
 	os.WriteFile(plain, []byte(
@@ -256,17 +264,21 @@ func TestKnownHostName(t *testing.T) {
 			knownhosts.Line([]string{"[devbox.lan]:2222"}, devbox)+"\n"), 0o600)
 
 	for _, tc := range []struct {
-		key  ssh.PublicKey
-		want string
+		key    ssh.PublicKey
+		want   string
+		hashed bool
 	}{
-		{github, "github.com"},
+		{github, "github.com", false},
 		// Hashed in the first file, named in the second.
-		{devbox, "[devbox.lan]:2222"},
-		{revoked, ""},
-		{other, ""},
+		{devbox, "[devbox.lan]:2222", false},
+		// Listed, but only under a hashed name.
+		{gitlab, "", true},
+		{revoked, "", false},
+		{other, "", false},
 	} {
-		if got := KnownHostName(tc.key.Marshal(), filepath.Join(dir, "missing"), hashed, plain); got != tc.want {
-			t.Errorf("name of %s = %q, want %q", ssh.FingerprintSHA256(tc.key), got, tc.want)
+		got, hashedOnly := KnownHostName(tc.key.Marshal(), filepath.Join(dir, "missing"), hashed, plain)
+		if got != tc.want || hashedOnly != tc.hashed {
+			t.Errorf("name of %s = %q (hashed %v), want %q (hashed %v)", ssh.FingerprintSHA256(tc.key), got, hashedOnly, tc.want, tc.hashed)
 		}
 	}
 }

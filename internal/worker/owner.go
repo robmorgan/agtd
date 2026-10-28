@@ -113,9 +113,12 @@ type ownerAttachment struct {
 	detach     chan struct{}
 	detachOnce sync.Once
 	// forwarder is the attachment's SSH agent forwarder, nil for none;
-	// forwarded is set once it has had one (sshagent.go).
-	forwarder *forwarder
-	forwarded bool
+	// forwarded is set once it has had one, and forwarderEnded is when the
+	// last one ended, for the wait for the one agt opens in its place
+	// (sshagent.go).
+	forwarder      *forwarder
+	forwarded      bool
+	forwarderEnded time.Time
 }
 
 func (a *ownerAttachment) signalDetach() {
@@ -547,8 +550,10 @@ func (s *ownerState) attach(attachID string, kind session.AttachmentKind, g prot
 		}
 		if replaces != "" && replaces == s.agentWaitFor {
 			// Agent connections waiting for the owner's reattach wait
-			// for this attachment's forwarder now.
-			s.agentWaitFor = attachID
+			// for this attachment's forwarder now. It carries on the
+			// forwarding owner, so a cut before its forwarder opens is
+			// waited out as the first was.
+			s.agentWaitFor, a.forwarded = attachID, true
 		}
 		if s.sizeOwner != attachID {
 			s.sizeOwner = attachID

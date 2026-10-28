@@ -171,7 +171,12 @@ func (s *Server) reconcileSessions() error {
 			}
 		}
 	}
-	return s.sweepAgentSockets()
+	// Housekeeping only: a running session never needs the sweep, so a
+	// failure must not keep the daemon from starting.
+	if err := s.sweepAgentSockets(); err != nil {
+		fmt.Fprintf(os.Stderr, "agtd: sweeping stale SSH agent sockets: %v\n", err)
+	}
+	return nil
 }
 
 // sweepAgentSockets removes the SSH agent sockets of session incarnations

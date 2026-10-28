@@ -772,15 +772,33 @@ inbox, the overlay's switch, and every reconnect. Programs in the session find i
 `SSH_AUTH_SOCK`, which every new session has: a socket of the session's own, which answers from
 the agent of whichever attachment owns the session's size. Take over the size (`agt attach --take-size`, or
 Take over size in the overlay) and your keys come with it. A connection lost for a moment, or a
-daemon restart, does not lose them: a push made meanwhile waits for you to reattach. When nobody
+daemon restart, does not lose them: a push made meanwhile waits for you to reattach, or for agt to
+open its forwarder again, rather than use the devbox's keys. When nobody
 driving the session forwards an agent, the socket answers from the agent the devbox's daemon was
-started with, as before, or with no keys, and ssh falls back to key files on the devbox.
+started with, or with no keys, and ssh falls back to key files on the devbox. While a forwarding
+attachment owns the size, only its keys answer: the devbox's own agent (a deploy key in it) is not
+asked, and adding keys is refused.
+
+`SSH_AUTH_SOCK` is set even when no agent is behind the socket. `ssh-add -l` then reports that
+the agent has no identities (exit status 1) rather than that it cannot connect (2), and `ssh-add`
+cannot load keys into it. A shell setup that starts its own `ssh-agent` when none answers should
+test whether `ssh-add -l` succeeds, not for status 2 or an empty `SSH_AUTH_SOCK`; or the devbox
+can set `session_socket = false`.
 
 Your private keys never leave the laptop. Only requests to list keys and to sign cross the
 connection; agt refuses anything else (adding, removing or locking keys) and, with `keys`, any
-other key. An agent that confirms each use (1Password, a security key's touch) keeps doing so.
-Each signature is recorded in the session's events (`agt events`) with the key, what it signed (a
-login, as whom and where, or git's commit signing) and which client signed.
+other key. A mistake in `[ssh_agent]` stops agt forwarding: a setting it does not know (names
+have a case), a table spelled `[SSH_Agent]` or `[ssh-agent]`, `keys` under another table, a key
+that is not a fingerprint, or a value of the wrong type (`forward = "yes"`). agt says why before
+and after an attach, and the inbox shows it until you press a key; agtd logs it when it starts.
+So a misspelled or misplaced `keys` cannot offer every key, and agtd and agt's other settings
+carry on. An agent that confirms each use (1Password, a security key's touch)
+keeps doing so. A key you limited with `ssh-add -h` is refused through agt on another host, as
+through `ssh -A` to a host the limit does not name. agt lends an agent only when it answers and
+holds a key it may offer; otherwise the session keeps what it falls back to. Each signature is
+recorded in the session's events (`agt events`) with the key, what it signed (a login, as whom
+and, when your agent accepted ssh's binding of it, to where; or git's commit signing) and which
+client signed.
 
 What it does not protect: while your attachment owns a session's size, any process running as your
 user on the devbox can ask your laptop for signatures, as with `ssh -A`. It stops the moment you
@@ -789,8 +807,9 @@ devbox. On the devbox itself, `ssh -A devbox` and then `agt attach`, with `forwa
 devbox's own config, lends that login's agent to the session.
 
 `[ssh_agent] session_socket = false` on the devbox starts new sessions without a socket of their
-own; they keep the `SSH_AUTH_SOCK` the daemon was started with. Sessions started before agtd had
-this cannot forward until they are restarted.
+own; they keep the `SSH_AUTH_SOCK` the daemon was started with, unless that is another session's
+socket (a daemon started from inside a session), which they go without. Sessions started before
+agtd had this cannot forward until they are restarted.
 
 ### A Devbox On DigitalOcean
 
