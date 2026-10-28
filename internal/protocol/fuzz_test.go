@@ -49,6 +49,7 @@ func seedFrames(f *testing.F) {
 		{AttachResync: &Bytes{Data: []byte("\x1b[2J")}},
 		{AttachFrame: &Frame{Seq: 2, Full: true, Cols: 80, Lines: 24, Scrolled: 1, CursorRow: 3, CursorCol: 4, CursorShape: 5, Prefix: []byte("\x1b[?2004h\x1b[H"), Keyboard: []byte("\x1b[=1;1u"), Colors: []byte("\x1b]11;#000000\x1b\\"), Effects: []byte("\a"), Field: &Field{Cols: 80, Lines: 24}, Rows: []FrameRow{{Index: 0, VT: []byte("$ ")}, {Index: 1}}, History: [][]byte{[]byte("gone"), nil}}},
 		{AttachFrame: &Frame{Seq: 4, Acked: 2, HasAcked: true}},
+		{AttachFrame: &Frame{Seq: 4, Acked: 2, HasAcked: true, HasRecord: true, Record: &FrameRecord{Pos: 3, Mark: 9, End: 20, Rows: [][]byte{[]byte("row")}}}},
 		{AttachSizeOwner: &SizeOwnership{Owner: true, OwnerID: "attach-1", Geometry: Geometry{80, 24, 0, 0}}},
 		{Field: &Field{Found: true, Cols: 120, Lines: 40, Alternate: true, Row: 36, Col: 2, TextCol: 2, Width: 117, GrowsUp: true,
 			Rows: []string{"hello"}, Style: []byte("\x1b[0m"), Chrome: []ScreenRow{{Index: 35, VT: []byte("\u2500")}}}},

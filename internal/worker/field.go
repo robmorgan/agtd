@@ -31,6 +31,9 @@ type fieldProfile struct {
 	spare int
 	// wrapKeepsSpace: see protocol.Field.WrapKeepsSpace.
 	wrapKeepsSpace bool
+	// records is whether the program draws a transcript on the alternate
+	// screen, which the worker records (altrecord.go).
+	records bool
 }
 
 var defaultFieldProfile = fieldProfile{spare: 1}
@@ -38,10 +41,10 @@ var defaultFieldProfile = fieldProfile{spare: 1}
 // fieldProfiles is keyed by the program's reported app (OSC 7501), then by
 // the session's agent name, then by its command's base name.
 var fieldProfiles = map[string]fieldProfile{
-	"claude-code": {spare: 2},
-	"claude":      {spare: 2},
-	"codex":       {spare: 1},
-	"pi":          {spare: 1, wrapKeepsSpace: true},
+	"claude-code": {spare: 2, records: true},
+	"claude":      {spare: 2, records: true},
+	"codex":       {spare: 1, records: true},
+	"pi":          {spare: 1, wrapKeepsSpace: true, records: true},
 }
 
 // fieldProfileFor picks the profile for a session: the program's own name

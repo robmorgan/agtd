@@ -863,6 +863,9 @@ func (rt *runtime) serveAttach(conn transport.Stream, reader *bufio.Reader, req 
 	if frames && slices.Contains(features, protocol.CapAttachFrameWindow) {
 		rtt = &frameRTT{}
 	}
+	// One that also asked for CapAttachAltRecord gets the agent's
+	// transcript record in its frames (altrecord.go).
+	record := rtt != nil && slices.Contains(features, protocol.CapAttachAltRecord)
 	// A client that asked for CapAttachCompose may send a whole prompt to
 	// encode for the program (compose.go).
 	composes := slices.Contains(features, protocol.CapAttachCompose)
@@ -885,6 +888,9 @@ func (rt *runtime) serveAttach(conn transport.Stream, reader *bufio.Reader, req 
 	if err := rt.owner.doAtGround(func(s *ownerState) error {
 		var err error
 		att, err = s.attach(fmt.Sprintf("%s-%d", req.Kind, seq), req.Kind, req.Geometry, replaces, initial, takeSize, sizeOwner, frames)
+		if err == nil && att.frames != nil {
+			att.frames.record = record
+		}
 		if err == nil {
 			ownership = s.ownership(att.attachID)
 			if colors != nil {
@@ -988,7 +994,7 @@ func (rt *runtime) serveAttach(conn transport.Stream, reader *bufio.Reader, req 
 		}
 		sentSeq, lastFrame = f.Seq, time.Now()
 		if rtt != nil {
-			f.Acked, f.HasAcked = ackedSeq, true
+			f.Acked, f.HasAcked, f.HasRecord = ackedSeq, true, record
 			rtt.sent(f.Seq, lastFrame)
 		}
 		return protocol.WriteResponse(conn, &protocol.Response{AttachFrame: f})

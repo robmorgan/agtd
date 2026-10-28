@@ -1337,6 +1337,21 @@ func TestEchoFramesPredictEnterAsASubmit(t *testing.T) {
 	_ = now
 }
 
+// A bare LF is not a submit, even where Enter would be one: a terminal set
+// to send Shift-Enter as LF must not see the field drawn empty while the
+// agent inserts a newline.
+func TestEchoFramesLineFeedIsNotASubmit(t *testing.T) {
+	e, _ := framesEcho(t, []string{""})
+	typeKeys(e, "a long sentence")
+	send, paint := e.input([]byte("\n"))
+	if !strings.HasSuffix(string(send), "\n") || !e.paused || e.holding() || paint != nil {
+		t.Fatalf("LF: sent %q, paused %v, holding %v, paint %q", send, e.paused, e.holding(), paint)
+	}
+	if e.overlay() != nil {
+		t.Fatal("LF: the field should not be drawn")
+	}
+}
+
 // When the agent did something else with Enter (a newline after a
 // backslash it saw, a menu's choice), the frame shows a field that matches
 // no prediction and the echo adopts it, as for any unpredicted drawing.

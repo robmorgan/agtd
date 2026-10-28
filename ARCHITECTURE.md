@@ -516,6 +516,7 @@ features both listed. Today there is one protocol version (1), and these capabil
 | `terminal-colors` | `CreateSession.Colors` and, on an attach stream, `AttachSession.Colors` carry the client terminal's default colours; the worker answers the program's OSC 10 and 11 queries with the most recent ones itself (see "Terminal queries") |
 | `attach-frames` | attach stream: the screen arrives as `AttachFrame`s instead of `PtyOutput`, each acknowledged with `AttachFrameAck`; `Attached.Snapshot` holds the scrollback rows only and `AttachSnapshot` is answered with a full frame (see "Screen frames") |
 | `attach-frame-window` | attach stream, with `attach-frames`: the worker sizes the frame window from the round trip (2 to `MaxFrameWindow`, 16), and every `AttachFrame` carries a trailing `Acked` u32, the last ack the worker had read when it built it (see "Screen frames") |
+| `attach-alt-record` | attach stream, with `attach-frames` and `attach-frame-window`: while an agent's transcript is on the alternate screen, every `AttachFrame` carries a trailing `Record` (`FrameRecord`: where the screen is in the worker's record of the rows that left its top, and the rows the client does not hold yet) after `Acked` (see "The transcript record") |
 | `attach-compose` | `SendInput.Compose` (written only when set, since the daemon forwards the request to the worker in the base encoding) and, on an attach stream, `AttachCompose`: a whole prompt, or Enter alone, encoded by the worker as the program's terminal modes ask for input (see "Composed input") |
 | `kill-expect-uid` | `KillSession.ExpectUID` appended after the token: the daemon refuses a stop or remove whose UID is not the session's current incarnation, so a remove confirmed in the inbox never deletes a newer session that reused the name |
 | `ssh-agent` | `ssh-agent` streams: `ForwardSSHAgent` and the messages on them. A worker lists it in its answer to `Hello` only when its agent was started with the worker's agent socket as `SSH_AUTH_SOCK` (see "SSH Agent Forwarding") |
@@ -1194,7 +1195,25 @@ worker; the field is then asked for again, and each ask makes a frame, so a fram
 follows. A reattach's new frames count from 1 and show whatever reached the agent on the lost
 attachment, so the first field settles the resend.
 A frame client's state is not handed over: after a worker handoff or a daemon restart the client
-reattaches and starts from a full frame. The recorded streams in `internal/worker/testdata` are
+reattaches and starts from a full frame.
+
+**The transcript record.** Claude Code, Codex and pi in fullscreen mode repaint their transcript
+on the alternate screen by absolute position, so a row that leaves the top is gone from the
+terminal, and the CLI's wheel prediction needs the rows above the screen to draw a tick at once.
+The worker records them (`internal/worker/altrecord.go`): after each feed on the alternate screen,
+at each end of a synchronized-output block in it (a look inside one sees half a repaint), it
+formats the screen and a `screen.Transcript` finds how far the content moved and appends the rows
+that left, each once (docs/designs/alt-screen-scrollback.md). Where the transcript ends, above the
+input box, comes from field detection, run only when the rows under the box changed and at most
+every 100 ms (a detection costs 1.5 ms). Only programs whose field profile says they draw a
+transcript there are recorded, decided each time a program enters the alternate screen; leaving
+it ends the record. A client that asks for `attach-alt-record` (the CLI does when its painter
+keeps a record: `predict_wheel` or `alt_scrollback`) gets in each alternate frame the screen's
+position, the record's length and jumps, the transcript's end, and the rows it does not hold yet:
+the newest 2,000 in the first frame after an attach, at most 1,000 in a later one. The record
+holds at most 10,000 rows per session (about 1 MiB) and travels in the handoff state; a crash
+loses it with the terminal. Against an older worker the painter infers its own record from the
+frames, as before, holding only what scrolled past while it was attached. The recorded streams in `internal/worker/testdata` are
 replayed frame by frame through the painter into a second libghostty terminal and compared cell
 for cell (`TestFramesReplayStreams`); what differs is what the formatter cannot express (see "The
 reattach snapshot").

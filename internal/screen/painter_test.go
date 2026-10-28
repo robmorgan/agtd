@@ -279,3 +279,36 @@ func TestPainterAltScrollbackSkipsSyncedLooks(t *testing.T) {
 		t.Fatalf("the move made inside the block was not recorded after it: %q", out)
 	}
 }
+
+func TestPainterAltScrollbackDoesNotPushTheSeed(t *testing.T) {
+	// Value: protects=under alt scrollback, the worker's seed of a new
+	// record fills the painter's copy but is not scrolled into the
+	// terminal, where each reattach would add it again, while rows
+	// recorded after it are; fails_when=altFrame pushes Follow's rows
+	// for a new record; why_new=Frame.Record is new; seam=none;
+	// no_claim=seeding the terminal's scrollback (a later design item).
+	p := New()
+	p.SetAltScrollback()
+	rows := func(top int) []protocol.FrameRow {
+		out := make([]protocol.FrameRow, 4)
+		for y := range out {
+			out[y] = protocol.FrameRow{Index: uint16(y), VT: fmt.Appendf(nil, "line %02d", top+y)}
+		}
+		return out
+	}
+	rec := func(top int, isNew bool, from int) *protocol.FrameRecord {
+		r := &protocol.FrameRecord{New: isNew, Pos: int64(top), Mark: int64(top), End: 4}
+		for n := from; n < top; n++ {
+			r.Rows = append(r.Rows, fmt.Appendf(nil, "line %02d", n))
+		}
+		return r
+	}
+	out := string(p.Apply(&protocol.Frame{Seq: 1, Full: true, Alternate: true, Cols: 10, Lines: 4, Rows: rows(10), Record: rec(10, true, 0), HasRecord: true}, nil))
+	if strings.Contains(out, "line 05") || p.Recorded() != 10 {
+		t.Fatalf("seed pushed (recorded %d): %q", p.Recorded(), out)
+	}
+	out = string(p.Apply(&protocol.Frame{Seq: 2, Alternate: true, Cols: 10, Lines: 4, Rows: rows(12), Record: rec(12, false, 10), HasRecord: true}, nil))
+	if !strings.Contains(out, "line 10") || !strings.Contains(out, "line 11") {
+		t.Fatalf("recorded rows not pushed: %q", out)
+	}
+}

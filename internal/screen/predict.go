@@ -101,6 +101,16 @@ type wheelPredict struct {
 	stats              PredictStats
 }
 
+// Recorded is how many rows of the agent's transcript the painter's record
+// has taken in, numbered as the record that keeps them (the worker's,
+// when it sends it); 0 with no record.
+func (p *Painter) Recorded() int64 {
+	if p.alt == nil {
+		return 0
+	}
+	return p.alt.Recorded()
+}
+
 // PredictStats counts the wheel prediction's work.
 type PredictStats struct {
 	// Ticks are the wheel ticks over the transcript; Guesses the ones

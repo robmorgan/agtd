@@ -322,11 +322,11 @@ func (c *client) connectAttach(ctx context.Context, id string, prev attachIdenti
 	if attach.HasFeature(protocol.CapTerminalColors) {
 		attach.Colors = terminalColors()
 	}
-	if !c.wantsFrames() {
-		attach.Features = slices.DeleteFunc(attach.Features, func(f string) bool {
-			return f == protocol.CapAttachFrames || f == protocol.CapAttachFrameWindow
-		})
-	}
+	frames := c.wantsFrames()
+	record := frames && c.wantsAltRecord()
+	attach.Features = slices.DeleteFunc(attach.Features, func(f string) bool {
+		return (!frames && (f == protocol.CapAttachFrames || f == protocol.CapAttachFrameWindow)) || (!record && f == protocol.CapAttachAltRecord)
+	})
 	req := &protocol.Request{AttachSession: attach}
 	if err := protocol.WriteRequest(s, req); err != nil {
 		s.Close()
@@ -522,6 +522,14 @@ func (c *client) wantsFrames() bool {
 		return false
 	}
 	return c.host != nil
+}
+
+// wantsAltRecord reports whether the painter keeps a record of an agent's
+// transcript on the alternate screen (alt scrollback or the wheel
+// prediction), which the worker's record then seeds and keeps exact.
+func (c *client) wantsAltRecord() bool {
+	cfg, err := config.Load(c.paths.Config)
+	return err == nil && (cfg.Attach.AltScrollback || cfg.Attach.WheelPredicted())
 }
 
 // newPainterFor is the screen painter for an attachment, nil unless the

@@ -698,7 +698,7 @@ func (e *echo) predict(ev keyEvent) bool {
 		// kitty keyboard protocol; elsewhere it is a plain Enter and
 		// goes to the agent as one.
 		e.text.newline()
-	case ev.code == keyEnter && ev.mods == 0 && e.frames && e.submits():
+	case ev.code == keyEnter && ev.mods == 0 && !ev.lineFeed() && e.frames && e.submits():
 		// The prompt goes to the agent and the field empties. Only
 		// under frames: in raw mode the hold would drop the agent's
 		// answer until the field was probed.
@@ -716,6 +716,12 @@ func (e *echo) predict(ev keyEvent) bool {
 	}
 	return true
 }
+
+// lineFeed reports a bare LF, which the decoder names Enter: Ctrl-J, or a
+// Shift-Enter the terminal was set to send as one (Ghostty's
+// `keybind = shift+enter=text:\n`). It is a newline in Claude Code, not a
+// submit, and not the same in every agent, so it goes unpredicted.
+func (ev keyEvent) lineFeed() bool { return len(ev.raw) == 1 && ev.raw[0] == '\n' }
 
 // submits reports that Enter on the text as it stands would submit it in
 // Claude Code, Codex and pi alike: there is text, it does not end with a
