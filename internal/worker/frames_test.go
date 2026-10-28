@@ -396,7 +396,7 @@ func frameText(f *protocol.Frame) string {
 // the field in the next frame; the alternate screen is a full frame; the
 // session's end sends the last screen.
 func TestFrameClientThroughTheWorker(t *testing.T) {
-	const script = `stty -echo; read go; printf 'hello\r\n'; read x; printf 'again\r\n'; read y; printf '\033[?1049h\033[Htop'; read z; printf '\033[?1049l'; read w; printf 'bye'; exit 0`
+	const script = `stty -echo; printf 'ready\r\n'; read go; printf 'hello\r\n'; read x; printf 'again\r\n'; read y; printf '\033[?1049h\033[Htop'; read z; printf '\033[?1049l'; read w; printf 'bye'; exit 0`
 	h := startWorkerWith(t, script)
 	c, attached := h.attachWith(protocol.AttachSession{Features: []string{protocol.CapAttachFrames, protocol.CapAttachField, protocol.CapAttachSizeOwner}})
 	if !attached.HasFeature(protocol.CapAttachFrames) {
@@ -407,19 +407,26 @@ func TestFrameClientThroughTheWorker(t *testing.T) {
 		t.Fatalf("first frame: full %v seq %d rows %d/%d", f.Full, f.Seq, len(f.Rows), f.Lines)
 	}
 	c.ack(f.Seq, false)
+	// Input sent before the script turns echo off would echo onto the
+	// screen, so it waits for the script to say so.
+	for !strings.Contains(frameText(f), "ready") {
+		f = c.readFrame()
+		c.ack(f.Seq, false)
+	}
+	ready := f.Seq
 	c.input("go\n")
-	if f = c.readFrame(); f.Full || f.Seq != 2 || !strings.Contains(frameText(f), "hello") {
+	if f = c.readFrame(); f.Full || f.Seq != ready+1 || !strings.Contains(frameText(f), "hello") {
 		t.Fatalf("hello frame: full %v seq %d %q", f.Full, f.Seq, frameText(f))
 	}
 	// Two frames may be unacknowledged; the next output makes the second.
 	c.input("x\n")
-	if f = c.readFrame(); f.Seq != 3 || !strings.Contains(frameText(f), "again") {
+	if f = c.readFrame(); f.Seq != ready+2 || !strings.Contains(frameText(f), "again") {
 		t.Fatalf("again frame: seq %d %q", f.Seq, frameText(f))
 	}
 	c.ack(f.Seq, false)
 	// A snapshot request is a full frame.
 	c.send(&protocol.Request{AttachSnapshot: protocol.Empty})
-	if f = c.readFrame(); !f.Full || f.Seq != 4 {
+	if f = c.readFrame(); !f.Full || f.Seq != ready+3 {
 		t.Fatalf("snapshot frame: full %v seq %d", f.Full, f.Seq)
 	}
 	c.ack(f.Seq, false)

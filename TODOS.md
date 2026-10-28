@@ -175,7 +175,45 @@ frame did not change; repaint only the backdrop rows a frame changed.
 **Priority:** P3
 **Depends on:** A benchmark showing either matters
 
+### A reattach that races a crashed worker's cleanup
+
+**What:** When an attach names a session whose worker this daemon spawned
+and the dial fails while the record still says running, wait briefly (and
+boundedly) for the supervisor to record the exit, then answer with the
+session's end (`endedIncarnation` in `internal/daemon/proxy.go`).
+**Why:** A worker that is killed or panics stays `running` until its
+supervisor reaps it; a reattach in that window gets "failed to connect to
+runtime for session X: connection refused", which the CLI cannot reconnect
+from, instead of "session X failed".
+**Context:** Found by the red team in the review of the detach-error fix
+(branch fix-inbox-detach-error), which made the daemon answer an ended
+incarnation's reattach with SessionEnded. Predates that branch; deferred
+there to keep it to the reported bug.
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
 ## SSH Agent Forwarding
+
+### A leave that loses to a failed write
+
+**What:** When the worker's write to an attachment fails, read the requests
+the client already sent before taking it for a cut, so an `AttachLeave`
+among them still counts.
+**Why:** A client that leaves while output is flowing can be taken for a
+cut: the size stays reserved for 10 s for a reattach that never comes, and
+agent connections wait as long. Two `internal/worker` tests fail this way:
+TestOwnerLeavingPromotesMostRecentlyUsed about 2 runs in 100 on Linux, and
+TestSSHAgentFollowsTheSizeOwner (sshagent_test.go:421, "a to own the size
+again" times out at 10 s), which failed once on each of macOS and Linux on
+2026-10-28 under load and makes the full suites flaky.
+**Context:** Found while checking a Linux test failure in the review of the
+PR #82 fixes. The attach loop selects between output and requests, and an
+output write that fails returns before a queued leave is read. Raised to P1
+on 2026-10-28: it now fails ship verification lanes.
+**Effort:** S
+**Priority:** P1
+**Depends on:** None
 
 ### Tie each forwarder to the attachment that opened it
 
@@ -346,23 +384,6 @@ only by luck: with the flush removed it failed 5 times in 25.
 `internal/cli/retry_test.go`'s fake remote is the pattern.
 **Effort:** S
 **Priority:** P3
-**Depends on:** None
-
-### A leave that loses to a failed write
-
-**What:** When the worker's write to an attachment fails, read the requests
-the client already sent before taking it for a cut, so an `AttachLeave`
-among them still counts.
-**Why:** A client that leaves while output is flowing can be taken for a
-cut: the size stays reserved for 10 s for a reattach that never comes, and
-agent connections wait as long. `internal/worker`'s
-TestOwnerLeavingPromotesMostRecentlyUsed fails this way about 2 runs in
-100 on Linux, on main as well.
-**Context:** Found while checking a Linux test failure in the review of the
-PR #82 fixes. The attach loop selects between output and requests, and an
-output write that fails returns before a queued leave is read.
-**Effort:** S
-**Priority:** P2
 **Depends on:** None
 
 ### Write queued events before a handoff's exec

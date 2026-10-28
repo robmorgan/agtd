@@ -35,6 +35,28 @@ func (s *Server) dialWorker(id string) (transport.Stream, error) {
 	return nil, fmt.Errorf("failed to connect to runtime for session `%s`: %w", id, err)
 }
 
+// endedIncarnation is how incarnation uid of session id ended, if it has:
+// what an attach to it is answered with once its worker is gone, as the
+// worker would have answered an attachment that was reading. The client
+// reattaching to the session it was attached to (it names the UID) learns
+// that the session ended, rather than that it is not running; a plain
+// attach by name is still refused. Nil if uid is empty or the session is
+// another incarnation, or has not ended.
+func (s *Server) endedIncarnation(id, uid string) *protocol.SessionEnded {
+	if uid == "" {
+		return nil
+	}
+	rec, err := s.getSession(id)
+	if err != nil || rec == nil || rec.UID != uid {
+		return nil
+	}
+	switch rec.Status {
+	case session.StatusExited, session.StatusFailed, session.StatusUnknownRecovered:
+		return &protocol.SessionEnded{SessionID: rec.SessionID, Status: rec.Status, ExitCode: rec.ExitCode, Error: rec.Error}
+	}
+	return nil
+}
+
 // forward sends a single request to the session's worker and returns its
 // single response.
 func (s *Server) forward(id string, req *protocol.Request) *protocol.Response {
@@ -108,6 +130,11 @@ func exchange(worker transport.Stream, req *protocol.Request) (*protocol.Respons
 // stream. When the worker's stream ends (detach, session end, worker exit)
 // both connections are closed, which also unblocks the client->worker copy.
 func (s *Server) proxyAttach(client transport.Stream, clientReader *bufio.Reader, req *protocol.AttachSession) error {
+	// Taken before negotiateAttach, which drops it when the worker is gone.
+	expectUID := ""
+	if req.HasFeature(protocol.CapSessionUID) {
+		expectUID = req.ExpectUID
+	}
 	if len(req.Features) > 0 {
 		if err := s.negotiateAttach(req); err != nil {
 			return protocol.WriteResponse(client, protocol.ErrorResponsef("%v", err))
@@ -122,6 +149,9 @@ func (s *Server) proxyAttach(client transport.Stream, clientReader *bufio.Reader
 	attachedAt := time.Now()
 	worker, err := s.dialWorker(req.SessionID)
 	if err != nil {
+		if ended := s.endedIncarnation(req.SessionID, expectUID); ended != nil {
+			return protocol.WriteResponse(client, &protocol.Response{SessionEnded: ended})
+		}
 		return protocol.WriteResponse(client, protocol.ErrorResponsef("%v", err))
 	}
 	defer worker.Close()
