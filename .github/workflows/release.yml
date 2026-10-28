@@ -42,7 +42,7 @@ env:
 
 jobs:
   meta:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -73,6 +73,7 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
       # Still on Node 20 (which GitHub runs on Node 24) as of v2.2.1, the
       # latest; kept because ziglang.org asks CI to use its mirrors, as this does.
+      # Upstream's fix is https://codeberg.org/mlugg/setup-zig/pulls/55.
       - uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
@@ -240,7 +241,7 @@ jobs:
   release:
     if: github.ref_type == 'tag'
     needs: [meta, linux, macos]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
