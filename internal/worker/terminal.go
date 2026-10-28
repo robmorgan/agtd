@@ -483,13 +483,19 @@ const penReset = "\x1b[0m\x1b]8;;\x1b\\\x1b(B\x0f\x1b[0\"q"
 // the switch) and then the tab stops, which start by clearing them all
 // (TBC, CSI 3 g); the reset goes in between.
 func resetPenAfterSwitch(formatted []byte) []byte {
+	return spliceBeforeTabStops(formatted, penReset)
+}
+
+// spliceBeforeTabStops inserts seq between the formatted modes and the tab
+// stops, which start by clearing them all (TBC, CSI 3 g).
+func spliceBeforeTabStops(formatted []byte, seq string) []byte {
 	i := bytes.Index(formatted, []byte("\x1b[3g"))
 	if i < 0 {
 		return formatted
 	}
-	out := make([]byte, 0, len(formatted)+len(penReset))
+	out := make([]byte, 0, len(formatted)+len(seq))
 	out = append(out, formatted[:i]...)
-	out = append(out, penReset...)
+	out = append(out, seq...)
 	return append(out, formatted[i:]...)
 }
 
@@ -614,7 +620,53 @@ func formatScreen(term *libghostty.Terminal, format libghostty.FormatterFormat, 
 	if err != nil {
 		return nil, err
 	}
-	return runFormatter(term, format, region, sel)
+	out, err := runFormatter(term, format, region, sel)
+	if err != nil || format != libghostty.FormatterFormatVT {
+		return out, err
+	}
+	return leaveStrayAlternate(term, out)
+}
+
+// leaveStrayAlternate keeps the client on the primary screen when an
+// alternate screen mode is set while the primary screen is active. The
+// three modes (47, 1047 and 1049) are separate flags, and resetting any of
+// them leaves the alternate screen, so a program that entered with one and
+// left with another (CSI ? 1047 h, then CSI ? 47 l) leaves the first one
+// set. The formatter sets it again, which takes the client to the
+// alternate screen; the formatted modes are followed here, before the tab
+// stops (CSI 3 g), by the reset of a mode that is not set, which leaves
+// the client with the same flags. Resetting 1049 restores the saved
+// cursor, origin mode included, so that is the last choice and origin
+// mode is set again after it.
+func leaveStrayAlternate(term *libghostty.Terminal, formatted []byte) ([]byte, error) {
+	screen, err := term.ActiveScreen()
+	if err != nil || screen != libghostty.ScreenPrimary {
+		return formatted, err
+	}
+	modes := []struct {
+		mode  libghostty.Mode
+		reset string
+	}{
+		{libghostty.ModeAltScreenLegacy, "\x1b[?47l"},
+		{libghostty.ModeAltScreen, "\x1b[?1047l"},
+		{libghostty.ModeAltScreenSave, "\x1b[?1049l"},
+	}
+	stray, leave := false, ""
+	for _, m := range modes {
+		on, _ := term.Mode(m.mode)
+		if on {
+			stray = true
+		} else if leave == "" {
+			leave = m.reset
+		}
+	}
+	if !stray || leave == "" {
+		return formatted, nil
+	}
+	if on, _ := term.Mode(libghostty.ModeOrigin); on && leave == "\x1b[?1049l" {
+		leave += "\x1b[?6h"
+	}
+	return spliceBeforeTabStops(formatted, leave), nil
 }
 
 var crlf = []byte("\r\n")

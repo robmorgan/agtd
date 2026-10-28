@@ -1629,6 +1629,13 @@ and its terminal to it first. It is built from libghostty's VT formatter, with t
   the mode the program used, so when the program exits, the shell and its scrollback are back. The
   scrolling region is emitted once, after the switch (it is terminal-wide), and the pen is reset
   after the switch so the alternate screen does not inherit the primary one's.
+* **Alternate screen modes left set on the primary screen.** Modes 47, 1047 and 1049 are separate
+  flags, and resetting any of them leaves the alternate screen, so a program that entered with one
+  and left with another (`CSI ? 1047 h`, then `CSI ? 47 l`) leaves the first set. The formatter
+  sets it again, which would put the client on the alternate screen; after the modes the snapshot
+  resets one that is not set, which leaves the client with the same flags on the primary screen.
+  Frames leave the set ones out of their prefix instead, since only the active screen matters to
+  the client there.
 * **Only changed colors.** The formatter's palette option sets all 256 colors to libghostty's
   defaults, overwriting the user's theme; the snapshot sets only the palette entries and default
   foreground, background and cursor colors that a program changed.
@@ -1661,6 +1668,10 @@ formatter's):
 * **A hyperlink that ends in a pending wrap.** The cursor block reprints the last cell to recreate
   the pending wrap, inside a fresh OSC 8, so a link without an explicit id comes back as two links
   to the same URI, the last cell its own.
+* **A pending wrap at a right margin.** The cursor block recreates a pending wrap by reprinting
+  the cell under the cursor only when the cursor is in the last column; within left and right
+  margins (DECSLRM) a wrap is pending at the right margin, and the cursor comes back there
+  without it, so the next character overwrites the last one instead of wrapping.
 * **Text printed before grapheme clustering (mode 2027) was switched.** The mode decides how
   codepoints join into cells, cells do not record which mode made them, and the snapshot sets
   the current mode before the contents, so text printed under the other mode can split or join

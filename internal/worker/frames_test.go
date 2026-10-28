@@ -284,6 +284,31 @@ func TestFramesCarryTerminalState(t *testing.T) {
 	r.same("resized")
 }
 
+// A program that leaves the alternate screen with another mode than it
+// entered with leaves the first one set; the client is back on the primary
+// screen all the same.
+func TestFramesLeaveTheAlternateScreenWithAnotherMode(t *testing.T) {
+	for _, stream := range []string{
+		"\x1b[?1047halt\x1b[?47l",
+		"\x1b[?47h\x1b[?1049halt\x1b[?1047l",
+		"\x1b[?47h\x1b[?1047halt\x1b[?1049l",
+	} {
+		t.Run(fmt.Sprintf("%q", stream), func(t *testing.T) {
+			r := newFrameRig(t, 20, 4)
+			r.feed("primary\r\n")
+			r.frame()
+			r.feed(stream + " back\r\n")
+			if f := r.frame(); f.Alternate {
+				t.Fatalf("frame on the alternate screen: %+v", f)
+			}
+			r.same("left")
+			r.feed("more\r\n")
+			r.frame()
+			r.same("next frame")
+		})
+	}
+}
+
 // The field rides in a frame when asked for outright, or when the client
 // wants it and the program has settled or the client just typed.
 func TestFramesCarryTheField(t *testing.T) {
