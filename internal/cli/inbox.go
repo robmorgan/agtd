@@ -589,10 +589,11 @@ func (i *inbox) handleBrowseKey(ev keyEvent) (bool, *inboxOutcome) {
 		if sel < len(rows) {
 			i.openActions(rows[sel])
 		}
-	case ev.printable() && i.query == "" && ev.r == 'n':
+	case ev.code == keyChar && ev.mods == modCtrl && ev.r == 'n':
+		// As Enter on the + row: the filter, when it has text, names it.
 		i.selectIndex(rows, len(rows))
 		i.startCreate(true)
-	case ev.printable() && i.query == "" && ev.r == 'r':
+	case ev.code == keyChar && ev.mods == modCtrl && ev.r == 'r':
 		i.effects = append(i.effects, inboxEffect{reprobeAll: true})
 		i.setNotice(&inboxNotice{message: "asking every host again"})
 	case ev.printable() && i.query == "" && ev.r == '?':
@@ -1054,14 +1055,14 @@ func (i *inbox) hints(rows []inboxRow, sel int) [][2]string {
 	if i.query != "" {
 		return append(h, [2]string{"esc", "clear"})
 	}
-	return append(h, [2]string{"n", "new"}, [2]string{"esc", "quit"}, [2]string{"?", "keys"})
+	return append(h, [2]string{"ctrl-n", "new"}, [2]string{"esc", "quit"}, [2]string{"?", "keys"})
 }
 
 // inboxKeyLines are the full key list, shown for ?.
 var inboxKeyLines = [][][2]string{
 	{{"↑↓", "choose"}, {"enter", "attach (actions for an ended session)"}, {"tab/→", "actions"}},
-	{{"type", "filter; host/ narrows to a host"}, {"n", "new session"}, {"r", "ask every host again"}},
-	{{"space", "first, to filter by n, r or ?"}, {"esc", "back, clear, then quit (sessions keep running)"}, {"ctrl-c", "quit"}},
+	{{"type", "filter; host/ narrows to a host"}, {"ctrl-n", "new session (named by the filter)"}, {"ctrl-r", "ask every host again"}},
+	{{"space", "first, to filter by ?"}, {"esc", "back, clear, then quit (sessions keep running)"}, {"ctrl-c", "quit"}},
 }
 
 func (i *inbox) hintLine(h [][2]string) line {

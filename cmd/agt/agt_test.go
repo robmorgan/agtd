@@ -652,7 +652,7 @@ func TestInboxLockedToHostEndToEnd(t *testing.T) {
 	r.startAndDetach("there")
 	tm := e.start("--host", "dev")
 	m := tm.expectScreen(0, `there\s+dev\s+sh\s+(running|working|idle)`)
-	tm.write("n")
+	tm.write("\x0e") // ctrl-n
 	tm.expectScreen(m, "agt new -C DIR dev/NAME")
 	tm.write("\x1b")
 	tm.wait()
