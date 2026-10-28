@@ -82,7 +82,8 @@ const (
 	EventSSHAgentSigned EventKind = "ssh_agent_signed"
 	// EventSSHAgentRefused: a request to a forwarded agent was refused:
 	// one a forwarded agent never takes (adding, removing or locking keys),
-	// or a signature the client did not give (info).
+	// or a signature the client did not give (info). Repeats are held back
+	// and counted in a later one, whose summary says how many.
 	EventSSHAgentRefused EventKind = "ssh_agent_refused"
 	// EventSSHAgentUnavailable: a program asked the session's agent socket
 	// for keys while no client forwarded an agent and there was no other

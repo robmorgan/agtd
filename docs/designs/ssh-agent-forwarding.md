@@ -183,22 +183,26 @@ so the transport gains an accessor for it. After that the daemon copies bytes bo
 | Stage | Bound | When exceeded |
 |---|---|---|
 | One agent message, either way | 256 KiB, OpenSSH's own limit | the program's connection is closed |
-| Program connections per session | 16 open at once | further ones are accepted and closed at once; ssh carries on without an agent |
+| Program connections per session | 64 open at once (16 in the first build) | further ones are accepted and closed at once, and logged; ssh carries on without an agent |
 | Requests in flight per program connection | 1: the protocol is request and reply, and the worker reads the next request only after writing the reply | n/a |
-| Forwarders | one per attachment, ending with it | a second one for the same attachment is refused with an `Error` |
-| Waiting for the owner's reattach | 10 s, the size owner's grace | the connection is routed as ownership then stands |
+| Forwarders | one per attachment, ending with it | a second one for the same attachment is refused with an `Error`, unless the first has ended |
+| Waiting for the owner's reattach | 10 s, the size owner's grace | the connection is routed as ownership then stands, or dropped if its program has gone |
 | Waiting for a reply (worker) | 90 s, room for a 60 s confirmation over a slow link | `SSH_AGENT_FAILURE` to the program, `SSHAgentClose` to the forwarder, and the program's connection is closed |
 | Writes to a forwarder (worker) | one frame at a time, under a 10 s deadline | the forwarder is dropped (its stream closed) and its requests fail |
-| Local agent connections (CLI) | 16, one per program connection, dialled within 2 s | `SSHAgentClose` |
+| Local agent connections (CLI) | 64, one per program connection, each counted until it ends, dialled within 2 s | `SSHAgentClose` |
 
-So the most a forwarder can make the worker hold is 16 messages of 256 KiB, and in practice a few
+The review fixes added more: a frame bound on `ssh-agent` streams, deadlines on a program
+connection's requests and on replies to it, and a hold-back on repeated events. ARCHITECTURE.md's
+table lists every bound as built.
+
+So the most a forwarder can make the worker hold is 64 messages of 256 KiB, and in practice a few
 hundred bytes each. A forwarder that stops reading stalls only the program connections routed to
 it, and only until its write deadline. It never stalls the PTY, attachments or other forwarders,
 since each forwarder is its own stream.
 
 Goroutines: the worker has one accept loop on the agent socket (ending with the worker), one
-goroutine per program connection (at most 16) and one reader per forwarder (at most one per attachment). The CLI has
-one reader for the stream and one goroutine per local agent connection (at most 16). Each ends with
+goroutine per program connection (at most 64) and one reader per forwarder (at most one per attachment). The CLI has
+one reader for the stream and one goroutine per local agent connection (at most 64). Each ends with
 its connection.
 
 Failure:
@@ -212,12 +216,13 @@ Failure:
   itself keeps listening, since the worker holds it. A connection made meanwhile is routed as in
   decision 3: if the owner was forwarding, it waits up to 10 seconds for the owner's forwarder.
 * **Live handoff**: the listener is inherited, so the path never stops listening. Forwarding
-  streams end with `SessionRestarting`, as attachments do. Program connections open at the exec
-  are closed, so an ssh that is in the middle of authenticating fails once.
+  streams are closed, without a frame of their own, when their attachments end with
+  `SessionRestarting`, and agt opens a new forwarder when it reattaches. Program connections open
+  at the exec are closed, so an ssh that is in the middle of authenticating fails once.
 * **Worker crash**: the socket goes with the session.
 * **An `agt attach` run inside a session** forwards that session's own socket, its
   `SSH_AUTH_SOCK`, so requests take one more hop, as `ssh -A` through two hosts does. A cycle (a
-  session's socket forwarded back into the same session) ends at the 16-connection cap, and the
+  session's socket forwarded back into the same session) ends at the connection cap, and the
   requests caught in it fail.
 
 ## Security
@@ -275,7 +280,8 @@ passes the message and key filters, as `ssh -A` does.
 * `ssh_agent_signed` (info): each forwarded signature, with the key's fingerprint, the destination
   (the bound host key, named from the devbox's `known_hosts` when it can be), the user name in the
   request, and the client from `Client`.
-* `ssh_agent_refused` (info): the client refused a request.
+* `ssh_agent_refused` (info): the worker or the client refused a request. Repeats are held back
+  and counted in a later event (see "After review").
 * `ssh_agent_unavailable` (info, never raising attention): see decision 6.
 
 Identity listings are not recorded, and the signed data never is.
@@ -303,10 +309,11 @@ forward = true
 agent = "~/.1password/agent.sock"
 # CLI: keys offered (SHA256 fingerprints); empty offers every key the agent holds.
 keys = []
-# CLI, Phase 2: hosts signed in to without asking, matched against known_hosts.
-allow_hosts = ["github.com"]
+# CLI, Phase 2 (not yet taken: until then agt stops forwarding and says so):
+# hosts signed in to without asking, matched against known_hosts.
+# allow_hosts = ["github.com"]
 # CLI, Phase 2: SSHSIG namespaces signed without asking ("git" signs commits).
-allow_namespaces = []
+# allow_namespaces = []
 ```
 
 With `forward = true` but no agent to forward (no `SSH_AUTH_SOCK` and no `agent`), the CLI
@@ -352,9 +359,11 @@ Built as above, with these additions and differences:
   instant it attaches can see this.
 * **Events.** Signatures read as `laptop (SHA256:…) signed a login as git to github.com using key
   SHA256:…`, or `… signed data in the namespace git …` for a commit signature. The destination is
-  the host key in the connection's session binding, which Phase 1 records without verifying it:
-  it names where ssh says it is logging in, for the record, and decides nothing. A host missing
-  from the devbox's `known_hosts` reads `an unknown host (key SHA256:…)`.
+  the host key of a session binding the client's agent accepted (OpenSSH's checks the host key's
+  signature first) for the session the login names; any other login reads `a login as git`,
+  without a host. It is for the record, and decides nothing. A host missing from the devbox's
+  `known_hosts` reads `an unknown host (key SHA256:…)`, and one listed only under a hashed name (the
+  default on Debian and Ubuntu) `a known host (hashed in known_hosts; key SHA256:…)`.
 * **Tests as built.** `internal/sshagent` uses messages built to the protocol's layout and keys
   from `x/crypto/ssh`, with a fuzz target, rather than captured fixtures. The worker's tests use
   `x/crypto/ssh/agent` as both the program and the client's agent, and cover routing by size
@@ -374,6 +383,63 @@ Built as above, with these additions and differences:
   but with forwarding it kept programs waiting for an owner who had left. A remote CLI about to
   close its connection now waits, at most a second, for the worker to end the stream. The Linux
   run of the end-to-end test caught it.
+* **After review (2026-10-27).** The pre-landing and adversarial reviews of PR #82 led to:
+  * **The agtd hop.** A remote forwarder binds each of its connections to the local agent as a
+    forwarding session first, to a host key made for that forwarder. OpenSSH's agent then applies
+    destination constraints as it does for `ssh -A`: a key added with `ssh-add -h` is hidden and
+    refused on the devbox. Before, the devbox's use looked local to the agent. Naming the devbox
+    in a constraint is still Phase 3.
+    * Until the agent takes the binding (it was locked, or rejected it), agt tries again before
+      each request and refuses the program's own bindings, which would otherwise become the first
+      hop and let the devbox use a key limited to another host. It tries again after each
+      listing too, and asks again once the binding holds: an agent unlocked between the binding
+      and the listing lists every key. The check before a forwarder opens asks the same way.
+    * The binding waits its turn as a request does: OpenSSH's agent answers nothing else while it
+      asks the user to confirm a signature, so a 2 s limit failed every new connection meanwhile.
+  * **agt's own bounds.** A connection to the local agent counts against the cap until its
+    goroutine ends, so a hostile devbox cannot grow them by closing connections as it opens
+    them. An `ssh-agent` stream's frames are refused over one message at their header, before
+    anything is allocated. Stopping a forwarder ends a question to the local agent in progress,
+    so a detach never waits on a silent agent.
+  * **The inherited agent.** An inherited `SSH_AUTH_SOCK` that leads, through any symlinks, to a
+    socket in the runtime's `ssh/` is another session's socket (a daemon started from inside a
+    session, or a shell's `ln -sf "$SSH_AUTH_SOCK" ~/.ssh/ssh_auth_sock`) and is ignored, checked
+    again for each relayed connection.
+  * **Configuration.** A mistake in `[ssh_agent]` stops agt forwarding: a setting it does not
+    take (names have a case: `Keys` is not `keys`), a table spelled like it but not as it is
+    (`[SSH_Agent]` would otherwise replace it), `keys` under another table, a key that is not a
+    fingerprint, or a value of the wrong type (the table is decoded on its own, so the rest of
+    the file stands). agt says why before an attach takes the screen and again once it gives it
+    back, and the inbox shows it until a key; agtd logs it at start. agt says nothing when a
+    readable `[ssh_agent]`, spelled so, sets `forward = false`. Other settings named like these
+    elsewhere are ignored, as any unknown key is: misplaced, they leave forwarding as it was.
+  * **Routing.**
+    * A connection that waited for an owner's reattach is dropped if its program has gone,
+      rather than asking the client for a signature nobody waits for.
+    * While the size owner's forwarder is reopened, new connections wait for it, as for a
+      reattach, rather than use the devbox's own agent, whether or not it owned the size when
+      the forwarder ended.
+    * A dial to the inherited agent racing the socket's stop cannot escape it.
+    * A reply that races its forwarder's end, or the client's close, reaches the program before
+      the connection closes.
+    * A reply nobody asked for is dropped.
+  * **Robustness.**
+    * agt forwards only an agent that answers and holds a key `keys` allows. It opens a
+      forwarder again when one ends while its attachment lives, after a wait from 1 to 8 s (under
+      the worker's 10 s wait for it) that starts over only once a stream has served 8 s, and gives
+      up after three refusals in a row.
+    * The worker takes 64 connections, admitted before a goroutine starts for them, and logs
+      those it refuses. It gives each request 15 minutes, the first too, since ssh-add connects
+      before it asks for a passphrase; and it closes a connection that does not take its answers
+      within 10 s.
+  * **Events.** Every signature is recorded, and the session's end waits up to a second for one
+    given just before it. A refusal starts a quiet time in which those like it are held back,
+    10 seconds, doubling up to an hour while they keep coming; any refusal while 16 different
+    ones are held shares one such quiet time. When a quiet time is up, or at the session's end
+    or a handoff, an event counts those held back. Counts still queued when a handoff execs are
+    lost (TODOS.md). A gap in forwarding ends
+    when forwarding resumes (used or not) and is carried across a handoff. The SSH-1 request
+    `ssh-add -D` sends after its own reads as such.
 
 ### Phase 2: destination policy and asking (about 1 week)
 
@@ -384,11 +450,11 @@ Built as above, with these additions and differences:
 
 ### Phase 3: only if asked for
 
-* Making the agtd hop visible to OpenSSH's own destination constraints (`ssh-add -h`). Today
-  ssh-agent treats a connection with no bindings as local use, so a key added with
-  `ssh-add -h github.com` works through agtd to github.com, but "only via devbox" cannot be
-  expressed. agt could open each connection with a binding for the agtd hop, but that needs a
-  host key for the daemon in SSH form and a reason not to reuse its TLS key for SSH signatures.
+* Naming the agtd hop in OpenSSH's destination constraints (`ssh-add -h devbox>github.com`). agt
+  binds each forwarded connection to a hop already (see "After review"), but to a key made for
+  each forwarder, so a constrained key is refused through agtd, as through an unlisted `ssh -A`
+  host. Allowing "only via devbox" needs a host key for the daemon in SSH form, published like a
+  host key, and a reason not to reuse its TLS key for SSH signatures.
 * A short hold for requests that find no forwarder, if agents' tool timeouts turn out to leave room
   for one.
 

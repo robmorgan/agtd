@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -37,6 +38,28 @@ type testAgent struct {
 	path string
 	key  ssh.PublicKey
 	fp   string
+	// hops counts the forwarding bindings it took: only agt's binding of
+	// the agtd hop sets is_forwarding, ssh's own bindings do not.
+	hops atomic.Int32
+}
+
+// bindingAgent accepts the session bindings ssh sends, as OpenSSH's agent
+// does (x/crypto's keyring refuses the extension), so the events can name
+// the host a login went to.
+type bindingAgent struct {
+	agent.ExtendedAgent
+	hops *atomic.Int32
+}
+
+func (b bindingAgent) Extension(name string, contents []byte) ([]byte, error) {
+	if name == "session-bind@openssh.com" {
+		// is_forwarding is the binding's last byte.
+		if len(contents) > 0 && contents[len(contents)-1] == 1 {
+			b.hops.Add(1)
+		}
+		return nil, nil
+	}
+	return b.ExtendedAgent.Extension(name, contents)
 }
 
 func serveTestAgent(t *testing.T) *testAgent {
@@ -64,6 +87,7 @@ func serveTestAgent(t *testing.T) *testAgent {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { l.Close() })
+	a := &testAgent{path: path, key: key, fp: ssh.FingerprintSHA256(key)}
 	go func() {
 		for {
 			conn, err := l.Accept()
@@ -72,11 +96,11 @@ func serveTestAgent(t *testing.T) *testAgent {
 			}
 			go func() {
 				defer conn.Close()
-				_ = agent.ServeAgent(ring, conn)
+				_ = agent.ServeAgent(bindingAgent{ring.(agent.ExtendedAgent), &a.hops}, conn)
 			}()
 		}
 	}()
-	return &testAgent{path: path, key: key, fp: ssh.FingerprintSHA256(key)}
+	return a
 }
 
 // startSSHServer runs an SSH server that lets in only the holder of
@@ -197,6 +221,11 @@ func TestSSHAgentForwardingEndToEnd(t *testing.T) {
 	m = tm.expect(m, "first:256 "+a.fp)
 	tm.write(login + "\r")
 	m = tm.expect(m, "the server greets test")
+	// The session is on another host, so what reached this agent came
+	// through the agtd hop, which ssh-add -h limits apply to.
+	if a.hops.Load() == 0 {
+		t.Fatal("agt lent its agent to a session on another host without binding the agtd hop")
+	}
 
 	// The daemon restarts: the attachment reconnects, and its forwarder with
 	// it.
@@ -260,6 +289,10 @@ func TestSSHAgentForwardingLocally(t *testing.T) {
 	m = tm.expect(m, "\x1b]0;two - agtd\x07")
 	tm.write(listKeysAs("two"))
 	m = tm.expect(m, "two:256 "+a.fp)
+	// Sessions on this machine are local use: no hop.
+	if n := a.hops.Load(); n != 0 {
+		t.Fatalf("a local session's agent connections were bound to a hop %d times", n)
+	}
 	tm.write("\x1c")
 	tm.wait()
 
@@ -275,9 +308,22 @@ func TestSSHAgentForwardingLocally(t *testing.T) {
 	m = tm.expect(0, "attached to two")
 	tm.write("ssh-add -l | sed 's/^/off:/'\r")
 	m = tm.expect(m, "off:The agent has no identities")
+	tm.write("\x1c")
+	tm.wait()
 
+	// A mistake in [ssh_agent] stops forwarding, and agt says so before the
+	// attach takes the screen and again once it gives it back, since its
+	// first paint clears the screen.
+	if err := os.WriteFile(config, append(data, "key = []\n"...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	warning := "agt: not forwarding your SSH agent: [ssh_agent] has no setting `key`"
+	tm = e.start("attach", "two")
+	m = tm.expect(0, warning)
+	m = tm.expect(m, "attached to two")
 	// The shells exit rather than wait out a kill's grace at cleanup.
 	tm.write("exit\r")
+	m = tm.expect(m, warning)
 	tm.expect(m, "session two finished")
 	tm.wait()
 	e.mustRun("agt", "send-input", "one", "exit\r")

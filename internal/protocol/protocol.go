@@ -748,7 +748,13 @@ func readRawFrameLimit(r io.Reader, limit uint32) (*frameHeader, []byte, error) 
 
 // readStandardFrame returns a nil header on a clean EOF before any frame.
 func readStandardFrame(r io.Reader) (*frameHeader, []byte, error) {
-	h, payload, err := readRawFrame(r)
+	return readStandardFrameLimit(r, MaxFramePayload)
+}
+
+// readStandardFrameLimit is readStandardFrame refusing payloads over limit
+// before allocating them.
+func readStandardFrameLimit(r io.Reader, limit uint32) (*frameHeader, []byte, error) {
+	h, payload, err := readRawFrameLimit(r, limit)
 	if err != nil || h == nil {
 		return nil, nil, err
 	}
@@ -823,7 +829,11 @@ func ReadRequest(r io.Reader) (*Request, error) {
 
 // ReadRequestWith reads a request written with features f.
 func ReadRequestWith(r io.Reader, f Features) (*Request, error) {
-	h, payload, err := readStandardFrame(r)
+	return readRequestLimit(r, f, MaxFramePayload)
+}
+
+func readRequestLimit(r io.Reader, f Features, limit uint32) (*Request, error) {
+	h, payload, err := readStandardFrameLimit(r, limit)
 	if err != nil || h == nil {
 		return nil, err
 	}
@@ -840,7 +850,11 @@ func ReadResponse(r io.Reader) (*Response, error) {
 
 // ReadResponseWith reads a response written with features f.
 func ReadResponseWith(r io.Reader, f Features) (*Response, error) {
-	h, payload, err := readStandardFrame(r)
+	return readResponseLimit(r, f, MaxFramePayload)
+}
+
+func readResponseLimit(r io.Reader, f Features, limit uint32) (*Response, error) {
+	h, payload, err := readStandardFrameLimit(r, limit)
 	if err != nil || h == nil {
 		return nil, err
 	}
