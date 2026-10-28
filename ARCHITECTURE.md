@@ -1445,7 +1445,7 @@ machine's daemon; otherwise the inbox starts the local daemon as any command doe
 Hosts reach the inbox through a `hostSet` (`hosts.go`). One goroutine per host owns that host's
 client, keeping its connection and control stream open between probes, and probes it one probe at
 a time: every 200 ms for this machine's daemon, every 2 s for a remote one, and for a host that
-cannot be reached after a backoff from 2 s doubling to 30 s, which `r` resets. Each probe goes to
+cannot be reached after a backoff from 2 s doubling to 30 s, which Ctrl-R resets. Each probe goes to
 the inbox as a new `hostProbe` the goroutine never touches again, on a channel that holds one per
 host, so a busy inbox only delays probing and nothing is shared. Stopping the set cancels every
 goroutine, closing its connections, and waits for them; the inbox stops it before attaching, so a
@@ -1458,7 +1458,7 @@ reads `removing…` meanwhile and refuses a second action. A daemon without `kil
 remove by name, so the inbox first asks it for the session and refuses if its UID changed; a session
 replaced between that answer and the kill is still removed there. Creating a session runs the same
 way, and attaches to it when it is up. It creates on this machine, in the current directory; in a
-view locked to a remote host, `n` and the `+` row show the `agt new -C DIR host/NAME` to run instead.
+view locked to a remote host, Ctrl-N and the `+` row show the `agt new -C DIR host/NAME` to run instead.
 
 What the inbox tells the user is in two kinds. A notice (a success, or the answer to a key) passes
 after 10 s or at the next key. A failure (a refusal, or a lost answer, which says the result is
