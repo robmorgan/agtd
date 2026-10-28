@@ -23,7 +23,7 @@ state, and reports the result. Read the script's header (`scripts/do-devbox.sh
 ## create
 
 ```sh
-scripts/do-devbox.sh create NAME [--region SLUG] [--size SLUG] [--user NAME] [--ref REF | --local] [--no-claude]
+scripts/do-devbox.sh create NAME [--region SLUG] [--size SLUG] [--user NAME] [--ref REF | --local | --release] [--no-claude]
 ```
 
 - Creating a droplet bills the user's account. Unless the user already gave the
@@ -36,6 +36,8 @@ scripts/do-devbox.sh create NAME [--region SLUG] [--size SLUG] [--user NAME] [--
 - Source: `--ref REF` builds a branch, tag or commit that is pushed to GitHub.
   Use `--local` to test this checkout's working tree, including uncommitted
   changes, for example before a branch is pushed.
+  Use `--release` to install the latest release's binaries through
+  https://agtd.sh/install.sh, the way a new user would; nothing is built.
 - NAME: lowercase letters, digits and dashes. It becomes the droplet's name and
   the host name in `agt host ls`; the script refuses a name either already
   uses.
