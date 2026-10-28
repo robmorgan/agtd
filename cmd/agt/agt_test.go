@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -540,8 +541,9 @@ func (e *env) startAndDetach(name string) {
 
 // remoteEnv starts a second runtime root whose daemon listens on QUIC,
 // adds it to e as host name and authorizes e's key there: a separate
-// daemon, so a request routed to the wrong host is caught.
-func (e *env) remoteEnv(name string) *env {
+// daemon, so a request routed to the wrong host is caught. extraConfig is
+// added to its config.toml.
+func (e *env) remoteEnv(name string, extraConfig ...string) *env {
 	e.t.Helper()
 	probe, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
@@ -549,7 +551,7 @@ func (e *env) remoteEnv(name string) *env {
 	}
 	addr := probe.LocalAddr().String()
 	probe.Close()
-	r := newEnv(e.t, "\n[remote]\nlisten = \""+addr+"\"\n")
+	r := newEnv(e.t, strings.Join(extraConfig, "")+"\n[remote]\nlisten = \""+addr+"\"\n")
 	r.mustRun("agt", "daemon", "info") // starts it
 	e.mustRun("agt", "host", "add", name, addr, "--fingerprint", strings.TrimSpace(r.mustRun("agtd", "remote", "id")))
 	r.mustRun("agtd", "remote", "authorize", strings.TrimSpace(e.mustRun("agt", "remote", "id")), "test")
@@ -642,6 +644,78 @@ func TestInboxEndToEnd(t *testing.T) {
 	}
 	if out := e.mustRun("agt", "ls"); !regexp.MustCompile(`demo\s+(running|working|idle)`).MatchString(sgrSequence.ReplaceAllString(out, "")) {
 		t.Fatalf("local demo after removing dev's:\n%s", out)
+	}
+}
+
+// A session that fails fails the command attached to it, with the reason:
+// a script running `agt new` sees the agent fail in its exit status.
+func TestAttachExitsNonZeroWhenTheSessionFails(t *testing.T) {
+	e := newEnv(t, "")
+	tm := e.start("new", "demo")
+	m := tm.expect(0, "attached to demo")
+	tm.write("exit 3\r")
+	tm.expect(m, "session demo failed: agent exited with code 3")
+	var exit *exec.ExitError
+	if err := tm.waitErr(); !errors.As(err, &exit) || exit.ExitCode() != 1 {
+		t.Fatalf("agt new after the session failed: %v, want exit status 1", err)
+	}
+}
+
+// Stop session in the overlay ends the attachment as the session's end,
+// from `agt attach` and from the inbox, locally and over QUIC: the stream
+// the worker closed is not a lost connection to reattach over (which the
+// daemon refuses, the session no longer running).
+func TestOverlayStopEndsAttachmentEndToEnd(t *testing.T) {
+	// An agent that ends on SIGTERM, as a coding agent does (an
+	// interactive sh ignores it).
+	const loop = "\n[agents.loop]\ncommand = \"/bin/sh\"\nargs = [\"-c\", \"echo ready; while :; do sleep 1; done\"]\n"
+	e := newEnv(t, loop)
+	stop := func(tm *term, m int) int {
+		t.Helper()
+		m = tm.expect(m, "ready")
+		tm.write("\x19")
+		m = tm.expect(m, "Switch session")
+		tm.write("x")
+		m = tm.expect(m, "Stop session")
+		tm.write("\r")
+		m = tm.expect(m, "Its agent and terminal end.")
+		tm.write("\r")
+		return m
+	}
+
+	tm := e.start("new", "--agent", "loop", "one")
+	m := stop(tm, tm.expect(0, "attached to one"))
+	tm.expect(m, "session one finished")
+	tm.wait()
+	if out := tm.output()[m:]; strings.Contains(out, "not running") || strings.Contains(out, "reconnecting") {
+		t.Fatalf("attach after Stop session:\n%q", out)
+	}
+
+	tm = e.start("new", "--agent", "loop", "two")
+	tm.expect(0, "attached to two")
+	tm.write("\x1c")
+	tm.wait()
+	tm = e.start()
+	m = tm.expectScreen(0, `two\s+local\s+loop\s+(running|working|idle)`)
+	tm.write("\r")
+	m = stop(tm, tm.expect(m, "\x1b[?1049h"))
+	m = tm.expect(m, "\x1b[?1049l")
+	end := tm.expectScreen(m, `two ended: session two finished`)
+	if out := sgrSequence.ReplaceAllString(tm.output()[m:end], ""); strings.Contains(out, "could not attach") {
+		t.Fatalf("the inbox after Stop session:\n%q", out)
+	}
+	tm.write("\x1b")
+	tm.wait()
+
+	// Over QUIC a write to the stream the worker ended can fail with a
+	// stream error, not a lost connection.
+	r := e.remoteEnv("dev", loop)
+	tm = e.start("--host", "dev", "new", "-C", r.work, "--agent", "loop", "three")
+	m = stop(tm, tm.expect(0, "attached to three"))
+	tm.expect(m, "session three finished")
+	tm.wait()
+	if out := tm.output()[m:]; strings.Contains(out, "not running") || strings.Contains(out, "reconnecting") || strings.Contains(out, "Error") {
+		t.Fatalf("remote attach after Stop session:\n%q", out)
 	}
 }
 

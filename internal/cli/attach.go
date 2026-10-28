@@ -107,7 +107,12 @@ func (c *client) attachSession(id string) error {
 // (one just created), refusing any other incarnation under its name.
 func (c *client) attachSessionUID(id, uid string) error {
 	ended, err := c.attachLoop(id, uid)
-	if ended != nil {
+	switch {
+	case ended != nil && ended.Status == session.StatusFailed:
+		// The command fails with the session, whether it failed before
+		// the attach reached it or while attached.
+		return errors.New(formatSessionEnd(ended))
+	case ended != nil:
 		fmt.Println(formatSessionEnd(ended))
 	}
 	return err
@@ -157,6 +162,9 @@ var (
 	errSessionRestarting = errors.New("the session is restarting")
 	// errAttachDropped: the attach stream ended without a final frame, so
 	// it was cut (the daemon stopped, say) rather than ended by the worker.
+	// A write that failed is a drop too when the stream gives no reason for
+	// it, ending without a final frame or going quiet (explainFailure): the
+	// reattach asks the daemon what became of the session.
 	errAttachDropped = errors.New("the attach stream ended unexpectedly")
 )
 
@@ -203,6 +211,10 @@ type attachStream struct {
 	announcesLeave bool
 	// composes: the worker takes AttachCompose (CapAttachCompose).
 	composes bool
+	// sendErr is the error of the last write to the stream that failed, so
+	// that only an attachment that ended on it is explained from the stream
+	// (explainFailure). Only the attachment's goroutine sends.
+	sendErr error
 }
 
 func startAttachStream(s transport.Stream, r *bufio.Reader) *attachStream {
@@ -224,7 +236,13 @@ func startAttachStream(s transport.Stream, r *bufio.Reader) *attachStream {
 	return a
 }
 
-func (a *attachStream) send(req *protocol.Request) error { return protocol.WriteRequest(a.s, req) }
+func (a *attachStream) send(req *protocol.Request) error {
+	err := protocol.WriteRequest(a.s, req)
+	if err != nil {
+		a.sendErr = err
+	}
+	return err
+}
 
 // leave tells the worker this client is leaving on purpose (a detach, a
 // switch, the session ending), so that if it owns the session's size the
@@ -268,6 +286,83 @@ func (a *attachStream) awaitEnd(timeout time.Duration) {
 		case <-timer.C:
 			return
 		}
+	}
+}
+
+// A failed write's explanation is read while the stream keeps delivering
+// frames: output queued ahead of the end (up to a QUIC stream window over
+// a slow link) takes as long to arrive as the link needs. explainIdle of
+// silence ends the wait, and explainMax bounds it.
+const (
+	explainIdle = time.Second
+	explainMax  = 10 * time.Second
+)
+
+// explainFailure says why a write to the stream failed with err, from the
+// frames the worker sent before closing it. A write fails once the worker
+// has closed the stream, which it does after saying the session ended (the
+// overlay's Stop waits for exactly that, and a key or a resize can race it)
+// or after ending this attachment (a detach from elsewhere). It returns how
+// the attachment ended then, as the read path would have, rather than
+// reconnecting to a session that is gone, or failing on a QUIC stream error
+// that is not a lost connection. A worker restart or error found there is
+// the cause instead of the write's, and so is a read error. A stream that
+// says nothing (it ended without a final frame, or went quiet) was dropped:
+// the reattach asks the daemon, which knows whether the session lives on.
+// The output read meanwhile is dropped, as is typed input, but the detach
+// key, the end of stdin or the terminal closing (quit) detaches. With
+// connLost (the write found the connection itself gone) nothing more can
+// arrive, so only what is already queued is read, without waiting.
+func (a *attachStream) explainFailure(err error, connLost bool, keys <-chan []byte, parser *attachParser, quit <-chan os.Signal) (*attachResult, error) {
+	dropped := fmt.Errorf("%w (%w)", errAttachDropped, err)
+	exited := a.exited
+	if connLost {
+		gone := make(chan struct{})
+		close(gone)
+		exited = gone
+	}
+	idle := time.NewTimer(explainIdle)
+	defer idle.Stop()
+	deadline := time.NewTimer(explainMax)
+	defer deadline.Stop()
+	for {
+		var f frame
+		select {
+		case f = <-a.frames:
+		case <-exited:
+			// Everything that will be read has been queued.
+			select {
+			case f = <-a.frames:
+			default:
+				return nil, dropped
+			}
+		case chunk, ok := <-keys:
+			if detachPressed(chunk, ok, parser) {
+				return &attachResult{outcome: outcomeDetached}, nil
+			}
+			continue
+		case <-quit:
+			return &attachResult{outcome: outcomeDetached}, nil
+		case <-idle.C:
+			return nil, dropped
+		case <-deadline.C:
+			return nil, dropped
+		}
+		switch {
+		case f.err != nil:
+			return nil, f.err
+		case f.resp == nil:
+			return nil, dropped
+		case f.resp.SessionEnded != nil:
+			return &attachResult{outcome: outcomeEnded, ended: f.resp.SessionEnded}, nil
+		case f.resp.EndOfStream != nil:
+			return &attachResult{outcome: outcomeDetached}, nil
+		case f.resp.SessionRestarting != nil:
+			return nil, errSessionRestarting
+		case f.resp.Error != nil:
+			return nil, errors.New(f.resp.Error.Message)
+		}
+		idle.Reset(explainIdle)
 	}
 }
 
@@ -450,6 +545,13 @@ func (c *client) attachOnce(id, uid string, titled *bool) (res attachResult, err
 		writeOut(attachStartupBytes(snapshot))
 		ech.repainted()
 		res, err := c.runAttachment(id, stream, keys, &parser, winch, quit, sizeOwnership(attached), ech, painter)
+		if err != nil && stream.sendErr != nil && errors.Is(err, stream.sendErr) {
+			var ended *attachResult
+			connLost := c.host != nil && transport.IsConnectionLost(err)
+			if ended, err = stream.explainFailure(err, connLost, keys, &parser, quit); ended != nil {
+				return *ended, nil
+			}
+		}
 		if err == nil || !c.reconnectable(err) {
 			return res, err
 		}
@@ -781,7 +883,12 @@ func (c *client) reattach(id string, prev attachIdentity, keys <-chan []byte, pa
 	detached := &attachResult{outcome: outcomeDetached}
 	delay := time.Duration(0)
 	for try := 1; ; try++ {
-		if !errors.Is(cause, errSessionRestarting) {
+		// A remote stream that ended on its own leaves its connection in
+		// use, so the first try opens a stream on it; any failure there
+		// (the connection was dying after all, or it refuses the stream)
+		// is retried on a new one.
+		kept := try == 1 && c.streamDropped(cause)
+		if !errors.Is(cause, errSessionRestarting) && !kept {
 			// The old connection is dead; the next stream dials a new
 			// one. A restarting worker leaves the connection alone.
 			c.close()
@@ -831,7 +938,7 @@ func (c *client) reattach(id string, prev attachIdentity, keys <-chan []byte, pa
 			return nil, nil, &attachResult{outcome: outcomeEnded, ended: a.ended}, nil
 		case a.err == nil:
 			return a.stream, a.attached, nil, nil
-		case !c.reconnectable(a.err):
+		case !c.reconnectable(a.err) && !kept:
 			return nil, nil, nil, a.err
 		}
 		cause = a.err
@@ -847,16 +954,33 @@ func waitUnlessDetached(done <-chan struct{}, keys <-chan []byte, parser *attach
 		case <-done:
 			return true
 		case chunk, ok := <-keys:
-			if !ok {
+			if detachPressed(chunk, ok, parser) {
 				return false
-			}
-			for _, action := range parser.push(chunk) {
-				if action.kind == actionDetach {
-					return false
-				}
 			}
 		}
 	}
+}
+
+// detachPressed reports whether a chunk read from stdin (ok false: stdin
+// ended) detaches an attachment that is waiting, dropping the rest of it.
+func detachPressed(chunk []byte, ok bool, parser *attachParser) bool {
+	if !ok {
+		return true
+	}
+	for _, action := range parser.push(chunk) {
+		if action.kind == actionDetach {
+			return true
+		}
+	}
+	return false
+}
+
+// streamDropped reports whether cause cut only the attach stream to a
+// remote daemon, leaving its QUIC connection, which carries the control
+// stream too, in use: one stream ending without a final frame, which is
+// not a lost connection.
+func (c *client) streamDropped(cause error) bool {
+	return c.host != nil && errors.Is(cause, errAttachDropped) && !transport.IsConnectionLost(cause)
 }
 
 // reconnectStatus says what happened to the attachment.
@@ -864,6 +988,8 @@ func (c *client) reconnectStatus(cause error) string {
 	switch {
 	case errors.Is(cause, errSessionRestarting):
 		return "session restarting, reattaching"
+	case c.streamDropped(cause):
+		return fmt.Sprintf("attach stream to %s ended, reattaching", c.host.Name)
 	case c.host != nil:
 		return fmt.Sprintf("connection to %s lost, reconnecting", c.host.Name)
 	}
@@ -1245,18 +1371,23 @@ func adjacentSessionIn(sessions []*session.Record, id string, previous bool) str
 	return sessions[target].SessionID
 }
 
+// formatSessionEnd says how a session ended, with the daemon's text (a
+// remote daemon's included) escaped, as the CLI shows session fields.
 func formatSessionEnd(e *protocol.SessionEnded) string {
+	id := escapeControls(e.SessionID)
 	switch e.Status {
 	case session.StatusFailed:
 		if e.Error != nil {
-			return fmt.Sprintf("session %s failed: %s", e.SessionID, *e.Error)
+			return fmt.Sprintf("session %s failed: %s", id, escapeControls(*e.Error))
 		}
-		return fmt.Sprintf("session %s failed", e.SessionID)
-	case session.StatusExited, session.StatusUnknownRecovered:
+		return fmt.Sprintf("session %s failed", id)
+	case session.StatusUnknownRecovered:
+		return fmt.Sprintf("session %s was lost (its worker exited while agtd was down)", id)
+	case session.StatusExited:
 		if e.ExitCode != nil {
-			return fmt.Sprintf("session %s finished (exit %d)", e.SessionID, *e.ExitCode)
+			return fmt.Sprintf("session %s finished (exit %d)", id, *e.ExitCode)
 		}
-		return fmt.Sprintf("session %s finished", e.SessionID)
+		return fmt.Sprintf("session %s finished", id)
 	}
-	return fmt.Sprintf("session %s ended", e.SessionID)
+	return fmt.Sprintf("session %s ended", id)
 }
