@@ -399,6 +399,17 @@ one itself, as any command would, if none is back after a few attempts. Both als
 the session's worker restarts for an upgrade (`SessionRestarting`, see "Live Handoff"), through
 the same path, with the expected UID and the attachment being replaced.
 
+A reattach never turns a session's end into "not running". A write (a key, a resize) that fails
+because the worker closed the stream, after `SessionEnded` (the overlay's Stop, or input racing
+the session's end) or after ending the attachment (a detach from elsewhere), is explained from the
+frames already sent: the CLI reports the end or the detach rather than reconnecting. Only a stream
+that ends without a final frame, or goes quiet for a second, counts as dropped and is reattached.
+The daemon answers an attach that names the UID of an incarnation that has ended (`exited`,
+`failed`, `unknown_recovered`) with that incarnation's `SessionEnded`, so a reattach that loses the
+race learns how the session ended; a plain attach by name is still refused. A remote attach stream
+that ends on its own while its QUIC connection lives on (`transport.IsConnectionLost` is false)
+reattaches on that connection first, and dials a new one only if that try fails.
+
 A path change that QUIC can follow needs no reconnect at all: when a client's address changes
 mid-connection (NAT rebinding, or Wi-Fi to cellular behind the same NAT), quic-go validates the new
 path and moves the connection to it, and every stream on it carries on. A reconnect is only needed

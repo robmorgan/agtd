@@ -87,6 +87,11 @@ terminal that sets the size detaches or is closed, the one used most recently ta
 only lost its connection (or rode out a daemon restart) keeps the size if it reconnects within 10
 seconds.
 
+When the session ends while you are attached (the agent exits, the overlay's Stop, an
+`agt kill`), `agt attach` says how, `session fix-tests finished (exit 0)` or
+`session fix-tests failed: ...`, and exits; it exits with status 1 when the session failed, and so
+does `agt new` when the session it attached to failed.
+
 Detach the local `agt attach` client using `ctrl + \`; the screen is cleared, and the session's
 output stays in your terminal's scrollback. Switch to the previous attached session
 with `ctrl + [` and the next one with `ctrl + ]`. To inspect or manage other attached
@@ -682,7 +687,8 @@ authorized machine, restores the screen. An attachment that loses its connection
 restarts or is upgraded, locally too) reconnects by itself: the bottom row says it is reconnecting, typing is ignored until it is back, and `Ctrl-\`
 gives up. It keeps trying (every 5 seconds at most) until the devbox answers, so a laptop that slept
 picks up where it was when it wakes. It stops if the devbox refuses this machine's key or the
-session is gone, or was removed and replaced by a new session of the same name while you were away.
+session is gone, or was removed and replaced by a new session of the same name while you were away;
+if the session ended meanwhile, it says how it ended instead.
 A network change that keeps the connection alive (a new address behind the same NAT) needs no
 reconnect at all. Commands whose connection drops after they were sent are sent again once the
 devbox answers: lookups always, and `new`, `kill`, `rm` and `workspace add|rm` because they carry a
