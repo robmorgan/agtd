@@ -18,6 +18,28 @@ package protocol
 // for a program connection is gone. Either side ends the stream; it also
 // ends with the attachment it belongs to.
 
+import "io"
+
+// MaxSSHAgentFramePayload bounds a frame on an open ssh-agent stream: one
+// agent message (at most sshagent.MaxMessageLen, 256 KiB) and the fields
+// around it, so neither end allocates more for a frame than a message
+// needs.
+const MaxSSHAgentFramePayload = 256<<10 + 64
+
+// ReadSSHAgentRequest reads a frame the client sends on an open ssh-agent
+// stream, refusing one over MaxSSHAgentFramePayload before allocating it.
+// It returns (nil, nil) when the peer closed the stream cleanly.
+func ReadSSHAgentRequest(r io.Reader) (*Request, error) {
+	return readRequestLimit(r, Features{}, MaxSSHAgentFramePayload)
+}
+
+// ReadSSHAgentResponse reads a frame the worker sends on an open ssh-agent
+// stream, refusing one over MaxSSHAgentFramePayload before allocating it.
+// It returns (nil, nil) when the peer closed the stream cleanly.
+func ReadSSHAgentResponse(r io.Reader) (*Response, error) {
+	return readResponseLimit(r, Features{}, MaxSSHAgentFramePayload)
+}
+
 // ForwardSSHAgent opens an ssh-agent stream for one attachment.
 type ForwardSSHAgent struct {
 	SessionID string

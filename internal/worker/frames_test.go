@@ -396,7 +396,7 @@ func frameText(f *protocol.Frame) string {
 // the field in the next frame; the alternate screen is a full frame; the
 // session's end sends the last screen.
 func TestFrameClientThroughTheWorker(t *testing.T) {
-	const script = `stty -echo; read go; printf 'hello\r\n'; read x; printf 'again\r\n'; read y; printf '\033[?1049h\033[Htop'; read z; printf '\033[?1049l'; read w; printf 'bye'; exit 0`
+	const script = `stty -echo; printf 'ready\r\n'; read go; printf 'hello\r\n'; read x; printf 'again\r\n'; read y; printf '\033[?1049h\033[Htop'; read z; printf '\033[?1049l'; read w; printf 'bye'; exit 0`
 	h := startWorkerWith(t, script)
 	c, attached := h.attachWith(protocol.AttachSession{Features: []string{protocol.CapAttachFrames, protocol.CapAttachField, protocol.CapAttachSizeOwner}})
 	if !attached.HasFeature(protocol.CapAttachFrames) {
@@ -407,19 +407,26 @@ func TestFrameClientThroughTheWorker(t *testing.T) {
 		t.Fatalf("first frame: full %v seq %d rows %d/%d", f.Full, f.Seq, len(f.Rows), f.Lines)
 	}
 	c.ack(f.Seq, false)
+	// Input sent before the script turns echo off would echo onto the
+	// screen, so it waits for the script to say so.
+	for !strings.Contains(frameText(f), "ready") {
+		f = c.readFrame()
+		c.ack(f.Seq, false)
+	}
+	ready := f.Seq
 	c.input("go\n")
-	if f = c.readFrame(); f.Full || f.Seq != 2 || !strings.Contains(frameText(f), "hello") {
+	if f = c.readFrame(); f.Full || f.Seq != ready+1 || !strings.Contains(frameText(f), "hello") {
 		t.Fatalf("hello frame: full %v seq %d %q", f.Full, f.Seq, frameText(f))
 	}
 	// Two frames may be unacknowledged; the next output makes the second.
 	c.input("x\n")
-	if f = c.readFrame(); f.Seq != 3 || !strings.Contains(frameText(f), "again") {
+	if f = c.readFrame(); f.Seq != ready+2 || !strings.Contains(frameText(f), "again") {
 		t.Fatalf("again frame: seq %d %q", f.Seq, frameText(f))
 	}
 	c.ack(f.Seq, false)
 	// A snapshot request is a full frame.
 	c.send(&protocol.Request{AttachSnapshot: protocol.Empty})
-	if f = c.readFrame(); !f.Full || f.Seq != 4 {
+	if f = c.readFrame(); !f.Full || f.Seq != ready+3 {
 		t.Fatalf("snapshot frame: full %v seq %d", f.Full, f.Seq)
 	}
 	c.ack(f.Seq, false)
@@ -687,5 +694,47 @@ func TestFrameWindowFollowsTheRoundTrip(t *testing.T) {
 	c.ack(f.Seq, false)
 	if f = c.readFrame(); f.Acked != 1+protocol.MaxFrameWindow {
 		t.Fatalf("after the window's ack: seq %d acked %d", f.Seq, f.Acked)
+	}
+}
+
+// Through the worker: a frame waits for a program's synchronized-output
+// block to end, so it never shows half a repaint, and a block the program
+// never ends holds it only frameSyncHold.
+func TestFrameWaitsForSyncOutput(t *testing.T) {
+	// Value: protects=a frame client never paints half of a mode-2026
+	// repaint, and still gets the screen when a program leaves the mode
+	// set; fails_when=sendFrame ignores frameHold, or the held frame's
+	// timer is never armed; why_new=TestFrameHoldsForSyncOutput checks
+	// frameHold on a rig, not serveAttach; seam=none; no_claim=timing on
+	// a loaded machine beyond the bounds asserted.
+	for _, c := range []struct {
+		name, script, want string
+		ends               bool
+	}{
+		{"ended", `stty -echo; read go; printf '\033[?2026hhalf'; sleep 0.08; printf ' done\033[?2026l'; read x`, "half done", true},
+		{"left set", `stty -echo; read go; printf '\033[?2026hstuck'; read x`, "stuck", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := startWorkerWith(t, c.script)
+			cl, _ := h.attachWith(protocol.AttachSession{Features: []string{protocol.CapAttachFrames}})
+			cl.readFrame()
+			cl.ack(1, false)
+			start := time.Now()
+			cl.input("go\n")
+			for {
+				f := cl.readFrame()
+				text := frameText(f)
+				if c.ends && strings.Contains(text, "half") && !strings.Contains(text, "half done") {
+					t.Fatalf("a frame showed half the repaint: %q", text)
+				}
+				if strings.Contains(text, c.want) {
+					if !c.ends && time.Since(start) < frameSyncHold/2 {
+						t.Fatalf("the screen came %v into a block the program never ended", time.Since(start))
+					}
+					return
+				}
+				cl.ack(f.Seq, false)
+			}
+		})
 	}
 }

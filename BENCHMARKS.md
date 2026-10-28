@@ -392,27 +392,35 @@ loopback (`TestLocalEchoOverDelayedRelay`: 150 ms each way, and the keys are dra
 ### Screen frames against raw output
 
 The same measurements with the screen sent as frames (`attach-frames`, ARCHITECTURE.md "Screen
-frames"; `agt bench echo --mode frames|raw`), on 2026-10-20 with the frames build on both ends:
+frames"; `agt bench echo --mode frames|raw`), on 2026-10-22 with the frames build on both ends.
+Under frames "confirmed" is measured the way the echo gets it: the acknowledgements ask for the
+field, so it rides on the frame that carries the program's own echo of the key, and no request
+of its own is made; under raw output it is the `AttachField` request the echo makes after its
+flush, a round trip of its own.
 
 | Link | Program | Mode | echo p50 | confirmed p50 | output per key |
 |---|---|---|---|---|---|
-| local, Unix socket | Claude Code | raw | 4.2 ms | 45.8 ms | 69 B |
-| local, Unix socket | Claude Code | frames | 3.8 ms | 8.8 ms | 15 B |
-| sfo, QUIC 332 ms | bash | raw | 271 ms | 550 ms | 50 B |
-| sfo, QUIC 332 ms | bash | frames | 273 ms | 597 ms | 122 B |
-| sfo, QUIC 332 ms | Claude Code | raw | 258 ms | 512 ms | 124 B |
-| sfo, QUIC 332 ms | Claude Code | frames | 274 ms | 553 ms | 15 B |
+| local, Unix socket | Claude Code | raw | 9.0 ms | 51 ms | 69 B |
+| local, Unix socket | Claude Code | frames | 9.6 ms | 9.6 ms | 15 B |
+| sfo, QUIC 332 ms | bash | raw | 269 ms | 556 ms | 50 B |
+| sfo, QUIC 332 ms | bash | frames | 275 ms | 275 ms | 183 B |
+| sfo, QUIC 332 ms | Claude Code | raw | 265 ms | 555 ms | 124 B |
+| sfo, QUIC 332 ms | Claude Code | frames | 273 ms | 273 ms | 20 B |
 
-* The echo costs the same round trip either way. Locally the field's confirmation drops from 46 ms
-  to 9 ms, since the field rides on the frame built for the request instead of waiting for output
-  to settle; remotely it is a round trip in both modes.
-* Claude Code streaming a 500-word answer on sfo: 48 KB in 71 frames over 50 s, 0.9 KB/s, against
-  210 KB at 4.1 KB/s raw. A key costs 15 B of frame against 124 B of redraw. A shell's one-line
-  echo costs more as a frame (the whole prompt row) than as raw bytes.
+* The echo costs the same round trip either way: a key has to reach the program and its redraw
+  has to come back, and frames add a few milliseconds of building at most.
+* Confirmation is what frames change: the field comes with the echo's frame, so a key is
+  confirmed in one round trip instead of two (273 ms against 555 ms on sfo; locally 10 ms against
+  51 ms, where raw output also waits 40 ms for the program to settle before the field is read).
+  That is the Phase 3 target of the design doc, and what lets the echo stop holding output.
+* Bytes per key: Claude Code's redraw is 124 B raw against a 20 B frame row; a shell's prompt row
+  costs more as a frame (183 B, the coloured prompt re-sent whole) than its 50 B of raw echo.
+  Claude Code streaming a 500-word answer on sfo: 48 KB in 71 frames over 50 s, 0.9 KB/s, against
+  210 KB at 4.1 KB/s raw.
 * With one frame in flight a shell's echo often took two round trips: its line editor writes a
   typed word in several pieces, the first made a frame and the rest waited for the
-  acknowledgement (shell echo p50 462 ms, confirmation 792 ms). Two frames in flight brought it
-  back to one round trip; that is `frameWindow`.
+  acknowledgement (shell echo p50 462 ms). Two frames in flight brought it back to one; that is
+  `frameWindow`.
 * A 200 KB burst from bash reached a frame client as 51 KB in 3 frames (0 resyncs): rows that
   scroll past a screen between frames are carried with their contents up to `frameMaxHistory`
   (1000) per frame, and at the session's scrollback cap the scroll can only be inferred from the
@@ -592,6 +600,22 @@ Same session, median of three runs (load average 12):
 The idle round trip was 0.09 ms before attachment ids were numbered in `state.db` (see "Sessions,
 Incarnations And Attachments" in ARCHITECTURE.md), and 0.50 ms with a database write per attach.
 Workers now reserve ids in blocks, so an attach no longer writes.
+
+### The transcript record
+
+`BenchmarkAltRecordFeed`: the `claude-scroll` stream (Claude Code at 120x40, 117 KiB, 336
+repaints, several minutes of use) fed through the owner in 4 KiB reads, with the worker's
+transcript record (`internal/worker/altrecord.go`) and without it (Apple M1 Max, `-benchtime
+20x`):
+
+| | Per stream | Allocations |
+| --- | --- | --- |
+| Not recorded | 0.56 ms | 77 |
+| Recorded | 11.9 ms | 48,000 |
+
+About 34 µs per repaint: one formatter run over the screen, the row keys, the shift search, and
+the few input-box searches that the changing rows under the box called for. At 60 repaints a
+second that is 2 ms of CPU a second, so the record has no rate floor.
 
 ### Input field detection
 

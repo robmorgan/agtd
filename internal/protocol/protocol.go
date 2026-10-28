@@ -344,6 +344,13 @@ type Frame struct {
 	// a client that asked for the capability, and encoded last.
 	Acked    uint32
 	HasAcked bool
+	// Record (CapAttachAltRecord) is where the screen is in the worker's
+	// record of the agent's transcript, nil while nothing is recorded (the
+	// primary screen, a program without a transcript). HasRecord is
+	// whether the client asked for it; it is encoded after Acked, so only
+	// with HasAcked.
+	Record    *FrameRecord
+	HasRecord bool
 	// Rows are the rows that changed, by index; every row in a Full frame.
 	// A blank row has empty VT.
 	Rows []FrameRow
@@ -357,6 +364,27 @@ func (f *Frame) AckedBy() uint32 {
 		return f.Acked
 	}
 	return f.Seq - min(f.Seq, FrameWindow)
+}
+
+// FrameRecord is the worker's record of the rows that left the top of an
+// agent's transcript on the alternate screen (screen.Transcript), by
+// logical row numbers counted from the first screen it saw.
+type FrameRecord struct {
+	// New is set on the first frame of a record the client has not seen
+	// (an attach, the agent's screen started anew): the client drops the
+	// copy it has.
+	New bool
+	// Pos is the logical number of the screen's top row, Mark how many
+	// rows were ever recorded, and Jumps how many times the screen changed
+	// wholesale to rows the record does not hold.
+	Pos, Mark int64
+	Jumps     uint32
+	// End is how many rows from the top are the transcript (the rows
+	// above the agent's input box); 0 when the box was not found.
+	End uint16
+	// Rows are the recorded rows [Mark-len(Rows), Mark) the client does
+	// not hold yet, at most a bounded number of the newest.
+	Rows [][]byte
 }
 
 // FrameRow is one row of a Frame.
@@ -748,7 +776,13 @@ func readRawFrameLimit(r io.Reader, limit uint32) (*frameHeader, []byte, error) 
 
 // readStandardFrame returns a nil header on a clean EOF before any frame.
 func readStandardFrame(r io.Reader) (*frameHeader, []byte, error) {
-	h, payload, err := readRawFrame(r)
+	return readStandardFrameLimit(r, MaxFramePayload)
+}
+
+// readStandardFrameLimit is readStandardFrame refusing payloads over limit
+// before allocating them.
+func readStandardFrameLimit(r io.Reader, limit uint32) (*frameHeader, []byte, error) {
+	h, payload, err := readRawFrameLimit(r, limit)
 	if err != nil || h == nil {
 		return nil, nil, err
 	}
@@ -823,7 +857,11 @@ func ReadRequest(r io.Reader) (*Request, error) {
 
 // ReadRequestWith reads a request written with features f.
 func ReadRequestWith(r io.Reader, f Features) (*Request, error) {
-	h, payload, err := readStandardFrame(r)
+	return readRequestLimit(r, f, MaxFramePayload)
+}
+
+func readRequestLimit(r io.Reader, f Features, limit uint32) (*Request, error) {
+	h, payload, err := readStandardFrameLimit(r, limit)
 	if err != nil || h == nil {
 		return nil, err
 	}
@@ -840,7 +878,11 @@ func ReadResponse(r io.Reader) (*Response, error) {
 
 // ReadResponseWith reads a response written with features f.
 func ReadResponseWith(r io.Reader, f Features) (*Response, error) {
-	h, payload, err := readStandardFrame(r)
+	return readResponseLimit(r, f, MaxFramePayload)
+}
+
+func readResponseLimit(r io.Reader, f Features, limit uint32) (*Response, error) {
+	h, payload, err := readStandardFrameLimit(r, limit)
 	if err != nil || h == nil {
 		return nil, err
 	}
@@ -1612,6 +1654,20 @@ func (e *encoder) frame(f *Frame) {
 	}
 	if f.HasAcked {
 		e.u32(f.Acked)
+		if f.HasRecord {
+			e.bool(f.Record != nil)
+			if r := f.Record; r != nil {
+				e.bool(r.New)
+				e.i64(r.Pos)
+				e.i64(r.Mark)
+				e.u32(r.Jumps)
+				e.u16(r.End)
+				e.length(len(r.Rows))
+				for _, row := range r.Rows {
+					e.bytes(row)
+				}
+			}
+		}
 	}
 }
 
@@ -1986,6 +2042,20 @@ func (d *decoder) frame() *Frame {
 	}
 	if d.more() {
 		f.Acked, f.HasAcked = d.u32(), true
+	}
+	if d.more() {
+		f.HasRecord = true
+		if d.bool() {
+			r := &FrameRecord{New: d.bool(), Pos: d.i64(), Mark: d.i64(), Jumps: d.u32(), End: d.u16()}
+			n := d.length()
+			if n > 0 && d.err == nil {
+				r.Rows = make([][]byte, 0, min(n, 1024))
+			}
+			for i := 0; i < n && d.err == nil; i++ {
+				r.Rows = append(r.Rows, d.optBytes())
+			}
+			f.Record = r
+		}
 	}
 	return f
 }

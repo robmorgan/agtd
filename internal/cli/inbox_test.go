@@ -136,27 +136,38 @@ func TestInboxSelectionFollowsRow(t *testing.T) {
 	}
 }
 
-// n, r and ? are commands only while the filter is empty; a leading space
-// lets a filter start with one of them, and once the filter has text
-// every key is text.
+// Ctrl-N and Ctrl-R are commands whatever the filter holds, so n and r
+// are filter text; ? is a command only while the filter is empty, a
+// leading space lets a filter start with it, and once the filter has
+// text every key is text.
 func TestInboxLettersAndFilter(t *testing.T) {
 	i := testInbox(t, hostWith(localHostName, withUID(demo("alpha"), "1"), withUID(demo("nano"), "2")))
 	i.keys(t, char('?'))
 	if !i.showKeys || i.query != "" {
 		t.Fatalf("? = %v %q", i.showKeys, i.query)
 	}
-	i.keys(t, char('r'))
+	i.keys(t, ctrl('r'))
 	if len(i.effects) != 1 || !i.effects[0].reprobeAll || i.query != "" {
-		t.Fatalf("r = %+v %q", i.effects, i.query)
+		t.Fatalf("ctrl-r = %+v %q", i.effects, i.query)
 	}
-	i.keys(t, char('n'))
+	i.keys(t, ctrl('n'))
 	if i.mode != inboxCreateAgent || i.query != "" {
-		t.Fatalf("n = %v %q", i.mode, i.query)
+		t.Fatalf("ctrl-n = %v %q", i.mode, i.query)
 	}
 	i.keys(t, key(keyEsc))
-	i.typed(t, " nan")
-	if i.query != " nan" || rowNames(i.rows()) != "nano" {
-		t.Fatalf("leading space: %q %q", i.query, rowNames(i.rows()))
+	i.typed(t, "nan")
+	if i.query != "nan" || rowNames(i.rows()) != "nano" || len(i.effects) != 1 {
+		t.Fatalf("n as text: %q %q %+v", i.query, rowNames(i.rows()), i.effects)
+	}
+	i.keys(t, ctrl('r'))
+	if len(i.effects) != 2 || !i.effects[1].reprobeAll || i.query != "nan" {
+		t.Fatalf("ctrl-r with a filter = %+v %q", i.effects, i.query)
+	}
+	i.query = ""
+	i.showKeys = false
+	i.typed(t, " ?")
+	if i.query != " ?" || i.showKeys {
+		t.Fatalf("leading space: %q %v", i.query, i.showKeys)
 	}
 	i.query = ""
 	i.typed(t, "a n?r2")
@@ -166,6 +177,13 @@ func TestInboxLettersAndFilter(t *testing.T) {
 	i.keys(t, key(keyBackspace))
 	if i.query != "a n?r" {
 		t.Fatalf("backspace: %q", i.query)
+	}
+	// Ctrl-N with a filter names the session after it, as the + row does.
+	i.query = "fresh"
+	i.createAgents, i.defaultAgent = []string{"claude"}, "claude"
+	i.keys(t, ctrl('n'), key(keyEnter))
+	if e := i.effects[len(i.effects)-1]; !e.create || e.createName != "fresh" {
+		t.Fatalf("ctrl-n with a filter: %+v", e)
 	}
 	i.query = ""
 	i.handlePaste("alp")
@@ -313,7 +331,7 @@ func TestInboxLeaveWaitsForActions(t *testing.T) {
 	// Value: protects=while a leave waits, typing, pastes, arrows, Tab and Enter change nothing, so the chosen session stays the one attached; fails_when=keys reach the list while leaving; why_new=only Esc and Ctrl-C were sent while waiting; seam=none; no_claim=drawing
 	// While it waits, other keys and pastes change nothing.
 	i.handlePaste("pasted")
-	if done, _ := i.keys(t, char('x'), key(keyUp), key(keyTab), key(keyEnter), char('n')); done || i.query != "" || i.mode != inboxBrowse || len(i.effects) != 1 || i.leaving.outcome.id != "b" {
+	if done, _ := i.keys(t, char('x'), key(keyUp), key(keyTab), key(keyEnter), ctrl('n')); done || i.query != "" || i.mode != inboxBrowse || len(i.effects) != 1 || i.leaving.outcome.id != "b" {
 		t.Fatalf("keys while leaving: %v %q %v %+v %+v", done, i.query, i.mode, i.effects, i.leaving.outcome)
 	}
 	if done, out := i.keys(t, key(keyEsc)); !done || out == nil || out.id != "b" {
@@ -384,7 +402,7 @@ func TestInboxLockedToHost(t *testing.T) {
 	if !strings.Contains(screen, "❯ dev/") || strings.Contains(screen, "local") {
 		t.Fatalf("locked:\n%s", screen)
 	}
-	i.keys(t, char('n'))
+	i.keys(t, ctrl('n'))
 	if i.mode != inboxBrowse || i.notice == nil || !strings.Contains(i.notice.message, "agt new -C DIR dev/NAME") {
 		t.Fatalf("n: %v %+v", i.mode, i.notice)
 	}
@@ -532,7 +550,7 @@ func TestInboxHints(t *testing.T) {
 		lines := strings.Split(i.screen(120, 30), "\n")
 		return lines[len(lines)-1]
 	}
-	if h := hint(); !strings.Contains(h, "↑↓ choose · enter attach · tab actions · n new · esc quit · ? keys") {
+	if h := hint(); !strings.Contains(h, "↑↓ choose · enter attach · tab actions · ctrl-n new · esc quit · ? keys") {
 		t.Fatalf("browse %q", h)
 	}
 	i.keys(t, key(keyDown))
@@ -544,7 +562,7 @@ func TestInboxHints(t *testing.T) {
 		t.Fatalf("create row %q", h)
 	}
 	i.typed(t, "a")
-	if h := hint(); !strings.Contains(h, "esc clear") || strings.Contains(h, "n new") {
+	if h := hint(); !strings.Contains(h, "esc clear") || strings.Contains(h, "ctrl-n new") {
 		t.Fatalf("filtered %q", h)
 	}
 	i.keys(t, key(keyTab))
@@ -625,14 +643,14 @@ func TestInboxLeaveWhileCreating(t *testing.T) {
 	created := inboxResult{create: true, created: &session.CreateResult{SessionID: "fresh", UID: "9"}}
 	i := testInbox(t, hostWith(localHostName, withUID(demo("a"), "1")))
 	i.createAgents, i.defaultAgent = []string{"claude"}, "claude"
-	i.keys(t, char('n'), key(keyEnter))
+	i.keys(t, ctrl('n'), key(keyEnter))
 	if !i.creating || len(i.effects) != 1 || !i.effects[0].create {
 		t.Fatalf("create: %v %+v", i.creating, i.effects)
 	}
 	if s := i.screen(100, 30); !strings.Contains(s, "starting a new session…") {
 		t.Fatalf("creating:\n%s", s)
 	}
-	i.keys(t, char('n'))
+	i.keys(t, ctrl('n'))
 	if i.mode != inboxBrowse || len(i.effects) != 1 || i.notice == nil || !strings.Contains(i.notice.message, "already starting") {
 		t.Fatalf("second create: %v %+v %+v", i.mode, i.effects, i.notice)
 	}
@@ -645,7 +663,7 @@ func TestInboxLeaveWhileCreating(t *testing.T) {
 
 	i = testInbox(t, hostWith(localHostName, withUID(demo("a"), "1")))
 	i.createAgents, i.defaultAgent = []string{"claude"}, "claude"
-	i.keys(t, char('n'), key(keyEnter), key(keyUp))
+	i.keys(t, ctrl('n'), key(keyEnter), key(keyUp))
 	if done, _ := i.keys(t, key(keyEnter)); done || i.leaving == nil {
 		t.Fatalf("attach while creating: %v", done)
 	}
@@ -899,7 +917,7 @@ func TestInboxIgnoresKeysWhileHidden(t *testing.T) {
 	i := testInbox(t, hostWith(localHostName, withUID(demo("a"), "1")))
 	i.hidden = true
 	i.handlePaste("pasted")
-	if done, out := i.keys(t, char('x'), key(keyEnter), key(keyTab), char('n')); done || out != nil || i.query != "" || i.mode != inboxBrowse || len(i.effects) != 0 {
+	if done, out := i.keys(t, char('x'), key(keyEnter), key(keyTab), ctrl('n')); done || out != nil || i.query != "" || i.mode != inboxBrowse || len(i.effects) != 0 {
 		t.Fatalf("keys while hidden: %v %+v %q %v %+v", done, out, i.query, i.mode, i.effects)
 	}
 	if done, out := i.keys(t, key(keyEsc)); !done || out != nil {
@@ -1239,7 +1257,7 @@ func TestCreateResult(t *testing.T) {
 // `--host auto` is not a host the inbox can show.
 func TestInboxRefusesHostAuto(t *testing.T) {
 	a := &app{paths: testClient(t).paths, host: autoHostName}
-	if _, _, err := a.runInbox(); err == nil || !strings.Contains(err.Error(), "only chooses a host for `agt new`") {
+	if err := a.runInbox(); err == nil || !strings.Contains(err.Error(), "only chooses a host for `agt new`") {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -1391,5 +1409,29 @@ func TestInboxHidingRestartsAConfirmation(t *testing.T) {
 	i.handleKey(key(keyEnter))
 	if len(i.effects) != 1 {
 		t.Fatalf("not confirmed after its wait: %+v", i.effects)
+	}
+}
+
+// Value: protects=a return from an attachment says how the session ended or why it could not attach, asks its host again, and leaves nothing waiting to leave; fails_when=attached drops the end, the error or the reprobe; why_new=the inbox used to exit after an attachment; seam=none; no_claim=the attachment itself (TestInboxEndToEnd)
+// Back from an attachment, the inbox says how the session ended, or why
+// it could not attach, and asks the session's host again.
+func TestInboxAfterAnAttachment(t *testing.T) {
+	dev := &transport.Host{Name: "dev"}
+	i := testInbox(t, hostWith(localHostName, withUID(demo("a"), "1")))
+	i.leaving = &inboxLeave{&inboxOutcome{id: "a", uid: "1"}}
+	exit := int32(0)
+	i.attached(&inboxOutcome{id: "a", uid: "1"}, &protocol.SessionEnded{Status: session.StatusExited, ExitCode: &exit}, nil)
+	if i.leaving != nil || i.notice == nil || !strings.HasPrefix(i.notice.message, "a ended: ") || len(i.effects) != 1 || i.effects[0].reprobe != localHostName {
+		t.Fatalf("after the session ended: %+v %+v %+v", i.leaving, i.notice, i.effects)
+	}
+	i.effects = nil
+	i.attached(&inboxOutcome{host: dev, id: "demo"}, nil, errors.New("connection refused"))
+	if len(i.failures) != 1 || i.failures[0] != "could not attach to dev/demo: connection refused" || len(i.effects) != 1 || i.effects[0].reprobe != "dev" {
+		t.Fatalf("after a failed attach: %q %+v", i.failures, i.effects)
+	}
+	i.effects, i.notice = nil, nil
+	i.attached(&inboxOutcome{id: "a", uid: "1"}, nil, nil) // a detach
+	if i.notice != nil || len(i.failures) != 1 || len(i.effects) != 1 {
+		t.Fatalf("after a detach: %+v %q %+v", i.notice, i.failures, i.effects)
 	}
 }

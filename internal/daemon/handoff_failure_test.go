@@ -43,6 +43,16 @@ func TestHandoffToABadBinaryKeepsTheSession(t *testing.T) {
 	id := h.mustCreate("")
 	c := h.attachRestartable(id)
 	before := h.session(id)
+	// The session has an SSH agent socket, so its state is handoff format 2,
+	// which a binary from before the socket cannot resume. (A control stream
+	// gets the session's UID.)
+	rec := h.control().call(&protocol.Request{GetSession: &protocol.SessionRef{SessionID: id}})
+	if rec.Session == nil {
+		t.Fatalf("get session: %#v", rec.Error)
+	}
+	if _, err := os.Stat(h.paths.SSHAgentSocketPath(rec.Session.UID)); err != nil {
+		t.Fatalf("the session has no SSH agent socket: %v", err)
+	}
 
 	for name, exe := range map[string]string{
 		"missing":             filepath.Join(t.TempDir(), "agtd"),
@@ -51,6 +61,15 @@ func TestHandoffToABadBinaryKeepsTheSession(t *testing.T) {
 		"a directory":         h.cwd,
 		"newer handoff only":  writeScript(t, "future", `echo "agtd session-worker handoff 99"`),
 		"hangs on the probe?": writeScript(t, "slow", "exit 3"),
+		// Value: protects=a session with an SSH agent socket refuses a
+		// handoff to a binary that resumes only handoff format 1, and keeps
+		// running; fails_when=tryHandoff probes for format 1 whatever the
+		// session carries, so an old binary resumes it and leaves the agent
+		// socket unserved; why_new=TestProbeHandoff checks probeHandoff
+		// alone, not which format a session with a socket asks for;
+		// seam=none; no_claim=that such a binary still resumes a session
+		// without a socket (format 1), which this test cannot exec.
+		"format 1 only": writeScript(t, "before", `echo "agtd session-worker handoff 1"`),
 	} {
 		results := h.handoff(exe)
 		if len(results) != 1 || results[0].HandedOff != nil || results[0].Lost || results[0].Err == nil {

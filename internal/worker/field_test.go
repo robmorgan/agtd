@@ -251,9 +251,9 @@ func TestFieldProfiles(t *testing.T) {
 		app, agent, command string
 		want                fieldProfile
 	}{
-		{"claude-code", "x", "/x", fieldProfile{spare: 2}},
-		{"", "codex", "", fieldProfile{spare: 1}},
-		{"", "mine", "/home/me/.local/bin/pi", fieldProfile{spare: 1, wrapKeepsSpace: true}},
+		{"claude-code", "x", "/x", fieldProfile{spare: 2, records: true}},
+		{"", "codex", "", fieldProfile{spare: 1, records: true}},
+		{"", "mine", "/home/me/.local/bin/pi", fieldProfile{spare: 1, wrapKeepsSpace: true, records: true}},
 		{"", "", "/bin/sh", defaultFieldProfile},
 	} {
 		if got := fieldProfileFor(c.app, c.agent, c.command); got != c.want {

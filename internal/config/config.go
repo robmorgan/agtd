@@ -1,10 +1,9 @@
 // Package config reads config.toml, which the daemon and the agt CLI
-// share. Unknown keys and tables are ignored.
+// share. Unknown keys and tables are ignored, except around [ssh_agent]:
+// there a mistake turns forwarding off instead (SSHAgentConfig.Problem).
 package config
 
 import (
-	"crypto/sha256"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -15,6 +14,8 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+
+	"agtd.sh/internal/sshagent"
 )
 
 type Config struct {
@@ -23,10 +24,19 @@ type Config struct {
 	Remote       RemoteConfig           `toml:"remote"`
 	Attach       AttachConfig           `toml:"attach"`
 	Composer     ComposerConfig         `toml:"composer"`
-	SSHAgent     SSHAgentConfig         `toml:"ssh_agent"`
+	// SSHAgent is [ssh_agent], decoded on its own (file), so that a
+	// mistake there turns forwarding off rather than failing the file.
+	SSHAgent SSHAgentConfig `toml:"-"`
 
 	// agentOrder lists the Agents keys in file order, which a map loses.
 	agentOrder []string
+}
+
+// file is config.toml as Load decodes it: [ssh_agent] is kept aside, and
+// decoded into Config.SSHAgent on its own.
+type file struct {
+	Config
+	SSHAgent toml.Primitive `toml:"ssh_agent"`
 }
 
 // RemoteConfig enables remote access over QUIC. It is off unless Listen is
@@ -132,7 +142,8 @@ type SSHAgentConfig struct {
 	// agent's SSH_AUTH_SOCK names: it answers from the agent of the client
 	// that drives the session, else from the agent the daemon was started
 	// with. Unset means true; false leaves SSH_AUTH_SOCK as the daemon
-	// inherited it.
+	// inherited it, unless that is another session's agent socket, which is
+	// dropped.
 	SessionSocket *bool `toml:"session_socket"`
 	// Forward makes every attachment agt opens forward this machine's
 	// agent: attach, new, the inbox, the overlay's switch and every
@@ -144,6 +155,67 @@ type SSHAgentConfig struct {
 	// Keys are the SHA256 fingerprints of the keys offered (as `ssh-add -l`
 	// prints them); empty offers every key the agent holds.
 	Keys []string `toml:"keys"`
+	// Problem says why the settings above cannot be trusted, "" when they
+	// can (sshAgentProblem): agt then forwards nothing, and says why, and
+	// the settings are their defaults when [ssh_agent] could not be read at
+	// all. Load sets it rather than fail, so a mistake here, a value of the
+	// wrong type too, neither stops agtd from starting nor turns off agt's
+	// other settings.
+	Problem string `toml:"-"`
+	// forwardSet records that the file sets forward.
+	forwardSet bool
+}
+
+// ForwardOff reports that the file turns forwarding off (forward = false),
+// so a Problem does not keep agt from forwarding anything it would have.
+func (c SSHAgentConfig) ForwardOff() bool { return c.forwardSet && !c.Forward }
+
+// sshAgentSettings are the settings [ssh_agent] takes.
+var sshAgentSettings = []string{"session_socket", "forward", "agent", "keys"}
+
+// decodeSSHAgent decodes [ssh_agent] into c, setting c.Problem for a
+// mistake in it.
+func decodeSSHAgent(meta toml.MetaData, table toml.Primitive, c *SSHAgentConfig) {
+	if err := meta.PrimitiveDecode(table, c); err != nil {
+		*c = SSHAgentConfig{Problem: "[ssh_agent] could not be read (" + strings.TrimPrefix(err.Error(), "toml: ") + ")"}
+		return
+	}
+	c.forwardSet = meta.IsDefined("ssh_agent", "forward")
+	c.Problem = sshAgentProblem(meta, c.Keys)
+}
+
+// sshAgentProblem is why the [ssh_agent] settings cannot be trusted, or "":
+// a table spelled like [ssh_agent] but not as it is (the decoder matches
+// tables and settings whatever their case, so [SSH_Agent] would replace
+// [ssh_agent]), a setting [ssh_agent] does not take, spelled as it does,
+// `keys` in any case outside it, or a key that is not a fingerprint. A
+// misspelled or misplaced `keys` would otherwise offer every key the agent
+// holds; the other settings misplaced only leave forwarding as it was.
+func sshAgentProblem(meta toml.MetaData, keys []string) string {
+	fold := strings.NewReplacer("-", "", "_", "")
+	for _, key := range meta.Keys() {
+		switch table := key[0]; {
+		case table != "ssh_agent" && fold.Replace(strings.ToLower(table)) == "sshagent":
+			return fmt.Sprintf("SSH agent settings go under [ssh_agent], not [%s]", table)
+		case table == "ssh_agent" && len(key) > 1 && !slices.Contains(sshAgentSettings, key[1]):
+			return fmt.Sprintf("[ssh_agent] has no setting `%s` (it takes %s)", key[1], strings.Join(sshAgentSettings, ", "))
+		}
+	}
+	for _, key := range meta.Undecoded() {
+		if name := key[len(key)-1]; strings.EqualFold(name, "keys") && key[0] != "ssh_agent" {
+			where := "at the top of the file"
+			if len(key) > 1 {
+				where = "under [" + strings.Join(key[:len(key)-1], ".") + "]"
+			}
+			return fmt.Sprintf("`%s` is %s: SSH agent settings go under [ssh_agent]", name, where)
+		}
+	}
+	for _, fp := range keys {
+		if !sshagent.ValidFingerprint(fp) {
+			return fmt.Sprintf("[ssh_agent] keys: `%s` is not a key fingerprint (SHA256:..., as `ssh-add -l` prints it)", fp)
+		}
+	}
+	return ""
 }
 
 // SessionSocketEnabled is SessionSocket with its default applied.
@@ -164,17 +236,6 @@ func (c SSHAgentConfig) AgentSocket() string {
 		}
 	}
 	return path
-}
-
-// validFingerprint reports whether s is a SHA256 key fingerprint as OpenSSH
-// prints it.
-func validFingerprint(s string) bool {
-	b64, ok := strings.CutPrefix(s, "SHA256:")
-	if !ok {
-		return false
-	}
-	sum, err := base64.RawStdEncoding.DecodeString(b64)
-	return err == nil && len(sum) == sha256.Size
 }
 
 type AgentConfig struct {
@@ -307,11 +368,13 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to read %s: %w", path, err)
 	}
-	cfg := &Config{}
-	meta, err := toml.Decode(string(data), cfg)
+	var f file
+	meta, err := toml.Decode(string(data), &f)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse %s: %w", path, err)
 	}
+	cfg := &f.Config
+	decodeSSHAgent(meta, f.SSHAgent, &cfg.SSHAgent)
 	for _, key := range meta.Keys() {
 		if len(key) == 2 && key[0] == "agents" {
 			cfg.agentOrder = append(cfg.agentOrder, key[1])
@@ -335,11 +398,6 @@ func Load(path string) (*Config, error) {
 		d, err := time.ParseDuration(f)
 		if err != nil || d < 0 || d > MaxFlushAfter {
 			return nil, fmt.Errorf("[composer] flush_after must be a duration between 0 and %s in %s", MaxFlushAfter, path)
-		}
-	}
-	for _, fp := range cfg.SSHAgent.Keys {
-		if !validFingerprint(fp) {
-			return nil, fmt.Errorf("[ssh_agent] keys: `%s` is not a key fingerprint (SHA256:..., as `ssh-add -l` prints it) in %s", fp, path)
 		}
 	}
 	if len(cfg.Agents) > 0 {

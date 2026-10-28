@@ -497,6 +497,12 @@ type echoRest struct {
 	rows  [][]byte
 }
 
+// wheelReport reports that raw is an SGR mouse report of the plain wheel
+// (button 64 to 67), which the painter predicts (screen.Painter.Wheel).
+func wheelReport(raw []byte) bool {
+	return len(raw) > 5 && string(raw[:4]) == "\x1b[<6" && raw[4] >= '4' && raw[4] <= '7' && raw[5] == ';'
+}
+
 // fieldEmpty reports that a field shows no text.
 func fieldEmpty(f *protocol.Field) bool {
 	for _, r := range f.Rows {
@@ -527,7 +533,9 @@ func (e *echo) screenShown(f *protocol.Field, rows [][]byte) {
 		return
 	}
 	if e.rest != nil && !e.rest.above(f, rows) {
-		e.rest = nil
+		// The drawing stops painting the dropped screen; the frames
+		// correct the box it left.
+		e.rest, e.restoring = nil, false
 	}
 }
 
@@ -627,11 +635,16 @@ func (e *echo) key(ev keyEvent) (send []byte, drawn bool) {
 		// A wheel scroll, mouse motion, a focus change, a key
 		// release or a query reply edits no text, so the drawing
 		// stands and the field need not be asked for. It goes in
-		// order behind the keys still batched, or at once.
+		// order behind the keys still batched, or at once; a wheel
+		// tick takes the batch with it, since the painter draws its
+		// guess now and times the agent's answer from now.
 		if e.flushDue.IsZero() {
 			return ev.raw, false
 		}
 		e.pending = append(e.pending, ev.raw...)
+		if wheelReport(ev.raw) {
+			return e.flush(), false
+		}
 		return nil, false
 	}
 	if !e.active() || len(e.states) >= echoMaxStates {
@@ -685,7 +698,7 @@ func (e *echo) predict(ev keyEvent) bool {
 		// kitty keyboard protocol; elsewhere it is a plain Enter and
 		// goes to the agent as one.
 		e.text.newline()
-	case ev.code == keyEnter && ev.mods == 0 && e.frames && e.submits():
+	case ev.code == keyEnter && ev.mods == 0 && !ev.lineFeed() && e.frames && e.submits():
 		// The prompt goes to the agent and the field empties. Only
 		// under frames: in raw mode the hold would drop the agent's
 		// answer until the field was probed.
@@ -703,6 +716,12 @@ func (e *echo) predict(ev keyEvent) bool {
 	}
 	return true
 }
+
+// lineFeed reports a bare LF, which the decoder names Enter: Ctrl-J, or a
+// Shift-Enter the terminal was set to send as one (Ghostty's
+// `keybind = shift+enter=text:\n`). It is a newline in Claude Code, not a
+// submit, and not the same in every agent, so it goes unpredicted.
+func (ev keyEvent) lineFeed() bool { return len(ev.raw) == 1 && ev.raw[0] == '\n' }
 
 // submits reports that Enter on the text as it stands would submit it in
 // Claude Code, Codex and pi alike: there is text, it does not end with a
@@ -1050,7 +1069,7 @@ func (e *echo) suspend() (send []byte) {
 	e.noteHeld()
 	send = e.flush()
 	e.states = nil
-	e.paused = false
+	e.paused, e.restoring = false, false
 	e.painted = false
 	e.offset = 0
 	e.schedule()
@@ -1083,6 +1102,8 @@ func (e *echo) reattached() {
 	// arrived: the next one goes, whatever it repeats.
 	e.focus = ""
 	e.painted, e.dropped, e.dirty, e.offset = false, 0, false, 0
+	// The screen remembered with the field empty was the old attachment's.
+	e.rest, e.restoring = nil, false
 	e.probeDue = e.now()
 	e.probing, e.snapshotDue = false, false
 	// The new attachment's frames count from 1, and each shows whatever

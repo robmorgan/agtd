@@ -559,6 +559,15 @@ func TestCreateAttachDetachReattach(t *testing.T) {
 	}
 	wantError(t, h.request(&protocol.Request{SendInput: &protocol.SendInput{SessionID: "demo", Data: []byte("x")}}), "is not running")
 	wantError(t, h.request(&protocol.Request{AttachSession: &protocol.AttachSession{SessionID: "demo", Kind: session.AttachmentAttach, Geometry: defaultGeometry}}), "is not running")
+
+	// A reattach to the incarnation it was attached to learns how it ended,
+	// as an attachment that was reading would have; another UID is refused.
+	if resp := h.reattachByUID("demo"); resp.SessionEnded == nil || resp.SessionEnded.Status != session.StatusExited ||
+		resp.SessionEnded.ExitCode == nil || *resp.SessionEnded.ExitCode != 0 {
+		t.Fatalf("reattach to the ended session = %#v (error %v)", resp, resp.Error)
+	}
+	_, other := attachOn(t, h.dial(), "demo", protocol.AttachSession{Features: allAttachFeatures, ExpectUID: "another-incarnation"})
+	wantError(t, other, "is not the session you were attached to")
 }
 
 func TestMultipleAttachersThroughDaemon(t *testing.T) {
@@ -883,6 +892,12 @@ func TestWorkerCrashIsRecorded(t *testing.T) {
 	if rec := h.session(id); rec.Error == nil || !strings.Contains(*rec.Error, "exited unexpectedly") {
 		t.Fatalf("record = %#v", rec)
 	}
+	// A reattach learns of the crash; an attach by name is refused.
+	if resp := h.reattachByUID(id); resp.SessionEnded == nil || resp.SessionEnded.Status != session.StatusFailed ||
+		resp.SessionEnded.Error == nil || !strings.Contains(*resp.SessionEnded.Error, "exited unexpectedly") {
+		t.Fatalf("reattach to the crashed session = %#v (error %v)", resp, resp.Error)
+	}
+	wantError(t, h.request(&protocol.Request{AttachSession: &protocol.AttachSession{SessionID: id, Kind: session.AttachmentAttach, Geometry: defaultGeometry}}), "is not running")
 }
 
 func TestWorkerLostWhileDaemonDown(t *testing.T) {
@@ -898,6 +913,23 @@ func TestWorkerLostWhileDaemonDown(t *testing.T) {
 	if got := h.session(id); got.Status != session.StatusUnknownRecovered {
 		t.Fatalf("status = %s, want unknown_recovered", got.Status)
 	}
+	if resp := h.reattachByUID(id); resp.SessionEnded == nil || resp.SessionEnded.Status != session.StatusUnknownRecovered {
+		t.Fatalf("reattach to the lost session = %#v (error %v)", resp, resp.Error)
+	}
+	wantError(t, h.request(&protocol.Request{AttachSession: &protocol.AttachSession{SessionID: id, Kind: session.AttachmentAttach, Geometry: defaultGeometry}}), "is not running")
+}
+
+// reattachByUID attaches to session id naming its current incarnation, as
+// a client reattaching to the session it was attached to does. The UID
+// travels only on a connection that negotiated it.
+func (h *harness) reattachByUID(id string) *protocol.Response {
+	h.t.Helper()
+	rec := h.control().call(&protocol.Request{GetSession: &protocol.SessionRef{SessionID: id}}).Session
+	if rec == nil || rec.UID == "" {
+		h.t.Fatalf("no UID for %s: %#v", id, rec)
+	}
+	_, resp := attachOn(h.t, h.dial(), id, protocol.AttachSession{Features: allAttachFeatures, ExpectUID: rec.UID})
+	return resp
 }
 
 func processExists(pid int) bool {

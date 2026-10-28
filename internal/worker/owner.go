@@ -58,6 +58,12 @@ type ownerState struct {
 	// it is in (mode 2026), zero outside one: frames wait for its end
 	// (frameSyncHold).
 	syncSince time.Time
+	// altRecord is the record of the agent's transcript on the alternate
+	// screen, nil while there is none (altrecord.go); altChecked is
+	// whether the program on the alternate screen was found not to be one
+	// to record, decided once each time it enters it.
+	altRecord  *altRecord
+	altChecked bool
 	// owner is the goroutine this state belongs to, for timers that need
 	// to get back onto it.
 	owner *owner
@@ -107,9 +113,12 @@ type ownerAttachment struct {
 	detach     chan struct{}
 	detachOnce sync.Once
 	// forwarder is the attachment's SSH agent forwarder, nil for none;
-	// forwarded is set once it has had one (sshagent.go).
-	forwarder *forwarder
-	forwarded bool
+	// forwarded is set once it has had one, and forwarderEnded is when the
+	// last one ended, for the wait for the one agt opens in its place
+	// (sshagent.go).
+	forwarder      *forwarder
+	forwarded      bool
+	forwarderEnded time.Time
 }
 
 func (a *ownerAttachment) signalDetach() {
@@ -346,6 +355,7 @@ func (s *ownerState) publishScanned(data []byte) error {
 	if len(s.groundWaiters) > 0 {
 		n, writes, effects := s.terminal.feedUntilGround(data)
 		s.afterFeed(writes, effects)
+		s.lookAlternate()
 		if n > 0 {
 			s.output.publish(data[:n])
 		}
@@ -357,7 +367,7 @@ func (s *ownerState) publishScanned(data []byte) error {
 			return nil
 		}
 	}
-	s.afterFeed(s.terminal.feed(data))
+	s.feedRecorded(data)
 	s.output.publish(data)
 	return nil
 }
@@ -469,6 +479,13 @@ func (s *ownerState) snapshot(scrollback int) ([]byte, error) {
 // than the agent or a shell holds the PTY's foreground (an editor takes
 // keys as commands).
 func (s *ownerState) field() (*protocol.Field, error) {
+	prof, blocked := s.fieldProfile()
+	return detectField(s.terminal.term, prof, blocked)
+}
+
+// fieldProfile is the profile of the program (field.go), and whether it
+// is blocked on a dialog or something else holds the foreground.
+func (s *ownerState) fieldProfile() (fieldProfile, bool) {
 	app, blocked := "", false
 	if s.status != nil {
 		if n := s.status.derive(); n != nil {
@@ -479,7 +496,7 @@ func (s *ownerState) field() (*protocol.Field, error) {
 	if s.activity != nil && !s.activity.foregroundTakesText() {
 		blocked = true
 	}
-	return detectField(s.terminal.term, fieldProfileFor(app, s.agentName, s.command), blocked)
+	return fieldProfileFor(app, s.agentName, s.command), blocked
 }
 
 type attachResult struct {
@@ -533,8 +550,10 @@ func (s *ownerState) attach(attachID string, kind session.AttachmentKind, g prot
 		}
 		if replaces != "" && replaces == s.agentWaitFor {
 			// Agent connections waiting for the owner's reattach wait
-			// for this attachment's forwarder now.
-			s.agentWaitFor = attachID
+			// for this attachment's forwarder now. It carries on the
+			// forwarding owner, so a cut before its forwarder opens is
+			// waited out as the first was.
+			s.agentWaitFor, a.forwarded = attachID, true
 		}
 		if s.sizeOwner != attachID {
 			s.sizeOwner = attachID

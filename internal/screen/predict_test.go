@@ -26,7 +26,7 @@ const predictEnd = 7
 
 func newPredictRig(t *testing.T) *predictRig {
 	r := &predictRig{t: t, p: New(), now: time.Unix(1e9, 0)}
-	r.p.SetAltScrollback(1000)
+	r.p.SetAltScrollback()
 	r.p.SetPredictScroll(100 * time.Millisecond)
 	r.p.SetClock(func() time.Time { return r.now })
 	return r
@@ -384,5 +384,187 @@ func TestPredictReversal(t *testing.T) {
 	}
 	if st := r.p.PredictStats(); st.TakenBack != 1 {
 		t.Fatalf("%+v", st)
+	}
+}
+
+// A resize drops the guess and draws none until a frame: the rows the
+// painter has are laid out for the old size.
+func TestPredictResizedDrawsNothing(t *testing.T) {
+	// Value: protects=no wheel guess is drawn at the old size between a
+	// resize and the next frame; fails_when=Resized is not called or
+	// predictable ignores it; why_new=no test resized during a guess;
+	// seam=none; no_claim=the attach loop's winch wiring (attach.go).
+	r := started(t)
+	if r.p.Wheel(wheelUp()) == nil {
+		t.Fatal("no guess before the resize")
+	}
+	r.p.Resized()
+	if r.p.shown != nil || r.p.pr.debt != 0 {
+		t.Fatal("the guess survived the resize")
+	}
+	if paint := r.p.Wheel(wheelUp()); paint != nil {
+		t.Fatalf("guessed at the old size: %q", paint)
+	}
+	r.show(r.top)
+	if paint := r.p.Wheel(wheelUp()); paint == nil {
+		t.Fatal("no guess after the next frame")
+	}
+}
+
+// frame paints the agent's screen as rows with the given field, returning
+// what the painter wrote.
+func (r *predictRig) frame(rows []protocol.FrameRow, fl *protocol.Field) []byte {
+	r.seq++
+	f := &protocol.Frame{Seq: r.seq, Alternate: true, Cols: 20, Lines: 10, Rows: rows, Field: fl}
+	return r.p.Apply(f, nil)
+}
+
+func TestPredictJumpTakesBackTheGuess(t *testing.T) {
+	// Value: protects=a guess drawn when the agent replaces its transcript
+	// (a /clear, a resumed conversation) is dropped for what the agent
+	// shows and counted as a miss; fails_when=observe's jumped case keeps
+	// the debt or the guess stays drawn over the new screen; why_new=no
+	// test jumped while a guess was drawn; seam=none; no_claim=how the
+	// transcript decides a jump (transcript_test.go).
+	r := started(t)
+	if r.p.Wheel(wheelUp()) == nil {
+		t.Fatal("no guess")
+	}
+	rows := r.rows(0)
+	for y := range predictEnd {
+		rows[y].VT = fmt.Appendf(nil, "other %02d", y)
+	}
+	r.frame(rows, &protocol.Field{Found: true, Alternate: true, BoxTop: 8})
+	if r.p.pr.debt != 0 || r.p.pr.stats.TakenBack != 1 || r.p.pr.misses != 1 {
+		t.Fatalf("debt %d, taken back %d, misses %d", r.p.pr.debt, r.p.pr.stats.TakenBack, r.p.pr.misses)
+	}
+	for y := range predictEnd {
+		if got, want := r.shown(y), fmt.Sprintf("other %02d", y); got != want {
+			t.Fatalf("row %d shows %q, want %q", y, got, want)
+		}
+	}
+	r.now = r.now.Add(time.Second)
+	if paint := r.p.PredictExpire(); paint != nil {
+		t.Fatalf("took back again: %q", paint)
+	}
+}
+
+func TestPredictPausedGestureThatMissesStaysPaused(t *testing.T) {
+	// Value: protects=while paused, a gesture the agent ignores draws and
+	// takes back nothing and keeps the prediction paused, and a right
+	// gesture only counts towards resuming with the next one;
+	// fails_when=PredictExpire treats an undrawn paused gesture as a hit
+	// or writes a take-back; why_new=only a paused gesture the agent
+	// followed was tested; seam=none; no_claim=none.
+	r := started(t)
+	for range 2 {
+		r.p.Wheel(wheelUp())
+		r.now = r.now.Add(time.Second)
+		r.p.PredictExpire()
+	}
+	if !r.p.pr.paused {
+		t.Fatal("not paused after two misses")
+	}
+	// Followed, then ignored: the hit is forgotten.
+	r.p.Wheel(wheelUp())
+	r.show(19)
+	r.now = r.now.Add(time.Second)
+	r.p.PredictExpire()
+	if r.p.pr.hits != 1 {
+		t.Fatalf("hits %d after a right gesture", r.p.pr.hits)
+	}
+	if paint := r.p.Wheel(wheelUp()); paint != nil {
+		t.Fatalf("drew while paused: %q", paint)
+	}
+	r.now = r.now.Add(time.Second)
+	if paint := r.p.PredictExpire(); paint != nil {
+		t.Fatalf("took back an undrawn gesture: %q", paint)
+	}
+	if !r.p.pr.paused || r.p.pr.hits != 0 {
+		t.Fatalf("paused %v, hits %d after an ignored gesture", r.p.pr.paused, r.p.pr.hits)
+	}
+}
+
+func TestPredictNothingWithoutTheBox(t *testing.T) {
+	// Value: protects=no tick is drawn over a screen without the agent's
+	// input box (a dialog, an editor), whose rows are not a transcript;
+	// fails_when=altFrame keeps the last BoxTop's altEnd for a frame whose
+	// field was not found; why_new=altEnd was only ever set, never reset;
+	// seam=none; no_claim=how the worker finds the field.
+	r := started(t)
+	r.frame(r.rows(r.top), &protocol.Field{})
+	if r.p.altEnd != 0 {
+		t.Fatalf("altEnd %d without the box", r.p.altEnd)
+	}
+	if paint := r.p.Wheel(wheelUp()); paint != nil {
+		t.Fatalf("guessed without the box: %q", paint)
+	}
+	r.show(r.top)
+	if paint := r.p.Wheel(wheelUp()); paint == nil {
+		t.Fatal("no guess once the box is back")
+	}
+}
+
+// record is the worker's record for a screen whose top is line top: the
+// lines above it, as the rig's agent scrolled them off.
+func (r *predictRig) record(top int, newRecord bool, from int) *protocol.FrameRecord {
+	rec := &protocol.FrameRecord{New: newRecord, Pos: int64(top), Mark: int64(top), End: predictEnd}
+	for n := from; n < top; n++ {
+		rec.Rows = append(rec.Rows, fmt.Appendf(nil, "line %02d", n))
+	}
+	return rec
+}
+
+// showRecorded paints the agent's screen from a worker that keeps the
+// record, with the rows from from on.
+func (r *predictRig) showRecorded(top int, newRecord bool, from int, prefix string) []byte {
+	r.seq++
+	r.top = top
+	f := &protocol.Frame{Seq: r.seq, Full: r.seq == 1, Alternate: true, Cols: 20, Lines: 10, Rows: r.rows(top),
+		Prefix: []byte(prefix), Record: r.record(top, newRecord, from), HasRecord: true}
+	return r.p.Apply(f, nil)
+}
+
+func TestPredictFromASeededRecord(t *testing.T) {
+	// Value: protects=a client attached to a long transcript guesses its
+	// first tick up from the worker's seed, where its own record would be
+	// empty, and follows the worker's moves without inferring them;
+	// fails_when=the painter ignores Frame.Record, takes its End, or
+	// counts the seed as the agent moving; why_new=the record's seed is
+	// new (Phase 3); seam=none; no_claim=what the worker records
+	// (internal/worker/altrecord_test.go).
+	r := newPredictRig(t)
+	r.showRecorded(20, true, 0, "")
+	if paint := r.p.Wheel(wheelUp()); paint == nil {
+		t.Fatal("no guess over the seeded record")
+	}
+	if got := r.shown(0); got != "line 19" {
+		t.Fatalf("row 0 shows %q", got)
+	}
+	r.showRecorded(19, false, 20, "")
+	if st := r.p.PredictStats(); st.Guesses != 1 || st.TakenBack != 0 || r.p.pr.debt != 0 {
+		t.Fatalf("%+v, debt %d", st, r.p.pr.debt)
+	}
+	// Without the worker's record the same first tick has nothing above
+	// the screen to draw.
+	bare := newPredictRig(t)
+	bare.show(20)
+	if paint := bare.p.Wheel(wheelUp()); paint != nil {
+		t.Fatal("guessed without a record")
+	}
+}
+
+func TestPredictRecordInsideASyncedFrame(t *testing.T) {
+	// Value: protects=rows the worker sends in a frame built inside a
+	// synchronized block reach the copy (the worker sends each row once),
+	// while the half-drawn screen is not judged; fails_when=the painter
+	// skips Follow for a synced frame, leaving a gap that drops the copy;
+	// why_new=the record is new; seam=none; no_claim=none.
+	r := newPredictRig(t)
+	r.showRecorded(20, true, 0, "")
+	r.showRecorded(23, false, 20, "\x1b[?2026h\x1b[H")
+	r.showRecorded(25, false, 23, "\x1b[?2026l\x1b[H")
+	if r.p.alt.Oldest() != 0 || r.p.alt.Recorded() != 25 || string(r.p.alt.Rows(21)[0]) != "line 21" {
+		t.Fatalf("copy holds %d to %d", r.p.alt.Oldest(), r.p.alt.Recorded())
 	}
 }

@@ -10,8 +10,8 @@ import (
 )
 
 // Wheel prediction (docs/designs/alt-screen-scrollback.md, decision 12):
-// under alt scrollback, a wheel tick over an agent's transcript is drawn at
-// once, the transcript rows shifted by the rows the agent moves per tick
+// under frames, with or without alt scrollback, a wheel tick over the
+// transcript of an agent on the alternate screen is drawn at once, the transcript rows shifted by the rows the agent moves per tick
 // and filled from the record, while the tick goes to the agent as before.
 // The worker's frames stay the authority: the guess is drawn over them
 // until they show the agent has moved as far, and taken back when the
@@ -31,9 +31,9 @@ const (
 	// place may get wrong for them to be taken as the agent's chrome
 	// (pinned) rather than a wrong guess.
 	predictMaxPinned = 2
-	// predictRecordRows bounds the record kept for the prediction alone,
-	// without alt scrollback.
-	predictRecordRows = 10000
+	// recordRows bounds the transcript record, kept for alt scrollback,
+	// the prediction, or both.
+	recordRows = 10000
 	// predictSeenRows bounds the rows kept as last seen, on each side of
 	// the agent's screen.
 	predictSeenRows = 2000
@@ -43,6 +43,9 @@ const (
 type wheelPredict struct {
 	on  bool
 	rtt time.Duration
+	// resized: the terminal's size changed since the last frame, whose
+	// rows a guess would lay out for the old size.
+	resized bool
 	// stepF is the rows the agent moves per tick, learned and smoothed.
 	stepF float64
 	// debt is how far the shown transcript is ahead of the agent's, in
@@ -98,6 +101,16 @@ type wheelPredict struct {
 	stats              PredictStats
 }
 
+// Recorded is how many rows of the agent's transcript the painter's record
+// has taken in, numbered as the record that keeps them (the worker's,
+// when it sends it); 0 with no record.
+func (p *Painter) Recorded() int64 {
+	if p.alt == nil {
+		return 0
+	}
+	return p.alt.Recorded()
+}
+
 // PredictStats counts the wheel prediction's work.
 type PredictStats struct {
 	// Ticks are the wheel ticks over the transcript; Guesses the ones
@@ -118,9 +131,6 @@ type PredictStats struct {
 // agent.
 func (p *Painter) SetPredictScroll(rtt time.Duration) {
 	p.pr.on, p.pr.rtt = true, rtt
-	if p.altMax == 0 {
-		p.altMax = predictRecordRows
-	}
 	if p.pr.stepF == 0 {
 		p.pr.stepF = 1
 	}
@@ -176,8 +186,9 @@ func (p *Painter) PredictExpire() []byte {
 		return nil
 	}
 	if pr.debt == 0 {
-		// Nothing drawn (paused, or every tick at an edge): the gesture
-		// would have been right if the agent moved as far as guessed.
+		// Nothing drawn (paused, or ticks that drew nothing unclamped):
+		// the gesture would have been right if the agent moved as far as
+		// guessed.
 		p.endGesture(pr.ticks != 0 && !pr.clamped && pr.rows == pr.ticks*p.step())
 		return nil
 	}
@@ -194,7 +205,7 @@ func (p *Painter) PredictExpire() []byte {
 
 // predictable reports whether a tick can be drawn now.
 func (p *Painter) predictable() bool {
-	return p.alt != nil && p.altEnd > 0 && p.painted && len(p.rows) > p.altEnd && !p.modes["?2026"]
+	return !p.pr.resized && p.alt != nil && p.altEnd > 0 && p.painted && len(p.rows) > p.altEnd && !p.modes["?2026"]
 }
 
 func (p *Painter) step() int64 {
@@ -379,6 +390,14 @@ func (p *Painter) endGesture(right bool) {
 
 // resetPredict drops the guess and what the prediction knows of the
 // screen, for a screen that was replaced (full, resized, left).
+// Resized drops the guess, for a terminal whose size just changed: until
+// a frame arrives, the rows the painter has are laid out for the old size,
+// and a guess drawn from them would wrap or land on the input box.
+func (p *Painter) Resized() {
+	p.resetPredict()
+	p.pr.resized = true
+}
+
 func (p *Painter) resetPredict() {
 	pr := &p.pr
 	pr.debt, pr.ticks, pr.rows, pr.clamped, pr.settled, pr.reversed = 0, 0, 0, false, false, false

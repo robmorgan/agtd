@@ -6,7 +6,8 @@ package worker
 // The worker re-executes itself in place (execve) with the new executable.
 // The pid stays the same, so the agent stays its child and its exit status
 // can still be collected with wait4; the PTY master, the listening socket,
-// and the connection that asked for the handoff are inherited by clearing
+// the SSH agent socket's listener (if the session has one), and the
+// connection that asked for the handoff are inherited by clearing
 // close-on-exec on them, and everything else the new image needs (the
 // shadow terminal's exact state and the session's identity; attachment
 // numbering lives in state.db)
@@ -26,12 +27,16 @@ package worker
 //
 // Sequence in the old image (rt.handoff, on the main goroutine):
 //
-//  1. Probe the new executable: it must run and speak this handoff format.
+//  1. Probe the new executable: it must run and speak the handoff format
+//     the session's state needs (2 when it carries an SSH agent socket, else
+//     1).
 //  2. Take reapMu, so the agent cannot be reaped until the exec; give up if
 //     it has already exited.
 //  3. Stop accepting connections, keeping a duplicate of the listening
 //     socket: new connections queue in its backlog for the new image, so the
 //     socket never refuses a connection and the session never looks dead.
+//     The SSH agent socket goes the same way, and the program connections
+//     open on it are closed.
 //  4. Tell every attachment the session is restarting (SessionRestarting,
 //     for clients that support it) and wait for every connection handler.
 //  5. Stop the PTY pump. From here on the agent's output stays in the
@@ -86,7 +91,9 @@ func handoffProbeLine(version int) string {
 	return fmt.Sprintf("agtd session-worker handoff %d", version)
 }
 
-// handoffProbeOutput is what `agtd session-worker --handoff-probe` prints.
+// handoffProbeOutput is what `agtd session-worker --handoff-probe` prints:
+// a line for each format from 1 to handoffVersion (TestProbeHandoff checks
+// that it keeps up).
 var handoffProbeOutput = handoffProbeLine(1) + "\n" + handoffProbeLine(2)
 
 const (
@@ -129,10 +136,16 @@ type handoffState struct {
 	// from an older image, or when no terminal reported them.
 	Colors *protocol.TerminalColors
 	// SSHAgentWaitFor is the reserved size owner whose forwarder agent
-	// connections wait for (sshagent.go), and SSHAgentForwarded records
-	// that the session has been forwarded to.
+	// connections wait for (sshagent.go), SSHAgentForwarded records that
+	// the session has been forwarded to, and SSHAgentGap that the current
+	// gap in forwarding has been recorded.
 	SSHAgentWaitFor   string
 	SSHAgentForwarded bool
+	SSHAgentGap       bool
+	// AltRecord is the record of the agent's transcript on the alternate
+	// screen (altrecord.go). Nil from an older image, or when there is
+	// none; an older image ignores it and starts its own.
+	AltRecord *altRecordHandoff
 
 	// Inherited descriptors.
 	PTYFD      int
@@ -179,8 +192,9 @@ func (rt *runtime) tryHandoff(req *handoffRequest, state *ownerState) (err error
 	if !filepath.IsAbs(req.exe) {
 		return errors.New("the executable must be an absolute path")
 	}
+	hasAgentSocket := rt.agent != nil && rt.agent.listener != nil
 	version := 1
-	if rt.agent != nil && rt.agent.listener != nil {
+	if hasAgentSocket {
 		version = 2
 	}
 	if err := probeHandoff(req.exe, version); err != nil {
@@ -220,7 +234,7 @@ func (rt *runtime) tryHandoff(req *handoffRequest, state *ownerState) (err error
 	// new image, and the ones open now are closed (an ssh in the middle
 	// of authenticating fails once).
 	var agentFile *os.File
-	if version == 2 {
+	if hasAgentSocket {
 		if agentFile, err = rt.agent.listener.File(); err != nil {
 			return fmt.Errorf("failed to duplicate the SSH agent socket: %w", err)
 		}
@@ -281,6 +295,8 @@ func (rt *runtime) tryHandoff(req *handoffRequest, state *ownerState) (err error
 			Colors:            s.colors,
 			SSHAgentWaitFor:   s.agentHandoffWaitFor(),
 			SSHAgentForwarded: s.agentForwarded,
+			SSHAgentGap:       s.agentGap,
+			AltRecord:         s.altRecordHandoff(),
 		}
 		if s.activity != nil {
 			s.activity.exportAlertMemory(st.Status)
@@ -561,7 +577,7 @@ func resumeRuntime(st *handoffState) (*runtime, *ownerState, error) {
 				agentListener.Close()
 			}
 		} else {
-			rt.agent = newAgentServer(rt, agentPath, agentSocket, os.Getenv("SSH_AUTH_SOCK"), agentListener)
+			rt.agent = newAgentServer(rt, agentPath, agentSocket, inheritedAgent(p), agentListener)
 		}
 	}
 	if st.Killed {
@@ -587,7 +603,10 @@ func resumeRuntime(st *handoffState) (*runtime, *ownerState, error) {
 	if state.sizeOwner != "" {
 		state.armSizeOwnerGrace()
 	}
-	state.agentForwarded = st.SSHAgentForwarded
+	state.agentForwarded, state.agentGap = st.SSHAgentForwarded, st.SSHAgentGap
+	if state.altRecord = restoreAltRecord(st.AltRecord); state.altRecord != nil {
+		state.altChecked = true
+	}
 	if st.SSHAgentWaitFor != "" {
 		state.agentWaitFor, state.agentWaitUntil = st.SSHAgentWaitFor, time.Now().Add(sizeOwnerGrace)
 	}

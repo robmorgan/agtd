@@ -87,6 +87,11 @@ terminal that sets the size detaches or is closed, the one used most recently ta
 only lost its connection (or rode out a daemon restart) keeps the size if it reconnects within 10
 seconds.
 
+When the session ends while you are attached (the agent exits, the overlay's Stop, an
+`agt kill`), `agt attach` says how, `session fix-tests finished (exit 0)` or
+`session fix-tests failed: ...`, and exits; it exits with status 1 when the session failed, and so
+does `agt new` when the session it attached to failed.
+
 Detach the local `agt attach` client using `ctrl + \`; the screen is cleared, and the session's
 output stays in your terminal's scrollback. Switch to the previous attached session
 with `ctrl + [` and the next one with `ctrl + ]`. To inspect or manage other attached
@@ -157,13 +162,14 @@ paired host, the ones that need you first, below the prompt.
 ╭──────────────────────────────────────────────────────────────────────────────────╮
 │ ❯ Filter, or name a new session                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────╯
- ↑↓ choose · enter attach · tab actions · n new · esc quit · ? keys
+ ↑↓ choose · enter attach · tab actions · ctrl-n new · esc quit · ? keys
 ```
 
 Type to filter (`devbox/` narrows to one host), Enter attaches to the selected session on whichever
-host runs it, Tab opens its actions (attach, remove), `n` or the `+` row starts an agent in the
-current directory, `r` asks every host again, and Esc (or Ctrl-C) quits with everything still running.
-`agt --host NAME` opens it on that host alone; for a remote host, `n` there shows the
+host runs it (a detach, or the session ending, comes back to the inbox), Tab opens its actions
+(attach, remove), Ctrl-N or the `+` row starts an agent in the
+current directory (named by the filter, if any), Ctrl-R asks every host again, and Esc (or Ctrl-C) quits with everything still running.
+`agt --host NAME` opens it on that host alone; for a remote host, Ctrl-N there shows the
 `agt new -C DIR NAME/SESSION` command that starts a session on it.
 
 ## Core Concepts
@@ -473,6 +479,12 @@ below):
 ```toml
 [attach]
 scrollback_rows = 1000
+# The wheel over a fullscreen agent's transcript (remote, under frames) is
+# drawn at once and corrected by the agent's screen; false waits for it.
+#predict_wheel = true
+# A prototype: keep the terminal on its primary screen and push the
+# transcript rows a fullscreen agent scrolls away into its scrollback.
+#alt_scrollback = false
 ```
 
 The agent chooser's order (in the inbox and the overlay) follows the order of the `[agents.*]`
@@ -565,8 +577,11 @@ Alt-Enter newline are drawn locally, and over frames Enter on a prompt empties t
 do something else); Tab, Esc, Ctrl-C, Ctrl-J, Ctrl-Enter and the other keys are never
 predicted, so the agent's own menus, completions and history work as they always did, one round
 trip late. Mouse input reaches the agent as it is, so in a fullscreen agent
-(Claude Code, Codex, `pi --tui-mode fullscreen`) the wheel scrolls its transcript while you type;
-a scroll made in the middle of typing shows once the agent has drawn your keys. The agent's rendering replaces the drawing as soon as it arrives; the one thing you may
+(Claude Code, Codex, pi) the wheel scrolls its transcript while you type; from a remote daemon
+each wheel tick is drawn at once from the agent's transcript, which the daemon records while the
+agent runs, attached or not, and the agent's screen corrects the guess a round trip later
+(`[attach] predict_wheel`). Against an older daemon the transcript is only what scrolled past
+since you attached, and rows above it come at the round trip. The agent's rendering replaces the drawing as soon as it arrives; the one thing you may
 notice is that the screen behind the box stands still for about a round trip after you pause
 typing. ARCHITECTURE.md, "The Input Field And Local Echo", has the details.
 
@@ -694,7 +709,8 @@ authorized machine, restores the screen. An attachment that loses its connection
 restarts or is upgraded, locally too) reconnects by itself: the bottom row says it is reconnecting, typing is ignored until it is back, and `Ctrl-\`
 gives up. It keeps trying (every 5 seconds at most) until the devbox answers, so a laptop that slept
 picks up where it was when it wakes. It stops if the devbox refuses this machine's key or the
-session is gone, or was removed and replaced by a new session of the same name while you were away.
+session is gone, or was removed and replaced by a new session of the same name while you were away;
+if the session ended meanwhile, it says how it ended instead.
 A network change that keeps the connection alive (a new address behind the same NAT) needs no
 reconnect at all. Commands whose connection drops after they were sent are sent again once the
 devbox answers: lookups always, and `new`, `kill`, `rm` and `workspace add|rm` because they carry a
@@ -784,15 +800,33 @@ inbox, the overlay's switch, and every reconnect. Programs in the session find i
 `SSH_AUTH_SOCK`, which every new session has: a socket of the session's own, which answers from
 the agent of whichever attachment owns the session's size. Take over the size (`agt attach --take-size`, or
 Take over size in the overlay) and your keys come with it. A connection lost for a moment, or a
-daemon restart, does not lose them: a push made meanwhile waits for you to reattach. When nobody
+daemon restart, does not lose them: a push made meanwhile waits for you to reattach, or for agt to
+open its forwarder again, rather than use the devbox's keys. When nobody
 driving the session forwards an agent, the socket answers from the agent the devbox's daemon was
-started with, as before, or with no keys, and ssh falls back to key files on the devbox.
+started with, or with no keys, and ssh falls back to key files on the devbox. While a forwarding
+attachment owns the size, only its keys answer: the devbox's own agent (a deploy key in it) is not
+asked, and adding keys is refused.
+
+`SSH_AUTH_SOCK` is set even when no agent is behind the socket. `ssh-add -l` then reports that
+the agent has no identities (exit status 1) rather than that it cannot connect (2), and `ssh-add`
+cannot load keys into it. A shell setup that starts its own `ssh-agent` when none answers should
+test whether `ssh-add -l` succeeds, not for status 2 or an empty `SSH_AUTH_SOCK`; or the devbox
+can set `session_socket = false`.
 
 Your private keys never leave the laptop. Only requests to list keys and to sign cross the
 connection; agt refuses anything else (adding, removing or locking keys) and, with `keys`, any
-other key. An agent that confirms each use (1Password, a security key's touch) keeps doing so.
-Each signature is recorded in the session's events (`agt events`) with the key, what it signed (a
-login, as whom and where, or git's commit signing) and which client signed.
+other key. A mistake in `[ssh_agent]` stops agt forwarding: a setting it does not know (names
+have a case), a table spelled `[SSH_Agent]` or `[ssh-agent]`, `keys` under another table, a key
+that is not a fingerprint, or a value of the wrong type (`forward = "yes"`). agt says why before
+and after an attach, and the inbox shows it until you press a key; agtd logs it when it starts.
+So a misspelled or misplaced `keys` cannot offer every key, and agtd and agt's other settings
+carry on. An agent that confirms each use (1Password, a security key's touch)
+keeps doing so. A key you limited with `ssh-add -h` is refused through agt on another host, as
+through `ssh -A` to a host the limit does not name. agt lends an agent only when it answers and
+holds a key it may offer; otherwise the session keeps what it falls back to. Each signature is
+recorded in the session's events (`agt events`) with the key, what it signed (a login, as whom
+and, when your agent accepted ssh's binding of it, to where; or git's commit signing) and which
+client signed.
 
 What it does not protect: while your attachment owns a session's size, any process running as your
 user on the devbox can ask your laptop for signatures, as with `ssh -A`. It stops the moment you
@@ -801,8 +835,9 @@ devbox. On the devbox itself, `ssh -A devbox` and then `agt attach`, with `forwa
 devbox's own config, lends that login's agent to the session.
 
 `[ssh_agent] session_socket = false` on the devbox starts new sessions without a socket of their
-own; they keep the `SSH_AUTH_SOCK` the daemon was started with. Sessions started before agtd had
-this cannot forward until they are restarted.
+own; they keep the `SSH_AUTH_SOCK` the daemon was started with, unless that is another session's
+socket (a daemon started from inside a session), which they go without. Sessions started before
+agtd had this cannot forward until they are restarted.
 
 ### A Devbox On DigitalOcean
 

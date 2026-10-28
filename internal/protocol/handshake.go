@@ -232,6 +232,13 @@ const (
 	// between a frame and its ack (up to MaxFrameWindow), and every Frame
 	// carries Acked, the ack it was built after.
 	CapAttachFrameWindow = "attach-frame-window"
+	// CapAttachAltRecord (attach stream, with CapAttachFrames and
+	// CapAttachFrameWindow): while an agent's transcript is on the
+	// alternate screen, the worker records the rows that leave its top
+	// and every Frame says where the screen is in that record
+	// (Frame.Record), with the rows the client does not hold yet: the
+	// first frame after an attach seeds the client's copy.
+	CapAttachAltRecord = "attach-alt-record"
 	// CapKillExpectUID: KillSession ends with ExpectUID, and the daemon
 	// refuses a kill or remove whose UID is not the session's current one.
 	CapKillExpectUID = "kill-expect-uid"
@@ -263,13 +270,13 @@ const MinProtocolVersion uint16 = 1
 func Capabilities() []string {
 	return []string{CapControlStream, CapGitState, CapArtifacts, CapSessionUID, CapRequestTokens, CapAttachFeatures, CapAttachReplace, CapAttachResync, CapRuntimeStats,
 		CapEvents, CapSessionActivity, CapSessionStatus, CapDaemonID, CapSessionRestart, CapWorkerHandoff, CapTerminalMemory, CapAttachScrollback, CapAttachSizeOwner,
-		CapAttachField, CapTerminalColors, CapAttachFrames, CapAttachCompose, CapAttachFrameWindow, CapKillExpectUID, CapSSHAgent}
+		CapAttachField, CapTerminalColors, CapAttachFrames, CapAttachCompose, CapAttachFrameWindow, CapAttachAltRecord, CapKillExpectUID, CapSSHAgent}
 }
 
 // AttachCapabilities are the capabilities that apply to an attach stream,
 // listed in AttachSession.Features.
 func AttachCapabilities() []string {
-	return []string{CapSessionUID, CapAttachReplace, CapAttachResync, CapSessionRestart, CapAttachScrollback, CapAttachSizeOwner, CapAttachField, CapTerminalColors, CapAttachFrames, CapAttachCompose, CapAttachFrameWindow}
+	return []string{CapSessionUID, CapAttachReplace, CapAttachResync, CapSessionRestart, CapAttachScrollback, CapAttachSizeOwner, CapAttachField, CapTerminalColors, CapAttachFrames, CapAttachCompose, CapAttachFrameWindow, CapAttachAltRecord}
 }
 
 // AttachFeatures is the attach-stream features a client may ask for given

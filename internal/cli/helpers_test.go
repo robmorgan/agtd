@@ -35,3 +35,4 @@ func testClient(t *testing.T) *client {
 
 func key(code keyCode) keyEvent { return keyEvent{code: code} }
 func char(r rune) keyEvent      { return keyEvent{code: keyChar, r: r} }
+func ctrl(r rune) keyEvent      { return keyEvent{code: keyChar, r: r, mods: modCtrl} }

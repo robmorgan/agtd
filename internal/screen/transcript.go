@@ -2,8 +2,10 @@ package screen
 
 import (
 	"bytes"
-	"strconv"
+	"slices"
 	"strings"
+
+	"agtd.sh/internal/protocol"
 )
 
 // Transcript records the rows that leave the top of a program's viewport on
@@ -81,7 +83,7 @@ func (t *Transcript) Update(cur [][]byte, end int) [][]byte {
 	if prev == nil {
 		return nil
 	}
-	if len(old) == len(keys) && keysSame(old, keys) {
+	if slices.Equal(old, keys) {
 		return nil
 	}
 	n := min(len(old), len(keys))
@@ -127,6 +129,79 @@ func (t *Transcript) Update(cur [][]byte, end int) [][]byte {
 	return out
 }
 
+// Follow takes the next screen's place in a record kept elsewhere (the
+// worker's, protocol.FrameRecord) instead of inferring it, and returns the
+// rows it added, oldest first. A new record, or one that went back,
+// replaces this one; rows that never arrived (more were recorded between
+// two frames than a frame carries) leave the copy starting after them.
+func (t *Transcript) Follow(r *protocol.FrameRecord) [][]byte {
+	if r.New || r.Mark < t.mark {
+		*t = Transcript{max: t.max}
+	}
+	from := r.Mark - int64(len(r.Rows))
+	if from > t.mark || len(t.rows) == 0 {
+		t.rows, t.keys = t.rows[:0], t.keys[:0]
+		t.dropped, t.mark = from, from
+	}
+	t.pos, t.Jumps = r.Pos, int(r.Jumps)
+	skip := t.mark - from
+	if skip >= int64(len(r.Rows)) {
+		return nil
+	}
+	out := r.Rows[skip:]
+	for _, row := range out {
+		t.keys = append(t.keys, RowKey(row))
+	}
+	t.rows = append(t.rows, out...)
+	t.mark = r.Mark
+	t.trim()
+	return out
+}
+
+// TranscriptState is a Transcript's state, for a worker handing its
+// session to a new image.
+type TranscriptState struct {
+	Pos, Mark, Dropped int64
+	Jumps              int
+	Rows               [][]byte
+	// Prev is the last screen seen and PrevEnd its transcript's height,
+	// which the next screen is compared with.
+	Prev    [][]byte
+	PrevEnd int
+}
+
+// State returns t's state, with its own row lists: t moves its rows down
+// in place when it drops the oldest, and the state may be read on another
+// goroutine after t goes on. The rows' bytes are never changed, so they
+// are shared.
+func (t *Transcript) State() TranscriptState {
+	return TranscriptState{Pos: t.pos, Mark: t.mark, Dropped: t.dropped, Jumps: t.Jumps, Rows: slices.Clone(t.rows), Prev: slices.Clone(t.prev), PrevEnd: t.prevEnd}
+}
+
+// RestoreTranscript makes a record holding at most max rows from a state
+// State returned. A state that does not add up (its rows are not
+// [Dropped, Mark)) restores as an empty record.
+func RestoreTranscript(max int, st TranscriptState) *Transcript {
+	t := &Transcript{max: max}
+	if st.Mark-st.Dropped != int64(len(st.Rows)) || st.Pos > st.Mark {
+		return t
+	}
+	t.pos, t.mark, t.dropped, t.Jumps, t.rows, t.prevEnd = st.Pos, st.Mark, st.Dropped, st.Jumps, st.Rows, st.PrevEnd
+	t.keys = make([]string, len(st.Rows))
+	for i, r := range st.Rows {
+		t.keys[i] = RowKey(r)
+	}
+	if st.Prev != nil {
+		t.prev = st.Prev
+		t.prevKeys = make([]string, len(st.Prev))
+		for i, r := range st.Prev {
+			t.prevKeys[i] = RowKey(r)
+		}
+	}
+	t.trim()
+	return t
+}
+
 // record appends the rows at logical pos onward that are not recorded yet,
 // and drops the oldest beyond max.
 func (t *Transcript) record(rows [][]byte, keys []string) [][]byte {
@@ -141,13 +216,20 @@ func (t *Transcript) record(rows [][]byte, keys []string) [][]byte {
 	t.rows = append(t.rows, out...)
 	t.keys = append(t.keys, keys[skip:]...)
 	t.mark = t.pos + int64(len(rows))
-	if t.max > 0 && len(t.rows) > t.max {
+	t.trim()
+	return out
+}
+
+// trim drops the oldest rows beyond max, a quarter of max at a time, so a
+// full record is not copied on every frame that scrolls.
+func (t *Transcript) trim() {
+	if t.max > 0 && len(t.rows) > t.max+t.max/4 {
 		drop := len(t.rows) - t.max
-		t.rows = append([][]byte(nil), t.rows[drop:]...)
-		t.keys = append([]string(nil), t.keys[drop:]...)
+		t.rows = t.rows[:copy(t.rows, t.rows[drop:])]
+		t.keys = t.keys[:copy(t.keys, t.keys[drop:])]
+		clear(t.rows[len(t.rows):cap(t.rows)])
 		t.dropped += int64(drop)
 	}
-	return out
 }
 
 // lookup finds the screen's rows above limit in the record, newest first:
@@ -250,15 +332,6 @@ func sameRun(old, cur []string) int {
 	return best
 }
 
-func keysSame(a, b []string) bool {
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 // RowKey is a row's VT with empty cells and spaces made the same: cursor
 // moves forward (CSI n C) become spaces, and trailing spaces and pen resets
 // go. "" is a blank row.
@@ -268,18 +341,11 @@ func RowKey(row []byte) string {
 	}
 	var b strings.Builder
 	for i := 0; i < len(row); i++ {
-		if row[i] == 0x1b && i+1 < len(row) && row[i+1] == '[' {
-			j := i + 2
-			for j < len(row) && row[j] >= '0' && row[j] <= '9' {
-				j++
-			}
-			if j < len(row) && row[j] == 'C' {
-				n := 1
-				if j > i+2 {
-					n, _ = strconv.Atoi(string(row[i+2 : j]))
-				}
+		if row[i] == 0x1b {
+			seq := row[i : i+escapeLen(row[i:])]
+			if n, ok := cufCount(seq); ok {
 				b.WriteString(strings.Repeat(" ", n))
-				i = j
+				i += len(seq) - 1
 				continue
 			}
 		}

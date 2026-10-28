@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"agtd.sh/internal/protocol"
+	"agtd.sh/internal/screen"
 	"go.mitchellh.com/libghostty"
 )
 
@@ -119,6 +120,12 @@ type frameState struct {
 	effects []byte
 	// askField makes the next frame carry the field (AttachField).
 	askField bool
+	// record is whether the client asked for the transcript record
+	// (CapAttachAltRecord); recordOf is the record its frames follow, and
+	// recordMark the rows of it they carried up to (altrecord.go).
+	record     bool
+	recordOf   *screen.Transcript
+	recordMark int64
 	// wantField is the client's standing request for the field
 	// (FrameAck.Field), set by the handler.
 	wantField atomic.Bool
@@ -158,19 +165,26 @@ func (st *frameState) changed() {
 }
 
 // noteFrameOutput marks every frame client's screen changed, and notes
-// whether the program is inside a synchronized-output block.
+// whether the program is inside a synchronized-output block, which only
+// frame clients wait on.
 func (s *ownerState) noteFrameOutput() {
+	clients := false
+	for _, a := range s.attachments {
+		if a.frames != nil {
+			a.frames.changed()
+			clients = true
+		}
+	}
+	if !clients {
+		s.syncSince = time.Time{}
+		return
+	}
 	if syncing, err := s.terminal.term.Mode(libghostty.ModeSyncOutput); err == nil && syncing {
 		if s.syncSince.IsZero() {
 			s.syncSince = time.Now()
 		}
 	} else {
 		s.syncSince = time.Time{}
-	}
-	for _, a := range s.attachments {
-		if a.frames != nil {
-			a.frames.changed()
-		}
 	}
 }
 
@@ -324,6 +338,9 @@ func (s *ownerState) buildFrame(a *ownerAttachment, now time.Time) (*protocol.Fr
 	}
 	st.shape = f.CursorShape
 	f.Effects, st.effects = st.effects, nil
+	if st.record {
+		f.Record = s.frameRecord(st)
+	}
 	// The field costs a scan of the screen: carried when the client asked
 	// for it outright, or stands to see it and the program has settled,
 	// or just typed (its keys are what the client waits to see confirmed).

@@ -61,9 +61,12 @@ type Painter struct {
 	// or neither is on; altEnd is how many rows from the top are its
 	// transcript, from the last field seen (0: unknown).
 	altScrollback bool
-	altMax        int
 	alt           *Transcript
 	altEnd        int
+	// altPos and altJumps are the record's position and jumps when the
+	// prediction last looked, which the next look measures a move from.
+	altPos   int64
+	altJumps int
 	// pr is the wheel prediction (predict.go), and shown what the
 	// terminal shows when a guess is drawn over the agent's screen (nil
 	// when it shows rows as they are).
@@ -73,12 +76,12 @@ type Painter struct {
 }
 
 // SetAltScrollback turns on scrollback for programs on the alternate
-// screen, keeping at most max rows of their transcript
+// screen, keeping at most recordRows of their transcript
 // (docs/designs/alt-screen-scrollback.md, the client prototype): the
 // alternate screen is never entered, its frames are painted on the
 // primary screen, and the rows a Transcript finds leaving the top are
 // scrolled into the terminal's scrollback as a primary screen's would be.
-func (p *Painter) SetAltScrollback(max int) { p.altScrollback, p.altMax = true, max }
+func (p *Painter) SetAltScrollback() { p.altScrollback = true }
 
 // recording is whether alternate screen frames go through the transcript
 // record: for the terminal's scrollback, or for the wheel prediction's
@@ -123,22 +126,49 @@ func (p *Painter) altFrame(f *protocol.Frame) *protocol.Frame {
 			cur[r.Index] = r.VT
 		}
 	}
-	if fl := f.Field; fl != nil && fl.Found && fl.Alternate && fl.BoxTop > 0 {
-		p.altEnd = int(fl.BoxTop) - 1
+	if r := f.Record; r != nil {
+		// The worker's record knows where the transcript ends on every
+		// frame.
+		p.altEnd = int(r.End)
+	} else if fl := f.Field; fl != nil {
+		// A frame without the box (a dialog, an editor the agent opened)
+		// has no transcript to guess over until the box is back.
+		p.altEnd = 0
+		if fl.Found && fl.Alternate && fl.BoxTop > 0 {
+			p.altEnd = int(fl.BoxTop) - 1
+		}
 	}
 	if p.alt == nil {
-		p.alt = NewTranscript(p.altMax)
+		p.alt, p.altPos, p.altJumps = NewTranscript(recordRows), 0, 0
 	}
 	modes := p.modes
 	if len(f.Prefix) > 0 {
 		modes = parseModes(f.Prefix)
 	}
-	if modes["?2026"] {
-		return f
+	var out [][]byte
+	if r := f.Record; r != nil {
+		// A worker that keeps the record (attach-alt-record) saw every
+		// write, not one screen a frame: its counts are exact, its rows
+		// go back to before this client attached, and each frame
+		// carries only rows the last did not, so none is skipped.
+		if r.New {
+			p.resetPredict()
+		}
+		out = p.alt.Follow(r)
+		if r.New {
+			p.altPos, p.altJumps = p.alt.Pos(), p.alt.Jumps
+			// The seed is for the copy: pushed into the terminal's
+			// scrollback, each reattach would push it again.
+			out = nil
+		}
+	} else if !modes["?2026"] {
+		out = p.alt.Update(cur, p.altEnd)
 	}
-	pos, jumps := p.alt.Pos(), p.alt.Jumps
-	out := p.alt.Update(cur, p.altEnd)
-	p.observe(cur, p.alt.Pos()-pos, p.alt.Jumps != jumps, f)
+	if !modes["?2026"] {
+		moved, jumped := p.alt.Pos()-p.altPos, p.alt.Jumps != p.altJumps
+		p.altPos, p.altJumps = p.alt.Pos(), p.alt.Jumps
+		p.observe(cur, moved, jumped, f)
+	}
 	if len(out) == 0 || !p.altScrollback {
 		// A terminal that mirrors the alternate screen keeps no
 		// scrollback of it: the record serves the prediction alone.
@@ -260,7 +290,8 @@ func escapeLen(b []byte) int {
 }
 
 // cufCount reads a cursor-forward sequence (CSI n C), which the formatter
-// writes for a run of empty cells.
+// writes for a run of empty cells, at most a row's worth: a row comes from
+// the daemon, and its count is not trusted to size anything.
 func cufCount(seq []byte) (int, bool) {
 	if len(seq) < 3 || seq[1] != '[' || seq[len(seq)-1] != 'C' {
 		return 0, false
@@ -269,11 +300,14 @@ func cufCount(seq []byte) (int, bool) {
 		return 1, true
 	}
 	n, err := strconv.Atoi(string(seq[2 : len(seq)-1]))
-	if err != nil {
+	if err != nil && n == 0 {
 		return 0, false
 	}
-	return max(n, 1), true
+	return min(max(n, 1), maxCols), true
 }
+
+// maxCols bounds a row's width: a frame's Cols is a uint16.
+const maxCols = 1<<16 - 1
 
 // altModes are the modes that switch to the alternate screen.
 var altModes = []string{"?47", "?1047", "?1049"}
@@ -333,6 +367,7 @@ func (p *Painter) Row(y int) []byte {
 // drag the cursor back a few cells on every frame while typing. A full
 // frame, or one of another size, starts the row cache afresh.
 func (p *Painter) Apply(f *protocol.Frame, overlay []byte) []byte {
+	p.pr.resized = false
 	if p.recording() {
 		f = p.altFrame(f)
 	}

@@ -148,7 +148,7 @@ func TestResetSetsMouseModesAgain(t *testing.T) {
 // leaves the cursor under the screen.
 func TestPainterAltScrollback(t *testing.T) {
 	p := New()
-	p.SetAltScrollback(100)
+	p.SetAltScrollback()
 	if p.Leave() != nil {
 		t.Fatal("Leave before any frame")
 	}
@@ -247,5 +247,68 @@ func TestOverdrawnRowsRepaint(t *testing.T) {
 	p.Overdrawn()
 	if got := string(p.Apply(&protocol.Frame{Seq: 5, Cols: 10, Lines: 3, CursorRow: 1, CursorCol: 1}, nil)); !strings.Contains(got, "menu") {
 		t.Fatalf("not repainted after Overdrawn: %q", got)
+	}
+}
+
+// Under alt scrollback a look inside a synchronized-output block (half a
+// repaint, from a program that left mode 2026 set past the worker's hold)
+// is painted but not recorded; the first look after the block records the
+// move it made.
+func TestPainterAltScrollbackSkipsSyncedLooks(t *testing.T) {
+	// Value: protects=the terminal's scrollback gets each transcript row
+	// once, not half a repaint read as a jump; fails_when=altFrame records
+	// frames while ?2026 is set; why_new=TestPainterAltScrollback never
+	// sets mode 2026; seam=none; no_claim=the worker's frameSyncHold
+	// (TestFrameHoldsForSyncOutput).
+	p := New()
+	p.SetAltScrollback()
+	screen := func(top int) []protocol.FrameRow {
+		var rows []protocol.FrameRow
+		for y := range 9 {
+			rows = append(rows, protocol.FrameRow{Index: uint16(y), VT: []byte(fmt.Sprintf("row %02d", top+y))})
+		}
+		return append(rows, protocol.FrameRow{Index: 9, VT: []byte("> ")})
+	}
+	p.Apply(&protocol.Frame{Seq: 1, Full: true, Alternate: true, Cols: 10, Lines: 10, Prefix: []byte("\x1b[?1049h\x1b[H"), Rows: screen(0)}, nil)
+	out := string(p.Apply(&protocol.Frame{Seq: 2, Alternate: true, Cols: 10, Lines: 10, Prefix: []byte("\x1b[?1049h\x1b[?2026h\x1b[H"), Rows: screen(2)[:9]}, nil))
+	if strings.Contains(out, "row 00") || strings.Contains(out, "\n") {
+		t.Fatalf("a synced look was recorded: %q", out)
+	}
+	out = string(p.Apply(&protocol.Frame{Seq: 3, Alternate: true, Cols: 10, Lines: 10, Prefix: []byte("\x1b[?1049h\x1b[H")}, nil))
+	if !strings.Contains(out, "row 00\x1b[2;1H\x1b[0m\x1b[Krow 01\x1b[10;1H\n\n") {
+		t.Fatalf("the move made inside the block was not recorded after it: %q", out)
+	}
+}
+
+func TestPainterAltScrollbackDoesNotPushTheSeed(t *testing.T) {
+	// Value: protects=under alt scrollback, the worker's seed of a new
+	// record fills the painter's copy but is not scrolled into the
+	// terminal, where each reattach would add it again, while rows
+	// recorded after it are; fails_when=altFrame pushes Follow's rows
+	// for a new record; why_new=Frame.Record is new; seam=none;
+	// no_claim=seeding the terminal's scrollback (a later design item).
+	p := New()
+	p.SetAltScrollback()
+	rows := func(top int) []protocol.FrameRow {
+		out := make([]protocol.FrameRow, 4)
+		for y := range out {
+			out[y] = protocol.FrameRow{Index: uint16(y), VT: fmt.Appendf(nil, "line %02d", top+y)}
+		}
+		return out
+	}
+	rec := func(top int, isNew bool, from int) *protocol.FrameRecord {
+		r := &protocol.FrameRecord{New: isNew, Pos: int64(top), Mark: int64(top), End: 4}
+		for n := from; n < top; n++ {
+			r.Rows = append(r.Rows, fmt.Appendf(nil, "line %02d", n))
+		}
+		return r
+	}
+	out := string(p.Apply(&protocol.Frame{Seq: 1, Full: true, Alternate: true, Cols: 10, Lines: 4, Rows: rows(10), Record: rec(10, true, 0), HasRecord: true}, nil))
+	if strings.Contains(out, "line 05") || p.Recorded() != 10 {
+		t.Fatalf("seed pushed (recorded %d): %q", p.Recorded(), out)
+	}
+	out = string(p.Apply(&protocol.Frame{Seq: 2, Alternate: true, Cols: 10, Lines: 4, Rows: rows(12), Record: rec(12, false, 10), HasRecord: true}, nil))
+	if !strings.Contains(out, "line 10") || !strings.Contains(out, "line 11") {
+		t.Fatalf("recorded rows not pushed: %q", out)
 	}
 }

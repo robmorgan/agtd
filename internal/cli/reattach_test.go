@@ -8,6 +8,8 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/quic-go/quic-go"
+
 	"agtd.sh/internal/protocol"
 	"agtd.sh/internal/transport"
 )
@@ -57,8 +59,18 @@ func TestReconnectable(t *testing.T) {
 			t.Errorf("local: %v is not reconnectable", err)
 		}
 	}
+	// A remote stream that ended on its own keeps the QUIC connection (and
+	// its control stream); a drop that is a lost connection, or any drop of
+	// the local daemon's socket, does not.
+	streamOnly := fmt.Errorf("%w (%w)", errAttachDropped, &quic.StreamError{StreamID: 4, Remote: true})
+	connGone := fmt.Errorf("%w (%w)", errAttachDropped, &quic.IdleTimeoutError{})
+	if !remote.streamDropped(errAttachDropped) || !remote.streamDropped(streamOnly) ||
+		remote.streamDropped(connGone) || local.streamDropped(errAttachDropped) || remote.streamDropped(errSessionRestarting) {
+		t.Fatal("wrong connection kept across a reattach")
+	}
 	if !strings.Contains(local.reconnectStatus(errAttachDropped), "connection to agtd lost") ||
-		!strings.Contains(remote.reconnectStatus(errAttachDropped), "connection to dev lost") ||
+		!strings.Contains(remote.reconnectStatus(streamOnly), "attach stream to dev ended") ||
+		!strings.Contains(remote.reconnectStatus(connGone), "connection to dev lost") ||
 		!strings.Contains(local.reconnectStatus(errSessionRestarting), "session restarting") {
 		t.Fatal("unexpected reconnect status")
 	}

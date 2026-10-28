@@ -919,8 +919,8 @@ agt attach devbox-1/auth-tests
       machine and every paired host, needs-you first, filter with `host/` narrowing, Enter attaches
       on the row's host, Tab to attach or remove (by UID, `kill-expect-uid`), hosts probed in the
       background with backoff
-    * [ ] Phase 2: the full actions menu (stop, take over size, diff, history) and detach returning
-          to the inbox (attach owns the alternate screen when launched from it)
+    * [x] Detach returning to the inbox (attach owns the alternate screen when launched from it)
+    * [ ] Phase 2: the full actions menu (stop, take over size, diff, history)
     * [ ] Phase 3: new session anywhere (host, workspace, agent, name), workspaces added and removed inline
     * [ ] Phase 4: peek and inline reply, gated on a timed trial
     * [ ] Phase 5: host health inline
@@ -1136,10 +1136,11 @@ size answers on it.
 * [x] Phase 1: each session's agent socket (`SSH_AUTH_SOCK`, `[ssh_agent] session_socket`),
       routing by size ownership with the wait for the owner's reattach, the inherited fallback,
       `ssh-agent` streams (`ForwardSSHAgent`), `[ssh_agent] forward` for every attachment, the
-      message and key filters, events, the socket across live handoffs (handoff format 2)
+      message and key filters, a binding to the agtd hop so `ssh-add -h` limits hold, events,
+      the socket across live handoffs (handoff format 2)
 * [ ] Phase 2: destination policy (verified session bindings, `known_hosts`, `allow_hosts`,
       `allow_namespaces`), refusing onward forwarding, and asking the user from the overlay
-* [ ] Phase 3, if asked for: the agtd hop in OpenSSH's own destination constraints
+* [ ] Phase 3, if asked for: naming the agtd hop in OpenSSH's own destination constraints
 
 ---
 

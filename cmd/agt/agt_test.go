@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -502,6 +503,35 @@ func TestSizeOwnershipEndToEnd(t *testing.T) {
 	b.wait()
 }
 
+// A remote owner's detach reaches the worker before agt closes its QUIC
+// connection: the pending attachment takes the size at once, not after the
+// 10 s the size is kept for a reattach. Closing the connection right after
+// the leave used to drop it, which reads as a cut.
+func TestRemoteDetachHandsTheSizeOn(t *testing.T) {
+	e := newEnv(t, "")
+	r := e.remoteEnv("dev")
+	r.startAndDetach("demo")
+	owner := e.start("attach", "dev/demo")
+	owner.expect(0, "attached to demo")
+	pending := r.startSized(40, 120, "attach", "demo")
+	mp := pending.expect(0, "attached to demo")
+	if out := r.mustRun("agt", "attachments", "demo"); !strings.Contains(out, "size-owner\t100x30") {
+		t.Fatalf("attachments:\n%s", out)
+	}
+	owner.write("\x1c")
+	owner.wait()
+	deadline := time.Now().Add(3 * time.Second) // the size is kept 10 s for a reattach
+	for !strings.Contains(r.mustRun("agt", "attachments", "demo"), "size-owner\t120x40") {
+		if time.Now().After(deadline) {
+			t.Fatalf("the pending attachment did not take the size at once:\n%s", r.mustRun("agt", "attachments", "demo"))
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	pending.write("exit\r")
+	pending.expect(mp, "session demo finished")
+	pending.wait()
+}
+
 // startAndDetach creates a session and detaches from it at once.
 func (e *env) startAndDetach(name string) {
 	e.t.Helper()
@@ -513,8 +543,9 @@ func (e *env) startAndDetach(name string) {
 
 // remoteEnv starts a second runtime root whose daemon listens on QUIC,
 // adds it to e as host name and authorizes e's key there: a separate
-// daemon, so a request routed to the wrong host is caught.
-func (e *env) remoteEnv(name string) *env {
+// daemon, so a request routed to the wrong host is caught. extraConfig is
+// added to its config.toml.
+func (e *env) remoteEnv(name string, extraConfig ...string) *env {
 	e.t.Helper()
 	probe, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
@@ -522,7 +553,7 @@ func (e *env) remoteEnv(name string) *env {
 	}
 	addr := probe.LocalAddr().String()
 	probe.Close()
-	r := newEnv(e.t, "\n[remote]\nlisten = \""+addr+"\"\n")
+	r := newEnv(e.t, strings.Join(extraConfig, "")+"\n[remote]\nlisten = \""+addr+"\"\n")
 	r.mustRun("agt", "daemon", "info") // starts it
 	e.mustRun("agt", "host", "add", name, addr, "--fingerprint", strings.TrimSpace(r.mustRun("agtd", "remote", "id")))
 	r.mustRun("agtd", "remote", "authorize", strings.TrimSpace(e.mustRun("agt", "remote", "id")), "test")
@@ -557,7 +588,8 @@ func TestInboxEndToEnd(t *testing.T) {
 	r := e.remoteEnv("dev")
 	r.startAndDetach("demo")
 
-	// Both rows show; dev/ narrows to dev's, and Enter attaches to it.
+	// Both rows show; dev/ narrows to dev's, and Enter attaches to it, on
+	// the alternate screen, with nothing printed.
 	tm := e.start()
 	m := tm.expect(0, "Filter, or name a new session")
 	m = tm.expectScreen(m, `demo\s+local\s+sh\s+(running|working|idle)`)
@@ -565,18 +597,35 @@ func TestInboxEndToEnd(t *testing.T) {
 	tm.write("dev/")
 	m = tm.expectScreen(m, `dev/`)
 	tm.write("\r")
-	m = tm.expect(m, "attached to demo")
+	m = tm.expect(m, "\x1b[?1049h")
 	tm.write("pwd\r")
-	tm.expect(m, r.work)
-	tm.write("\x1c")
-	tm.wait()
+	m = tm.expect(m, r.work)
+
+	// A detach returns to the inbox: the attachment leaves the alternate
+	// screen without clearing anything, so the inbox's block is where it
+	// was, and the inbox takes keys again. The session drew on the main
+	// screen (sh), then on the alternate one (as a full-screen agent).
+	backToInbox := func(m int) int {
+		t.Helper()
+		tm.write("\x1c")
+		m = tm.expect(m, "\x1b[?1049l")
+		tm.write("\t")
+		end := tm.expectScreen(m, `2\. remove`)
+		if back := tm.output()[m:end]; strings.Contains(back, "\x1b[2J") || strings.Contains(back, "attached to") || strings.Contains(back, "ended") {
+			t.Fatalf("the return to the inbox cleared or printed:\n%q", back)
+		}
+		tm.write("\x1b") // close the menu
+		return end
+	}
+	m = backToInbox(m)
+	tm.write("\r")
+	m = tm.expect(m, "\x1b[?1049h")
+	tm.write("printf '\\033[?1049hfull screen'\r")
+	m = tm.expect(m, "full screen")
+	m = backToInbox(m)
 
 	// Tab, remove, confirm: dev's demo goes, and this machine's keeps
 	// running. Esc clears the filter, then quits.
-	tm = e.start()
-	m = tm.expectScreen(0, `demo\s+dev`)
-	tm.write("dev/")
-	m = tm.expectScreen(m, `dev/`)
 	tm.write("\t")
 	m = tm.expectScreen(m, `2\. remove`)
 	tm.write("2")
@@ -585,11 +634,11 @@ func TestInboxEndToEnd(t *testing.T) {
 	// 500 ms (the inbox's inboxAcknowledgeAfter): read it first.
 	time.Sleep(600 * time.Millisecond) // gstack-timing-ok: waits out the inbox's confirm delay, asserts no timing
 	tm.write("\r")
-	tm.expectScreen(m, `removed session dev/demo`)
+	m = tm.expectScreen(m, `removed session dev/demo`)
 	tm.write("\x1b")
 	tm.write("\x1b")
 	tm.wait()
-	if strings.Contains(tm.output(), "attached to") {
+	if strings.Contains(tm.output()[m:], "\x1b[?1049h") {
 		t.Fatal("the inbox attached on its way out")
 	}
 	if out := r.mustRun("agt", "ls"); strings.Contains(out, "demo") {
@@ -600,6 +649,78 @@ func TestInboxEndToEnd(t *testing.T) {
 	}
 }
 
+// A session that fails fails the command attached to it, with the reason:
+// a script running `agt new` sees the agent fail in its exit status.
+func TestAttachExitsNonZeroWhenTheSessionFails(t *testing.T) {
+	e := newEnv(t, "")
+	tm := e.start("new", "demo")
+	m := tm.expect(0, "attached to demo")
+	tm.write("exit 3\r")
+	tm.expect(m, "session demo failed: agent exited with code 3")
+	var exit *exec.ExitError
+	if err := tm.waitErr(); !errors.As(err, &exit) || exit.ExitCode() != 1 {
+		t.Fatalf("agt new after the session failed: %v, want exit status 1", err)
+	}
+}
+
+// Stop session in the overlay ends the attachment as the session's end,
+// from `agt attach` and from the inbox, locally and over QUIC: the stream
+// the worker closed is not a lost connection to reattach over (which the
+// daemon refuses, the session no longer running).
+func TestOverlayStopEndsAttachmentEndToEnd(t *testing.T) {
+	// An agent that ends on SIGTERM, as a coding agent does (an
+	// interactive sh ignores it).
+	const loop = "\n[agents.loop]\ncommand = \"/bin/sh\"\nargs = [\"-c\", \"echo ready; while :; do sleep 1; done\"]\n"
+	e := newEnv(t, loop)
+	stop := func(tm *term, m int) int {
+		t.Helper()
+		m = tm.expect(m, "ready")
+		tm.write("\x19")
+		m = tm.expect(m, "Switch session")
+		tm.write("x")
+		m = tm.expect(m, "Stop session")
+		tm.write("\r")
+		m = tm.expect(m, "Its agent and terminal end.")
+		tm.write("\r")
+		return m
+	}
+
+	tm := e.start("new", "--agent", "loop", "one")
+	m := stop(tm, tm.expect(0, "attached to one"))
+	tm.expect(m, "session one finished")
+	tm.wait()
+	if out := tm.output()[m:]; strings.Contains(out, "not running") || strings.Contains(out, "reconnecting") {
+		t.Fatalf("attach after Stop session:\n%q", out)
+	}
+
+	tm = e.start("new", "--agent", "loop", "two")
+	tm.expect(0, "attached to two")
+	tm.write("\x1c")
+	tm.wait()
+	tm = e.start()
+	m = tm.expectScreen(0, `two\s+local\s+loop\s+(running|working|idle)`)
+	tm.write("\r")
+	m = stop(tm, tm.expect(m, "\x1b[?1049h"))
+	m = tm.expect(m, "\x1b[?1049l")
+	end := tm.expectScreen(m, `two ended: session two finished`)
+	if out := sgrSequence.ReplaceAllString(tm.output()[m:end], ""); strings.Contains(out, "could not attach") {
+		t.Fatalf("the inbox after Stop session:\n%q", out)
+	}
+	tm.write("\x1b")
+	tm.wait()
+
+	// Over QUIC a write to the stream the worker ended can fail with a
+	// stream error, not a lost connection.
+	r := e.remoteEnv("dev", loop)
+	tm = e.start("--host", "dev", "new", "-C", r.work, "--agent", "loop", "three")
+	m = stop(tm, tm.expect(0, "attached to three"))
+	tm.expect(m, "session three finished")
+	tm.wait()
+	if out := tm.output()[m:]; strings.Contains(out, "not running") || strings.Contains(out, "reconnecting") || strings.Contains(out, "Error") {
+		t.Fatalf("remote attach after Stop session:\n%q", out)
+	}
+}
+
 // `agt --host dev` shows dev alone and never starts this machine's daemon.
 func TestInboxLockedToHostEndToEnd(t *testing.T) {
 	e := newEnv(t, "")
@@ -607,7 +728,7 @@ func TestInboxLockedToHostEndToEnd(t *testing.T) {
 	r.startAndDetach("there")
 	tm := e.start("--host", "dev")
 	m := tm.expectScreen(0, `there\s+dev\s+sh\s+(running|working|idle)`)
-	tm.write("n")
+	tm.write("\x0e") // ctrl-n
 	tm.expectScreen(m, "agt new -C DIR dev/NAME")
 	tm.write("\x1b")
 	tm.wait()
