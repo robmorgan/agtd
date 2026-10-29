@@ -1668,10 +1668,6 @@ formatter's):
 * **A hyperlink that ends in a pending wrap.** The cursor block reprints the last cell to recreate
   the pending wrap, inside a fresh OSC 8, so a link without an explicit id comes back as two links
   to the same URI, the last cell its own.
-* **A pending wrap at a right margin.** The cursor block recreates a pending wrap by reprinting
-  the cell under the cursor only when the cursor is in the last column; within left and right
-  margins (DECSLRM) a wrap is pending at the right margin, and the cursor comes back there
-  without it, so the next character overwrites the last one instead of wrapping.
 * **Text printed before grapheme clustering (mode 2027) was switched.** The mode decides how
   codepoints join into cells, cells do not record which mode made them, and the snapshot sets
   the current mode before the contents, so text printed under the other mode can split or join

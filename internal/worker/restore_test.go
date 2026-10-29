@@ -300,6 +300,7 @@ func TestSnapshotRestores(t *testing.T) {
 		{"pending wrap on a wide character", strings.Repeat("x", 78) + "界"},
 		// Restoring a saved cursor after its line was erased.
 		{"pending wrap over a blank cell", "\x1b[1;80Hx\x1b7\x1b[2K\x1b8"},
+		{"pending wrap at a right margin", "\x1b[?69h\x1b[;10s" + strings.Repeat("x", 10)},
 		{"hidden cursor", "text\x1b[?25l"},
 		{"blinking bar cursor", "\x1b[5 q"},
 		{"steady underline cursor", "\x1b[4 q"},
@@ -515,14 +516,6 @@ func TestSnapshotKnownLimits(t *testing.T) {
 			// alternate screen scrollback, and nothing a client is sent can.
 			name: "scrollback on the alternate screen", stream: "\x1b[?1047h0\x1b[22J0",
 			differs: []string{"ScrollbackRows", "Text", "Styled"},
-		},
-		{
-			// The cursor block recreates a pending wrap only in the last
-			// column; within left and right margins (DECSLRM) a wrap is
-			// pending at the right margin, and the cursor comes back there
-			// without it, so the next character overwrites the last one.
-			name: "pending wrap at a right margin", stream: "\x1b[?69h\x1b[;10s" + strings.Repeat("x", 10),
-			differs: []string{"PendingWrap"},
 		},
 		{
 			// The cursor saved with DECSC (or 1048) is not formatted.
