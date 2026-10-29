@@ -869,17 +869,19 @@ func TestSnapshotIsAnExactBoundary(t *testing.T) {
 }
 
 // The agent's terminal is the worker's shadow terminal, so it is told so
-// when the daemon's environment says nothing, or says "dumb".
+// when the daemon's environment says nothing, or says "dumb", and its
+// TERM_PROGRAM is always libghostty's.
 func TestAgentTerminalEnv(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		env  []string
 		want []string
 	}{
-		{"missing", []string{"HOME=/h"}, []string{"HOME=/h", "TERM=xterm-256color", "COLORTERM=truecolor"}},
-		{"dumb", []string{"TERM=dumb", "HOME=/h"}, []string{"HOME=/h", "TERM=xterm-256color", "COLORTERM=truecolor"}},
-		{"empty", []string{"TERM=", "COLORTERM=24bit"}, []string{"COLORTERM=24bit", "TERM=xterm-256color"}},
-		{"kept", []string{"TERM=xterm-ghostty", "COLORTERM=truecolor"}, []string{"TERM=xterm-ghostty", "COLORTERM=truecolor"}},
+		{"missing", []string{"HOME=/h"}, []string{"HOME=/h", "TERM=xterm-256color", "COLORTERM=truecolor", "TERM_PROGRAM=ghostty"}},
+		{"dumb", []string{"TERM=dumb", "HOME=/h"}, []string{"HOME=/h", "TERM=xterm-256color", "COLORTERM=truecolor", "TERM_PROGRAM=ghostty"}},
+		{"empty", []string{"TERM=", "COLORTERM=24bit"}, []string{"COLORTERM=24bit", "TERM=xterm-256color", "TERM_PROGRAM=ghostty"}},
+		{"kept", []string{"TERM=xterm-ghostty", "COLORTERM=truecolor"}, []string{"TERM=xterm-ghostty", "COLORTERM=truecolor", "TERM_PROGRAM=ghostty"}},
+		{"another program", []string{"TERM_PROGRAM=Apple_Terminal", "TERM_PROGRAM_VERSION=455", "TERM=xterm-256color", "COLORTERM=truecolor"}, []string{"TERM=xterm-256color", "COLORTERM=truecolor", "TERM_PROGRAM=ghostty"}},
 	} {
 		if got := agentTerminalEnv(c.env); !reflect.DeepEqual(got, c.want) {
 			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
@@ -887,8 +889,9 @@ func TestAgentTerminalEnv(t *testing.T) {
 	}
 	// And the agent sees it.
 	t.Setenv("TERM", "dumb")
-	h := startWorkerWith(t, `echo "term=$TERM color=$COLORTERM"; exec sleep 60`)
+	t.Setenv("TERM_PROGRAM", "Apple_Terminal")
+	h := startWorkerWith(t, `echo "term=$TERM color=$COLORTERM program=$TERM_PROGRAM"; exec sleep 60`)
 	c := h.attach(protocol.Geometry{Cols: 80, Rows: 24})
 	c.output.Write(c.snapshot)
-	c.expectOutput("term=xterm-256color color=truecolor")
+	c.expectOutput("term=xterm-256color color=truecolor program=ghostty")
 }
