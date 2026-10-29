@@ -3,8 +3,10 @@
 #
 # go.mitchellh.com/libghostty tracks a specific ghostty commit; this pin must
 # match the GIT_TAG in that module's CMakeLists.txt, or be a later commit with
-# the same C API (include/ghostty). It currently matches the bindings' pin
-# (df1957c, 2026-10-21). Ghostty needs Zig 0.17+ since ghostty #14519.
+# the same C API (include/ghostty). It is currently later than the bindings'
+# pin (df1957c, 2026-10-21, Ghostty f54340ad), for the formatter's pending
+# wrap at a right margin (ghostty #14918); the headers have only changed in
+# their comments since. Ghostty needs Zig 0.17+ since ghostty #14519.
 #
 # GHOSTTY_TARGET (a Zig target triple, e.g. x86_64-linux-gnu.2.28 or
 # x86_64-macos) builds for that target into its own directory,
@@ -17,7 +19,7 @@
 #        eval "$(scripts/build-libghostty.sh --env)"   # only print exports
 set -euo pipefail
 
-GHOSTTY_COMMIT="f54340ad77814fe319d136e5e915d6a48de8dd23"
+GHOSTTY_COMMIT="9781c0afc8225510e33127466f0815eb51086d7d"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD="${HERE}/../.build"
 SRC="${BUILD}/ghostty"
