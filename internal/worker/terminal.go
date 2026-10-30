@@ -2,6 +2,7 @@ package worker
 
 import (
 	"bytes"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"strconv"
@@ -84,6 +85,46 @@ type terminalEffects struct {
 	// reports itself, and the client's terminal may not support the
 	// protocol. See ownerState.afterFeed.
 	statusReplies [][]byte
+	// clipboard is the feed's last clipboard write (OSC 52, or another
+	// protocol libghostty normalizes) as the OSC 52 sequence that repeats
+	// it, for frame clients to relay; nil for none. A later write
+	// supersedes an earlier one, so one is all a client needs.
+	clipboard []byte
+}
+
+// maxClipboardBytes bounds the text of a clipboard write relayed to frame
+// clients: 75 KB is 100 KB of base64, the most pi writes through OSC 52.
+// A larger write is refused rather than cut.
+const maxClipboardBytes = 75_000
+
+// clipboardSequence is the OSC 52 sequence that writes w's text to the same
+// clipboard on a client terminal, or nil when w carries no text (a clear,
+// or only other MIME types) or too much of it. OSC 52 carries plain text
+// only.
+func clipboardSequence(w libghostty.ClipboardWrite) []byte {
+	var sel byte
+	switch w.Location {
+	case libghostty.ClipboardLocationStandard:
+		sel = 'c'
+	case libghostty.ClipboardLocationPrimary:
+		sel = 'p'
+	case libghostty.ClipboardLocationSelection:
+		sel = 's'
+	default:
+		return nil
+	}
+	for _, c := range w.Contents {
+		if !strings.HasPrefix(c.MIME, "text/plain") {
+			continue
+		}
+		if len(c.Data) == 0 || len(c.Data) > maxClipboardBytes {
+			return nil
+		}
+		seq := append([]byte("\x1b]52;"), sel, ';')
+		seq = base64.StdEncoding.AppendEncode(seq, c.Data)
+		return append(seq, "\x1b\\"...)
+	}
+	return nil
 }
 
 // statusEvent is one entry of a feed's program status stream: a report,
@@ -235,8 +276,8 @@ func newTerminalState(cols, rows uint16, maxScrollbackBytes uint) (*terminalStat
 }
 
 // adopt makes term the shadow terminal, wiring the callbacks through which
-// it answers terminal queries and reports bells, notifications and title
-// changes.
+// it answers terminal queries and reports bells, notifications, title
+// changes and clipboard writes.
 func (s *terminalState) adopt(term *libghostty.Terminal) {
 	term.SetEffectWritePty(func(_ *libghostty.Terminal, data []byte) {
 		if isStatusDetectionReply(data) {
@@ -260,6 +301,18 @@ func (s *terminalState) adopt(term *libghostty.Terminal) {
 		}
 	})
 	term.SetEffectTitleChanged(func(_ *libghostty.Terminal) { s.effects.titleChanged = true })
+	// A clipboard write reaches a raw client in the output itself; frame
+	// clients get it again from here (frameEffects). The worker has no
+	// clipboard of its own, and the client terminal's own policy decides
+	// whether the write lands.
+	term.SetEffectClipboardWrite(func(_ *libghostty.Terminal, w libghostty.ClipboardWrite) libghostty.ClipboardWriteReply {
+		seq := clipboardSequence(w)
+		if seq == nil {
+			return libghostty.ClipboardWriteReply{Result: libghostty.ClipboardWriteUnsupported}
+		}
+		s.effects.clipboard = seq
+		return libghostty.ClipboardWriteReply{Result: libghostty.ClipboardWriteSuccess}
+	})
 	// Setting a program status handler also makes the terminal answer the
 	// protocol's detection query, so programs know they can report.
 	term.SetEffectProgramStatus(func(_ *libghostty.Terminal, r libghostty.ProgramStatus) {
