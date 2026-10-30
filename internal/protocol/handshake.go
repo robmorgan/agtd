@@ -249,6 +249,10 @@ const (
 	// SSH_AUTH_SOCK, which a session started before this feature never
 	// is, even after a handoff.
 	CapSSHAgent = "ssh-agent"
+	// CapWorkspaceClone: CreateSession ends with Clone, which starts a
+	// session that clones a repository with the client's forwarded SSH
+	// agent (CloneWorkspace).
+	CapWorkspaceClone = "workspace-clone"
 )
 
 // GlobalSessionID identifies one incarnation of a session across every
@@ -270,7 +274,8 @@ const MinProtocolVersion uint16 = 1
 func Capabilities() []string {
 	return []string{CapControlStream, CapGitState, CapArtifacts, CapSessionUID, CapRequestTokens, CapAttachFeatures, CapAttachReplace, CapAttachResync, CapRuntimeStats,
 		CapEvents, CapSessionActivity, CapSessionStatus, CapDaemonID, CapSessionRestart, CapWorkerHandoff, CapTerminalMemory, CapAttachScrollback, CapAttachSizeOwner,
-		CapAttachField, CapTerminalColors, CapAttachFrames, CapAttachCompose, CapAttachFrameWindow, CapAttachAltRecord, CapKillExpectUID, CapSSHAgent}
+		CapAttachField, CapTerminalColors, CapAttachFrames, CapAttachCompose, CapAttachFrameWindow, CapAttachAltRecord, CapKillExpectUID, CapSSHAgent,
+		CapWorkspaceClone}
 }
 
 // AttachCapabilities are the capabilities that apply to an attach stream,

@@ -223,6 +223,9 @@ var (
 	oneArg      = argsError(cobra.ExactArgs(1))
 	twoArgs     = argsError(cobra.ExactArgs(2))
 	optionalArg = argsError(cobra.MaximumNArgs(1))
+	// workspaceAddArgs: PATH may be left out with --clone, which the
+	// command checks.
+	workspaceAddArgs = argsError(cobra.RangeArgs(1, 2))
 )
 
 func (a *app) rootCommand() *cobra.Command {

@@ -120,6 +120,21 @@ type CreateSession struct {
 	// colour queries with until an attachment reports its own. Nil when
 	// the client has no terminal.
 	Colors *TerminalColors
+	// Clone (CapWorkspaceClone), when set, makes this a session that
+	// clones a repository rather than one that runs an agent: Cwd, Agent,
+	// Model and Workspace are then empty.
+	Clone *CloneWorkspace
+}
+
+// CloneWorkspace asks for a session whose program is `git clone URL Path`,
+// run with SSH_AUTH_SOCK answered only by the forwarder of the attachment
+// that owns the session's size: the session's own agent, never one the
+// daemon inherited. URL must be an SSH URL, and Path, resolved on the
+// daemon's machine, must not exist yet. Workspace is the name the client
+// registers Path under (AddWorkspace) once the clone succeeds; the daemon
+// only checks that it is valid and free.
+type CloneWorkspace struct {
+	Workspace, URL, Path string
 }
 
 // RGB is an 8-bit colour.
@@ -913,6 +928,14 @@ func encodeRequest(req *Request, f Features) (kind, []byte, error) {
 		if e.f.Has(CapTerminalColors) {
 			e.colors(c.Colors)
 		}
+		if e.f.Has(CapWorkspaceClone) {
+			e.bool(c.Clone != nil)
+			if c.Clone != nil {
+				e.str(c.Clone.Workspace)
+				e.str(c.Clone.URL)
+				e.str(c.Clone.Path)
+			}
+		}
 		return kCreateSessionRequest, e.buf, e.err
 	case req.KillSession != nil:
 		e.str(req.KillSession.SessionID)
@@ -1084,6 +1107,9 @@ func decodeRequest(k kind, payload []byte, f Features) (*Request, error) {
 		req.CreateSession.Token = d.token()
 		if d.f.Has(CapTerminalColors) {
 			req.CreateSession.Colors = d.colors()
+		}
+		if d.f.Has(CapWorkspaceClone) && d.bool() {
+			req.CreateSession.Clone = &CloneWorkspace{Workspace: d.str(), URL: d.str(), Path: d.str()}
 		}
 	case kKillSessionRequest:
 		req.KillSession = &KillSession{SessionID: d.str(), Remove: d.bool()}

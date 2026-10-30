@@ -31,6 +31,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -119,6 +120,45 @@ func (c *client) forwardAgent(id string, attached *protocol.Attached) *agentForw
 		c.runForwarders(ctx, req, agent, keys, hop)
 	}()
 	return f
+}
+
+// checkForwarding says why an attachment to c's daemon would not lend this
+// machine's SSH agent, or returns nil when it would: [ssh_agent] forward is
+// set and sound, and the agent answers with a key the policy offers, through
+// the agtd hop for a remote daemon, as forwardAgent and runForwarders would
+// find it. A clone, which a session runs with no agent but a forwarded one,
+// checks this before it starts.
+func (c *client) checkForwarding() error {
+	cfg, err := config.Load(c.paths.Config)
+	switch {
+	case err != nil:
+		return err
+	case cfg.SSHAgent.Problem != "":
+		return fmt.Errorf("SSH agent forwarding is off: %s in %s", cfg.SSHAgent.Problem, c.paths.Config)
+	case !cfg.SSHAgent.Forward:
+		return fmt.Errorf("SSH agent forwarding is off: set `forward = true` under [ssh_agent] in %s", c.paths.Config)
+	}
+	agent := cfg.SSHAgent.AgentSocket()
+	if agent == "" {
+		return errors.New("there is no SSH agent to forward: SSH_AUTH_SOCK is not set, nor [ssh_agent] agent")
+	}
+	var hop ssh.Signer
+	if c.host != nil {
+		if hop, err = newHopSigner(); err != nil {
+			return err
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), c.requestTimeout())
+	defer cancel()
+	r := newAgentRelay(ctx, agent, sshagent.NewKeys(cfg.SSHAgent.Keys), hop)
+	defer r.cancel()
+	if !r.lends() {
+		if len(cfg.SSHAgent.Keys) > 0 {
+			return fmt.Errorf("your SSH agent (%s) does not answer, or holds none of the keys [ssh_agent] keys allows", agent)
+		}
+		return fmt.Errorf("your SSH agent (%s) does not answer, or holds no keys (add one with ssh-add)", agent)
+	}
+	return nil
 }
 
 // sshAgentWarning is why agt forwards no SSH agent when [ssh_agent] has a
