@@ -304,15 +304,16 @@ func TestAttachFrameOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
-		name, text         string
-		alt, wheel, submit bool
+		name, text                    string
+		alt, wheel, submit, selection bool
 	}{
-		{"unset", "", false, true, false},
-		{"written", "", false, true, false},
-		{"alt", "[attach]\nalt_scrollback = true\n", true, true, false},
-		{"no wheel", "[attach]\npredict_wheel = false\n", false, false, false},
-		{"wheel", "[attach]\npredict_wheel = true\n", false, true, false},
-		{"submit", "[attach]\nsubmit_and_switch = true\n", false, true, true},
+		{"unset", "", false, true, false, true},
+		{"written", "", false, true, false, true},
+		{"alt", "[attach]\nalt_scrollback = true\n", true, true, false, true},
+		{"no wheel", "[attach]\npredict_wheel = false\n", false, false, false, true},
+		{"wheel", "[attach]\npredict_wheel = true\n", false, true, false, true},
+		{"submit", "[attach]\nsubmit_and_switch = true\n", false, true, true, true},
+		{"no selection", "[attach]\npredict_selection = false\n", false, true, false, false},
 	} {
 		path := written
 		if tc.name != "written" {
@@ -325,8 +326,8 @@ func TestAttachFrameOptions(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
-		if a := cfg.Attach; a.AltScrollback != tc.alt || a.WheelPredicted() != tc.wheel || a.SubmitAndSwitch != tc.submit {
-			t.Errorf("%s: alt %v wheel %v submit %v", tc.name, a.AltScrollback, a.WheelPredicted(), a.SubmitAndSwitch)
+		if a := cfg.Attach; a.AltScrollback != tc.alt || a.WheelPredicted() != tc.wheel || a.SubmitAndSwitch != tc.submit || a.SelectionPredicted() != tc.selection {
+			t.Errorf("%s: alt %v wheel %v submit %v selection %v", tc.name, a.AltScrollback, a.WheelPredicted(), a.SubmitAndSwitch, a.SelectionPredicted())
 		}
 	}
 }

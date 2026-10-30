@@ -1246,6 +1246,26 @@ replayed frame by frame through the painter into a second libghostty terminal an
 for cell (`TestFramesReplayStreams`); what differs is what the formatter cannot express (see "The
 reattach snapshot").
 
+**The selection prediction.** An agent that takes the mouse (Claude Code; pi in fullscreen, both
+with SGR button or any-event tracking) draws its own selection as the left button is dragged, a
+round trip after each motion. Under frames the CLI's painter reads the drag on its way to the agent
+and draws the selection at once over the agent's screen (`internal/screen/select.go`,
+`[attach] predict_selection`). It assumes nothing about the agent: the first answers of the first
+drag teach it the pen selected cells gain (reverse video for pi, Claude Code's `#264f78`
+background) and, from a selection three rows tall, the columns the rows between its ends run over
+(the whole row for pi, the transcript's text column for Claude Code); a selection runs from the
+press cell to the pointer's, both included. The guess is drawn over each row with the learned pen
+taken out first, so a shrinking drag does not leave the agent's older, larger selection showing.
+Frames stay the authority: the guess is redrawn over each one while the button is down and
+dropped once the agent has had time to answer the release (two round trips and 300 ms), when it is
+judged against the agent's own selection; after two wrong guesses in a row guessing pauses until
+two gestures would have been right. Nothing is guessed for the rest of a gesture once the pointer
+reaches the top or bottom row or goes below the transcript (the agent scrolls there, on a timer),
+or the text under the selection changes, nor while a wheel guess is drawn. Clicks, double and
+triple clicks are left to the agent. `TestFramesPredictSelection` replays both agents' recorded
+drags (`claude-select`, `pi-fullscreen-select`) and checks each guess cell for cell against the
+selection the agent then drew.
+
 ## SSH Agent Forwarding
 
 A program in a session (an agent running `git push`, `ssh`, or signing a commit) can use the SSH
