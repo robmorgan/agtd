@@ -242,7 +242,7 @@ func TestOverlayTakeSize(t *testing.T) {
 	if out, err := o.handle(key(keyEnter)); err != nil || out.kind != overlayTookSize {
 		t.Fatalf("enter: %+v %v", out, err)
 	}
-	if got := len(paletteItems); got != 5 {
+	if got := len(paletteItems); got != 4 {
 		t.Fatalf("the take-size item leaked into the shared palette: %d items", got)
 	}
 
@@ -277,6 +277,13 @@ func TestOverlayDetach(t *testing.T) {
 	}
 	if got := o.filteredPalette(); len(got) != 1 || got[0].title != "Detach" {
 		t.Fatalf("filtered %v", got)
+	}
+	// Detach is the last command, whatever else is offered.
+	pending := &protocol.SizeOwnership{OwnerID: "attach-1"}
+	all := newOverlay(testClient(t), "alpha", pending, nil)
+	all.submitSwitch = true
+	if got := all.filteredPalette(); got[len(got)-1].title != "Detach" || got[len(got)-2].title != takeSizeItem.title {
+		t.Fatalf("palette %v", got)
 	}
 	if out, err := o.handle(key(keyEnter)); err != nil || out.kind != overlayDetach {
 		t.Fatalf("enter: %+v %v", out, err)

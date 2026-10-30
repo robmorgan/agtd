@@ -721,6 +721,41 @@ func TestOverlayStopEndsAttachmentEndToEnd(t *testing.T) {
 	}
 }
 
+// Session details says which screen the program is on: from the worker
+// under the raw output (with the echo asking for the field too, and
+// without it), and from the painter under frames.
+func TestOverlayDetailsScreenEndToEnd(t *testing.T) {
+	const agents = "\n[agents.full]\ncommand = \"/bin/sh\"\nargs = [\"-c\", \"printf '\\\\033[?1049h'; echo ready; while :; do sleep 1; done\"]\n" +
+		"\n[agents.inline]\ncommand = \"/bin/sh\"\nargs = [\"-c\", \"echo ready; while :; do sleep 1; done\"]\n"
+	details := func(e *env, name string, tm *term, m int, want string) {
+		t.Helper()
+		m = tm.expect(m, "ready")
+		tm.write("\x19")
+		m = tm.expect(m, "Switch session")
+		tm.write("details")
+		m = tm.expect(m, "Session details")
+		tm.write("\r")
+		tm.expectScreen(m, `screen\s+`+regexp.QuoteMeta(want))
+		d := e.start("detach", name, "--all")
+		d.wait()
+		tm.wait()
+	}
+	for _, echo := range []string{"", "\n[composer]\nenabled = false\n"} {
+		e := newEnv(t, agents+echo)
+		tm := e.start("new", "--agent", "full", "one")
+		details(e, "one", tm, tm.expect(0, "attached to one"), "alternate (fullscreen)")
+		tm = e.start("new", "--agent", "inline", "two")
+		details(e, "two", tm, tm.expect(0, "attached to two"), "primary")
+	}
+
+	e := newEnv(t, "")
+	r := e.remoteEnv("dev", agents)
+	tm := e.start("--host", "dev", "new", "-C", r.work, "--agent", "full", "three")
+	details(e, "dev/three", tm, tm.expect(0, "attached to three"), "alternate (fullscreen)")
+	tm = e.start("--host", "dev", "new", "-C", r.work, "--agent", "inline", "four")
+	details(e, "dev/four", tm, tm.expect(0, "attached to four"), "primary")
+}
+
 // `agt --host dev` shows dev alone and never starts this machine's daemon.
 func TestInboxLockedToHostEndToEnd(t *testing.T) {
 	e := newEnv(t, "")
