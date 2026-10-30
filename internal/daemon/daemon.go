@@ -59,7 +59,7 @@ import (
 )
 
 // Version is reported by GetDaemonInfo and daemon status.
-var Version = "0.2.0"
+var Version = "0.2.1"
 
 const (
 	// connectionDrainTimeout bounds how long shutdown waits for handlers
