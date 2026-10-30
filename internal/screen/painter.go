@@ -73,6 +73,11 @@ type Painter struct {
 	pr    wheelPredict
 	shown [][]byte
 	clock func() time.Time
+	// sel is the selection prediction (select.go), and selShown what the
+	// terminal shows when its guess is drawn over the agent's screen (nil
+	// when it shows rows as they are).
+	sel      selectPredict
+	selShown [][]byte
 }
 
 // SetAltScrollback turns on scrollback for programs on the alternate
@@ -336,6 +341,7 @@ func New() *Painter { return &Painter{} }
 func (p *Painter) Reset() {
 	p.rows, p.seq, p.painted, p.overdrawn = nil, 0, false, false
 	p.resetPredict()
+	p.resetSelect()
 	for _, m := range mouseModes {
 		delete(p.modes, m)
 	}
@@ -376,6 +382,7 @@ func (p *Painter) Apply(f *protocol.Frame, overlay []byte) []byte {
 	cols, lines := int(f.Cols), int(f.Lines)
 	resized := p.painted && (cols != p.cols || lines != p.lines)
 	if f.Full || resized || len(p.rows) != lines {
+		p.resetSelect()
 		p.rows = make([][]byte, lines)
 		if p.shown != nil || resized {
 			p.resetPredict()
@@ -384,7 +391,7 @@ func (p *Painter) Apply(f *protocol.Frame, overlay []byte) []byte {
 	// written are the rows this frame writes, while a guess is drawn
 	// over the rows it leaves, or the rows were overdrawn.
 	var written []bool
-	if p.shown != nil || p.overdrawn {
+	if p.shown != nil || p.overdrawn || p.selShown != nil {
 		written = make([]bool, lines)
 	}
 	p.cols, p.lines = cols, lines
@@ -432,11 +439,14 @@ func (p *Painter) Apply(f *protocol.Frame, overlay []byte) []byte {
 		}
 		if k >= lines || f.Full {
 			p.rows = make([][]byte, lines)
+			p.resetSelect()
 		} else {
-			if p.shown != nil {
-				copy(p.shown, p.shown[k:])
-				for i := lines - k; i < lines; i++ {
-					p.shown[i] = nil
+			for _, shown := range [][][]byte{p.shown, p.selShown} {
+				if shown != nil {
+					copy(shown, shown[k:])
+					for i := lines - k; i < lines; i++ {
+						shown[i] = nil
+					}
 				}
 			}
 			copy(p.rows, p.rows[k:])
@@ -471,6 +481,17 @@ func (p *Painter) Apply(f *protocol.Frame, overlay []byte) []byte {
 			b.WriteString(cup(y, 0) + rowStart)
 			b.Write(row)
 		}
+	}
+	if p.selShown != nil || p.sel.moved {
+		painted := written
+		if p.overdrawn && len(overlay) == 0 {
+			// Every row was just written as the agent has it.
+			painted = make([]bool, lines)
+			for y := range painted {
+				painted[y] = true
+			}
+		}
+		p.reconcileSelect(&b, painted)
 	}
 	p.overdrawn = len(overlay) > 0
 	b.Write(f.Keyboard)

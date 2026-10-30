@@ -651,6 +651,9 @@ func (c *client) newPainterFor(attached *protocol.Attached) *screen.Painter {
 		if cfg.Attach.WheelPredicted() {
 			p.SetPredictScroll(c.latency())
 		}
+		if cfg.Attach.SelectionPredicted() {
+			p.SetPredictSelection(c.latency())
+		}
 	}
 	return p
 }
@@ -777,6 +780,7 @@ func (c *client) runAttachment(id string, stream *attachStream, keys <-chan []by
 				case actionData:
 					if painter != nil {
 						writeOut(painter.Wheel(action.data))
+						writeOut(painter.Select(action.data))
 						schedulePredict()
 					}
 					if err := sendInput(action.data); err != nil {
