@@ -822,7 +822,10 @@ apart, and `TERM=xterm-256color` and
 `COLORTERM=truecolor` when the daemon's environment has no `TERM` (it was started by systemd or
 over ssh) or has `TERM=dumb` (a login shell there): the agent's terminal is the worker's shadow
 terminal whatever started the daemon, and without this an agent turns colour off. A `TERM` the
-environment names on purpose is kept. The daemon socket is deliberately not passed in.
+environment names on purpose is kept. `TERM_PROGRAM` is always `ghostty`, and an inherited
+`TERM_PROGRAM_VERSION` dropped: the daemon's would name nothing on a devbox, or whichever terminal
+started it, and agents such as pi write OSC 8 hyperlinks only for a terminal they recognise (both
+attach modes carry them to the client). The daemon socket is deliberately not passed in.
 That is not a boundary: agents run as the socket owner and can still find the socket at its
 well-known path, so isolating them needs a sandbox around the agent process. With `[ssh_agent]
 session_socket` (the default) the worker also binds the session's SSH agent socket before the

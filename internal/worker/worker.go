@@ -58,21 +58,29 @@ const (
 // the daemon was started from: a daemon started by systemd or over ssh has
 // no TERM at all, and a login shell there gives "dumb", either of which
 // makes an agent turn colour and the keyboard protocols off. The agent is
-// told what it is really talking to.
+// told what it is really talking to. TERM_PROGRAM names libghostty's
+// terminal: agents that look for a terminal they know before writing OSC 8
+// hyperlinks (pi) find one, where the daemon's environment would name
+// nothing on a devbox, or whichever terminal happened to start the daemon.
 const (
-	agentTERM      = "xterm-256color"
-	agentCOLORTERM = "truecolor"
+	agentTERM        = "xterm-256color"
+	agentCOLORTERM   = "truecolor"
+	agentTERMPROGRAM = "ghostty"
 )
 
 // agentTerminalEnv is env with TERM set to the shadow terminal's when it is
-// missing or "dumb", and COLORTERM when it is missing. A TERM the daemon's
-// environment names on purpose is kept.
+// missing or "dumb", COLORTERM when it is missing, and TERM_PROGRAM always.
+// A TERM the daemon's environment names on purpose is kept; the inherited
+// TERM_PROGRAM and TERM_PROGRAM_VERSION describe another terminal and are
+// dropped.
 func agentTerminalEnv(env []string) []string {
-	out := make([]string, 0, len(env)+2)
+	out := make([]string, 0, len(env)+3)
 	term, colorterm := false, false
 	for _, kv := range env {
 		switch {
 		case kv == "TERM=" || kv == "TERM=dumb":
+			continue
+		case strings.HasPrefix(kv, "TERM_PROGRAM="), strings.HasPrefix(kv, "TERM_PROGRAM_VERSION="):
 			continue
 		case strings.HasPrefix(kv, "TERM="):
 			term = true
@@ -87,7 +95,7 @@ func agentTerminalEnv(env []string) []string {
 	if !colorterm {
 		out = append(out, "COLORTERM="+agentCOLORTERM)
 	}
-	return out
+	return append(out, "TERM_PROGRAM="+agentTERMPROGRAM)
 }
 
 // agentKillGrace is how long a killed agent gets between SIGTERM and SIGKILL.

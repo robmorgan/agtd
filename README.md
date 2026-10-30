@@ -521,6 +521,9 @@ The daemon injects:
 - `TERM=xterm-256color` and `COLORTERM=truecolor` when the daemon's environment has no `TERM`
   (a daemon started at boot or over ssh) or `TERM=dumb`: the agent's terminal is agtd's own,
   whatever started the daemon, and without them agents turn colour off
+- `TERM_PROGRAM=ghostty`, always (replacing the daemon's own, and dropping its
+  `TERM_PROGRAM_VERSION`): the terminal is libghostty's, and agents such as pi only write clickable
+  OSC 8 hyperlinks for a terminal they recognise
 - `SSH_AUTH_SOCK`, naming the session's own SSH agent socket (see [Forwarding Your SSH
   Agent](#forwarding-your-ssh-agent)), set again after the login shell's rc files so one that
   points it elsewhere does not undo it
