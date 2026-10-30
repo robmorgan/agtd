@@ -68,9 +68,11 @@ var paletteItems = []paletteItem{
 	{"s", "Switch session", overlaySwitcher},
 	{"t", "New session", overlayNewSession},
 	{"i", "Session details", overlayDetails},
-	{"d", "Detach", overlayDetachAction},
 	{"x", "Stop session", overlayStopConfirm},
 }
+
+// detachItem is always the last command, after any offered with it.
+var detachItem = paletteItem{"d", "Detach", overlayDetachAction}
 
 // submitSwitchItem comes first, so that Ctrl-Y, Enter is it, when
 // [attach] submit_and_switch offers it.
@@ -87,6 +89,7 @@ func (o *overlay) filteredPalette() []paletteItem {
 	if o.size != nil && !o.size.Owner {
 		items = append(slices.Clip(items), takeSizeItem)
 	}
+	items = append(slices.Clip(items), detachItem)
 	var out []paletteItem
 	for _, item := range items {
 		if matchesQuery(item.hint+" "+item.title, o.paletteQuery) {
@@ -136,6 +139,12 @@ type overlay struct {
 	backdrop, clear bool
 	// submitSwitch offers Submit and switch ([attach] submit_and_switch).
 	submitSwitch bool
+	// askScreen asks the attachment to learn which screen the program is
+	// on, for Session details: under the raw output nothing on the client
+	// knows, so the worker is asked (AttachField) and screenAnswer adds
+	// the line when it answers. screenWanted is whether the details shown
+	// still lack it.
+	askScreen, screenWanted bool
 }
 
 func newOverlay(c *client, id string, size *protocol.SizeOwnership, painter *screen.Painter) *overlay {
@@ -303,6 +312,12 @@ func (o *overlay) run(mode overlayMode) error {
 		if o.size != nil {
 			o.detailText += "\n" + sizeDetails(o.size)
 		}
+		switch {
+		case o.painter == nil:
+			o.askScreen, o.screenWanted = true, true
+		case o.painter.Painted():
+			o.detailText += "\n" + screenDetails(o.painter.AltScreen())
+		}
 		o.detailScroll = 0
 	}
 	o.mode = mode
@@ -409,6 +424,24 @@ func sessionDetails(s *session.Record, now time.Time) string {
 		text += fmt.Sprintf("\nattention  %s: %s", escapeControls(string(s.Attention)), row.summary)
 	}
 	return text
+}
+
+// screenAnswer adds the screen the program is on to Session details, when
+// they are still shown.
+func (o *overlay) screenAnswer(alternate bool) {
+	if o.mode == overlayDetails && o.screenWanted {
+		o.detailText += "\n" + screenDetails(alternate)
+		o.screenWanted = false
+	}
+}
+
+// screenDetails says which screen the program is on: a fullscreen program
+// (Claude Code's fullscreen mode, vim) has the alternate screen up.
+func screenDetails(alternate bool) string {
+	if alternate {
+		return "screen     alternate (fullscreen)"
+	}
+	return "screen     primary"
 }
 
 // sizeDetails says who owns the session's size.

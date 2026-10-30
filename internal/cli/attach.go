@@ -211,6 +211,8 @@ type attachStream struct {
 	announcesLeave bool
 	// composes: the worker takes AttachCompose (CapAttachCompose).
 	composes bool
+	// fields: the worker answers AttachField (CapAttachField).
+	fields bool
 	// sendErr is the error of the last write to the stream that failed, so
 	// that only an attachment that ended on it is explained from the stream
 	// (explainFailure). Only the attachment's goroutine sends.
@@ -443,6 +445,7 @@ func (c *client) connectAttach(ctx context.Context, id string, prev attachIdenti
 		a := startAttachStream(s, r)
 		a.announcesLeave = slices.Contains(resp.Attached.Features, protocol.CapAttachSizeOwner)
 		a.composes = slices.Contains(resp.Attached.Features, protocol.CapAttachCompose)
+		a.fields = slices.Contains(resp.Attached.Features, protocol.CapAttachField)
 		return a, resp.Attached, nil, nil
 	case resp.SessionEnded != nil:
 		s.Close()
@@ -689,6 +692,11 @@ func (c *client) runAttachment(id string, stream *attachStream, keys <-chan []by
 		}
 	}()
 	redraw := false
+	// screenAsks counts the field requests the overlay's Session details
+	// sent to learn which screen the program is on (raw output only; a
+	// painter knows). The echo, when there is one, asks too, and gets
+	// every answer as before; without one, these are the only asks.
+	screenAsks := 0
 	// sendInput writes typed bytes to the stream, through the echo when
 	// there is one (which may hold them back for a moment, and draw).
 	sendInput := func(data []byte) error {
@@ -753,6 +761,14 @@ func (c *client) runAttachment(id string, stream *attachStream, keys <-chan []by
 				}
 				if closed {
 					ov = nil
+				} else if ov.askScreen {
+					ov.askScreen = false
+					if stream.fields {
+						if err := stream.send(&protocol.Request{AttachField: protocol.Empty}); err != nil {
+							return attachResult{}, err
+						}
+						screenAsks++
+					}
 				}
 				continue
 			}
@@ -823,6 +839,16 @@ func (c *client) runAttachment(id string, stream *attachStream, keys <-chan []by
 				return attachResult{}, err
 			}
 		case f := <-stream.frames:
+			if f.resp != nil && f.resp.Field != nil && screenAsks > 0 {
+				screenAsks--
+				if ov != nil {
+					ov.screenAnswer(f.resp.Field.Alternate)
+					redraw = true
+				}
+				if ech == nil {
+					continue
+				}
+			}
 			res, done, err := handleFrame(f, ov != nil, size, ech, stream, painter)
 			if err != nil || done {
 				return res, err
