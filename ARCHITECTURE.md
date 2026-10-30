@@ -1179,7 +1179,10 @@ its keys are unconfirmed. Under `attach-frames` the worker sends the screen as f
 (`internal/worker/frames.go`): the rows that changed since the last frame, as the VT bytes
 libghostty's formatter writes for each row, with the cursor, the terminal state the client must
 mirror (modes and tab stops, keyboard state, changed colours, the cursor's shape), bells and
-notifications, and, when asked, the input field. The client paints each row by absolute position
+notifications, the program's last clipboard write since the previous frame (as OSC 52, text up
+to 75 KB; libghostty normalizes the write, the client terminal's own policy decides whether it
+lands, and a write while nothing is attached is not replayed later), and, when asked, the input
+field. The client paints each row by absolute position
 (`internal/screen`, pure Go) inside synchronized output and acknowledges the frame; the worker
 builds the next one when the acknowledgement has arrived and the screen has changed since, at
 least 4 ms after the last, on the owner goroutine at a sequence boundary. At most two frames are

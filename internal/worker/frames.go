@@ -118,6 +118,9 @@ type frameState struct {
 	full bool
 	// effects are bells and notifications since the last frame.
 	effects []byte
+	// clipboard is the last clipboard write since the last frame, as
+	// OSC 52: only the latest is kept, so a slow client holds one.
+	clipboard []byte
 	// askField makes the next frame carry the field (AttachField).
 	askField bool
 	// record is whether the client asked for the transcript record
@@ -188,9 +191,17 @@ func (s *ownerState) noteFrameOutput() {
 	}
 }
 
-// frameEffects queues the bells and notifications of a feed for frame
-// clients to relay, as the raw output would have carried them.
+// frameEffects queues the bells, notifications and clipboard write of a
+// feed for frame clients to relay, as the raw output would have carried
+// them.
 func (s *ownerState) frameEffects(fx terminalEffects) {
+	if fx.clipboard != nil {
+		for _, a := range s.attachments {
+			if a.frames != nil {
+				a.frames.clipboard = fx.clipboard
+			}
+		}
+	}
 	if fx.bells == 0 && len(fx.notifications) == 0 {
 		return
 	}
@@ -337,7 +348,8 @@ func (s *ownerState) buildFrame(a *ownerAttachment, now time.Time) (*protocol.Fr
 		return nil, err
 	}
 	st.shape = f.CursorShape
-	f.Effects, st.effects = st.effects, nil
+	f.Effects, st.effects = append(st.effects, st.clipboard...), nil
+	st.clipboard = nil
 	if st.record {
 		f.Record = s.frameRecord(st)
 	}

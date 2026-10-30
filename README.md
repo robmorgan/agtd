@@ -559,7 +559,9 @@ back through them natively; `agt history` has the rest. From a remote daemon the
 arrives as frames rather than the raw output: the worker sends the rows that changed, the client
 paints them in place and acknowledges, and a slow link gets fewer, fresher frames instead of
 dropped output and a flashing resync; rows that scroll off still land in your terminal's own
-scrollback, and the local echo keeps the screen moving behind your typing. `[attach] mode`
+scrollback, and the local echo keeps the screen moving behind your typing. An agent that copies
+to the clipboard over OSC 52 (pi does on a devbox) still reaches your local clipboard, if your
+terminal allows programs to write it (Ghostty's `clipboard-write`). `[attach] mode`
 chooses: `auto` (frames from a remote daemon, the raw output locally), `frames` or `raw`.
 `[attach] scrollback_rows` in
 `config.toml` changes how many (`-1` for all of it, `0` for the screen only). When the client

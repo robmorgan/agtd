@@ -2,6 +2,7 @@ package worker
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	goruntime "runtime"
 	"strings"
@@ -169,6 +170,29 @@ func TestFramesReplayStreams(t *testing.T) {
 			}
 			t.Logf("%s: %d frames (%d full), %d row bytes for %d bytes of output", st.name, frames, full, sent, len(st.data))
 		})
+	}
+}
+
+// A program's clipboard write reaches frame clients as OSC 52, the last
+// one of those since the previous frame; one too large to relay, or a
+// clear, does not.
+func TestFramesCarryClipboardWrites(t *testing.T) {
+	r := newFrameRig(t, 80, 24)
+	r.frame()
+	r.feed("\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte("first")) + "\a")
+	r.feed("\a\x1b]52;p;" + base64.StdEncoding.EncodeToString([]byte("héllo")) + "\x1b\\")
+	want := "\a\x1b]52;p;" + base64.StdEncoding.EncodeToString([]byte("héllo")) + "\x1b\\"
+	if f := r.frame(); string(f.Effects) != want {
+		t.Fatalf("effects %q, want %q", f.Effects, want)
+	}
+	r.feed("x")
+	if f := r.frame(); len(f.Effects) != 0 {
+		t.Fatalf("clipboard write repeated: %q", f.Effects)
+	}
+	r.feed("\x1b]52;c;" + base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("a"), maxClipboardBytes+1)) + "\a")
+	r.feed("\x1b]52;c;\a")
+	if f := r.frame(); len(f.Effects) != 0 {
+		t.Fatalf("oversized write or clear relayed: %.80q", f.Effects)
 	}
 }
 
