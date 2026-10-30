@@ -1,7 +1,7 @@
 .PHONY: libghostty build agt agtd test test-cgocheck test-linux vet shellcheck dev-run install
 
 ZIG ?= zig
-VERSION ?= 0.2.0
+VERSION ?= 0.2.1
 BINDIR ?= $(or $(GOBIN),$(shell go env GOPATH)/bin)
 PKG_CONFIG_PATH := $(CURDIR)/.build/ghostty-out/share/pkgconfig
 export PKG_CONFIG_PATH
