@@ -330,6 +330,11 @@ func TestSnapshotRestores(t *testing.T) {
 		{"alternate screen (1047)", "primary\x1b[?1047h\x1b[2Jalt content"},
 		{"alternate screen (47)", "primary\x1b[?47halt content"},
 		{"alternate screen entered with two modes", "primary\x1b[?1047h\x1b[?47h alt"},
+		// Each mode is a flag of its own, and resetting any of them leaves
+		// the alternate screen, so the others stay set on the primary one.
+		{"alternate screen left with another mode (47)", "primary\x1b[?1047halt\x1b[?47l back"},
+		{"alternate screen left with another mode (1047)", "primary\x1b[?47h\x1b[?1049halt\x1b[?1047l back"},
+		{"alternate screen left with another mode (1049) in origin mode", "\x1b[5;20r\x1b[?47h\x1b[?1047halt\x1b[?6h\x1b[?1049l\x1b[3;3Hback"},
 		{"cursor shape under the alternate screen", "\x1b[6 q\x1b[?47h"},
 		{"cursor shapes of both screens", "\x1b[4 q\x1b[?1049h\x1b[2 q"},
 		{"cursor shape set on the alternate screen", "\x1b[?47h\x1b[6 q0"},
@@ -510,6 +515,14 @@ func TestSnapshotKnownLimits(t *testing.T) {
 			// alternate screen scrollback, and nothing a client is sent can.
 			name: "scrollback on the alternate screen", stream: "\x1b[?1047h0\x1b[22J0",
 			differs: []string{"ScrollbackRows", "Text", "Styled"},
+		},
+		{
+			// The cursor block recreates a pending wrap only in the last
+			// column; within left and right margins (DECSLRM) a wrap is
+			// pending at the right margin, and the cursor comes back there
+			// without it, so the next character overwrites the last one.
+			name: "pending wrap at a right margin", stream: "\x1b[?69h\x1b[;10s" + strings.Repeat("x", 10),
+			differs: []string{"PendingWrap"},
 		},
 		{
 			// The cursor saved with DECSC (or 1048) is not formatted.

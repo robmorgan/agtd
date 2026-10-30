@@ -462,7 +462,28 @@ func frameExtras(term *libghostty.Terminal) (prefix, keyboard []byte, err error)
 	}
 	prefix = bytes.Clone(modes[:len(modes)-len(base)])
 	keyboard = bytes.Clone(kb[len(base):])
+	if screen, err := term.ActiveScreen(); err == nil && screen == libghostty.ScreenPrimary {
+		prefix = dropAlternateModes(prefix)
+	}
 	return prefix, keyboard, nil
+}
+
+// alternateModes are the formatter's sequences for the alternate screen
+// modes when set.
+var alternateModes = [][]byte{[]byte("\x1b[?47h"), []byte("\x1b[?1047h"), []byte("\x1b[?1049h")}
+
+// dropAlternateModes leaves the alternate screen modes out of a prefix
+// formatted while the primary screen is active. The modes are separate
+// flags, and resetting any of them leaves the alternate screen, so a
+// program that entered with one and left with another (CSI ? 1047 h, then
+// CSI ? 47 l) leaves the first one set; mirrored, it would take the client
+// to the alternate screen. The client only needs the active screen: the
+// worker, not the client, answers the program's mode queries.
+func dropAlternateModes(prefix []byte) []byte {
+	for _, m := range alternateModes {
+		prefix = bytes.ReplaceAll(prefix, m, nil)
+	}
+	return prefix
 }
 
 // frameCursorShape is the DECSCUSR shape to mirror: bar or underline, with
