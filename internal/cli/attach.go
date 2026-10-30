@@ -492,6 +492,7 @@ func (c *client) attachOnce(id, uid string, titled *bool) (res attachResult, err
 		// the size on before agent requests stop finding it.
 		fwd.stop()
 	}()
+	c.attached = true
 	fwd = c.forwardAgent(id, attached)
 
 	writeOut(terminalTitleBytes(id + " - " + attachExitTitle))

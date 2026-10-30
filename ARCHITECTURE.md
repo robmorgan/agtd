@@ -531,6 +531,7 @@ features both listed. Today there is one protocol version (1), and these capabil
 | `attach-compose` | `SendInput.Compose` (written only when set, since the daemon forwards the request to the worker in the base encoding) and, on an attach stream, `AttachCompose`: a whole prompt, or Enter alone, encoded by the worker as the program's terminal modes ask for input (see "Composed input") |
 | `kill-expect-uid` | `KillSession.ExpectUID` appended after the token: the daemon refuses a stop or remove whose UID is not the session's current incarnation, so a remove confirmed in the inbox never deletes a newer session that reused the name |
 | `ssh-agent` | `ssh-agent` streams: `ForwardSSHAgent` and the messages on them. A worker lists it in its answer to `Hello` only when its agent was started with the worker's agent socket as `SSH_AUTH_SOCK` (see "SSH Agent Forwarding") |
+| `workspace-clone` | `CreateSession.Clone` (a presence byte, then `Workspace`, `URL` and `Path`) appended after `Colors`: a session that clones a repository with the client's forwarded agent (see "Cloning a workspace") |
 
 The protocol grows without breaking older peers this way: a new message kind, or a field appended
 to the end of an existing message or struct (a session record, even inside a list), comes with a
@@ -842,8 +843,34 @@ daemon's filesystem; with `--workspace` it sends the name and the relative path 
 Workspaces are daemon state, not configuration: they live in the `workspaces` table of
 `state.db` and clients add, list and remove them over the protocol, so a remote client can manage
 them without touching the host's files. A session stores the workspace name next to the cwd
-resolved from it at creation. Workspaces are addressing only: agtd does not clone, create or
-sync them.
+resolved from it at creation. Workspaces are addressing only: agtd does not sync them, and
+creates one only by cloning it at a client's request.
+
+### Cloning a workspace
+
+`agt workspace add NAME [PATH] --clone URL` clones a repository on the daemon's machine with the
+user's own keys and registers it. The clone is a session (`CreateSession.Clone`, under
+`workspace-clone`), not something the daemon does by itself. That gives git a PTY for ssh's
+first host key question and gives `SSH_AUTH_SOCK` the forwarder of the attachment `agt` opens at
+once, as `agt new` does. It keeps a slow clone off the control stream and reuses the
+request-token replay, history and events that sessions have. The daemon accepts SSH URLs only
+(`ssh://` or scp-like, nothing git or ssh could take for an option), a valid and free workspace
+name, and a `PATH` (`~/` expanded on its side) that does not exist yet. It refuses when
+`[ssh_agent] session_socket = false`. It then runs `git clone -- URL PATH` from its user's home
+through the login shell, in a session named `clone-NAME` (numbered when taken), with no base
+commit. The worker runs it with `--ssh-agent-require-forwarder` (see "SSH Agent Forwarding"), so
+the clone gets keys only from a client's forwarder, never the agent agtd inherited. A clone that
+ends before its worker is seen ready (git failed at once) still counts as created: its end is its
+result.
+
+The client side decides whether forwarding works before anything starts. `agt` refuses unless
+`[ssh_agent] forward` is set and sound and its agent answers with a key the policy offers,
+through the agtd hop for a remote daemon, which is the check that decides whether it would open a
+forwarder. It also refuses a daemon without `workspace-clone`, since an older one would drop the
+field and start an agent. It then attaches, and on exit 0 it registers the workspace with
+`AddWorkspace`. The daemon keeps no pending registration, so a detach mid-clone leaves that to
+the user, and `agt` prints the command. A failed clone's error names its history, and when the
+clone ended before the attach could show it, `agt` prints the history's last lines.
 
 For each session there are three kinds of state:
 
@@ -1279,6 +1306,12 @@ first message, to
    path at a session's socket;
 4. else no agent: an empty identities answer, and `SSH_AGENT_FAILURE` to anything else, so ssh
    carries on with its own key files.
+
+A session that requires a forwarder (a clone, `Args.RequireForwarder`) skips step 3, and fails
+to start rather than fall back if its socket cannot be bound. Until 30 seconds after its start, a
+connection with no forwarder to go to waits for one instead of reaching step 4, which covers the
+moment between the session's creation and the client's attach and forwarder. Its gaps are
+recorded as `ssh_agent_unavailable` even before anyone has forwarded.
 
 So with the socket on, a session always has an agent at `SSH_AUTH_SOCK`, one that may hold no
 keys: `ssh-add -l` exits 1 (no identities) where it used to exit 2 (no agent), and a shell setup

@@ -444,7 +444,24 @@ agt workspace rm mono
 Workspaces are stored by the daemon in `state.db`, so they take effect immediately and are
 managed entirely from the CLI. A quoted `~/` path is expanded by the daemon against its own
 user's home; other paths are resolved by the CLI, which today always shares the daemon's
-filesystem. The directory must exist: `agtd` does not clone, create, or sync workspaces.
+filesystem. The directory must exist, unless `--clone` clones it first (below); `agtd` does not
+sync workspaces.
+
+A repository the daemon's machine does not have yet can be cloned into a workspace in one step,
+with your own SSH keys through [agent forwarding](#forwarding-your-ssh-agent):
+
+```sh
+agt --host devbox workspace add api --clone git@github.com:org/api.git     # into ~/src/api
+agt --host devbox workspace add api --clone git@github.com:org/api.git ~/work/api
+agt new -w api devbox/auth-refactor
+```
+
+The clone runs as a short session, `clone-api`, that `agt` attaches to, so git's progress and a
+first host key question show up in your terminal; once git succeeds the workspace is added.
+`--clone` takes SSH URLs only (`user@host:path` or `ssh://...`), needs `[ssh_agent] forward = true`
+and an agent holding a key, and refuses to start without them: the clone uses your forwarded agent
+and never the one the daemon inherited. Detaching leaves the clone running and prints the
+`agt workspace add` to run once it has finished.
 
 With `--workspace`, `--cwd` is relative to the workspace root and may not leave it. A session
 records the workspace it was started in (`agt status` shows it); removing or re-adding a
@@ -694,6 +711,7 @@ Now any command can run on the devbox, with `--host` (or `-H`) or a `host/sessio
 ```sh
 agt new --cwd ~/repo devbox/auth-refactor             # a path on the devbox (absolute or ~/...)
 agt --host devbox workspace add mono ~/src/mono       # name a directory on the devbox
+agt --host devbox workspace add api --clone git@github.com:org/api.git   # or clone one there
 agt new -w mono devbox/auth-tests                     # and start sessions in it
 agt --host devbox ls
 agt attach devbox/auth-refactor

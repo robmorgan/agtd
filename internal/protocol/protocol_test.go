@@ -380,6 +380,44 @@ func TestInvalidUTF8StringsAreRejected(t *testing.T) {
 	}
 }
 
+// A clone rides at the end of CreateSession, under workspace-clone; without
+// the capability the frame is the one older peers know.
+func TestWorkspaceCloneFrames(t *testing.T) {
+	create := &Request{CreateSession: &CreateSession{Token: "t", Clone: &CloneWorkspace{Workspace: "api", URL: "g:r", Path: "~/a"}}}
+	f := NegotiateFeatures([]string{CapRequestTokens, CapWorkspaceClone}, []string{CapRequestTokens, CapWorkspaceClone})
+	var buf bytes.Buffer
+	if err := WriteRequestWith(&buf, f, create); err != nil {
+		t.Fatal(err)
+	}
+	want := []byte{
+		0x50, 0x44, 0x47, 0x41, 0x01, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x26, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, // cwd
+		0x00,                   // no name
+		0x00, 0x00, 0x00, 0x00, // agent
+		0x00, 0x00, // no model, no workspace
+		0x01, 0x00, 0x00, 0x00, 0x74, // token
+		0x01,                                     // clone present
+		0x03, 0x00, 0x00, 0x00, 0x61, 0x70, 0x69, // "api"
+		0x03, 0x00, 0x00, 0x00, 0x67, 0x3a, 0x72, // "g:r"
+		0x03, 0x00, 0x00, 0x00, 0x7e, 0x2f, 0x61, // "~/a"
+	}
+	if !bytes.Equal(buf.Bytes(), want) {
+		t.Fatalf("clone encoding changed\n got % x\nwant % x", buf.Bytes(), want)
+	}
+	if got, err := ReadRequestWith(bytes.NewReader(want), f); err != nil || !reflect.DeepEqual(got, create) {
+		t.Fatalf("clone decode = %#v, %v", got, err)
+	}
+	// An older daemon never sees the clone.
+	buf.Reset()
+	if err := WriteRequest(&buf, create); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ReadRequest(bytes.NewReader(buf.Bytes())); err != nil || got.CreateSession.Clone != nil {
+		t.Fatalf("create without the capability = %#v, %v", got, err)
+	}
+}
+
 // The client terminal's colours ride in CreateSession (under the control
 // stream's terminal-colors) and in AttachSession (as an attach feature);
 // without the capability the frames are the ones older peers know.
@@ -392,10 +430,11 @@ func TestTerminalColorsFrames(t *testing.T) {
 	}
 	want := []byte{
 		0x50, 0x44, 0x47, 0x41, 0x01, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0x20, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x2f, 0x77, 0x00, 0x05,
+		0x21, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x2f, 0x77, 0x00, 0x05,
 		0x00, 0x00, 0x00, 0x63, 0x6f, 0x64, 0x65, 0x78, 0x00, 0x00, 0x03, 0x00,
 		0x00, 0x00, 0x74, 0x6f, 0x6b, // token
 		0x01, 0xdd, 0xdd, 0xdd, 0x1e, 0x1e, 0x2e, // colours: present, fg, bg
+		0x00, // no clone (workspace-clone)
 	}
 	if !bytes.Equal(buf.Bytes(), want) {
 		t.Fatalf("create encoding changed\n got % x\nwant % x", buf.Bytes(), want)
