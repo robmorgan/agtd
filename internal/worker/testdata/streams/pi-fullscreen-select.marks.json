@@ -1,0 +1,22 @@
+{
+  "edge-cleared": 268486,
+  "edge-held": 257406,
+  "edge-released": 263472,
+  "idle": 4451,
+  "learn-cleared": 32946,
+  "learn-drag-1": 30276,
+  "learn-drag-2": 30510,
+  "learn-drag-3": 31102,
+  "learn-drag-4": 31673,
+  "learn-pressed": 30054,
+  "learn-released": 32098,
+  "select-cleared": 36532,
+  "select-drag-1": 33209,
+  "select-drag-2": 34147,
+  "select-drag-3": 34688,
+  "select-drag-4": 35598,
+  "select-pressed": 32975,
+  "select-released": 35994,
+  "shell-1": 18146,
+  "shell-2": 30025
+}

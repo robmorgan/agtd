@@ -142,8 +142,15 @@ func (p *Painter) SetClock(now func() time.Time) { p.clock = now }
 // PredictStats returns the wheel prediction's counts.
 func (p *Painter) PredictStats() PredictStats { return p.pr.stats }
 
-// PredictDue is when PredictExpire has work, zero for never.
-func (p *Painter) PredictDue() time.Time { return p.pr.settleBy }
+// PredictDue is when PredictExpire has work, zero for never: the wheel's
+// guess or the selection's (select.go).
+func (p *Painter) PredictDue() time.Time {
+	due := p.pr.settleBy
+	if s := p.sel.settleBy; !s.IsZero() && (due.IsZero() || s.Before(due)) {
+		due = s
+	}
+	return due
+}
 
 func (p *Painter) now() time.Time {
 	if p.clock != nil {
@@ -171,8 +178,14 @@ func (p *Painter) Wheel(data []byte) []byte {
 
 // PredictExpire takes back a guess the agent has not answered in time
 // (see predictSettle and predictWait), and judges a gesture that drew
-// nothing. It returns what to write to the terminal.
+// nothing; the same for a selection's guess. It returns what to write to
+// the terminal.
 func (p *Painter) PredictExpire() []byte {
+	return append(p.wheelExpire(), p.selectExpire()...)
+}
+
+// wheelExpire is PredictExpire for the wheel.
+func (p *Painter) wheelExpire() []byte {
 	pr := &p.pr
 	if pr.settleBy.IsZero() || p.now().Before(pr.settleBy) {
 		return nil

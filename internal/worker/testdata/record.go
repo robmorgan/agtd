@@ -254,6 +254,35 @@ func scenarios() []scenario {
 			),
 		},
 		{
+			// Claude Code's own mouse selection on the alternate screen:
+			// the transcript filled from bash mode, then the left button
+			// pressed, dragged and released (SGR reports), twice, and a
+			// drag held at the top edge. Nothing is sent to the model.
+			name:  "claude-select",
+			argv:  []string{"claude"},
+			env:   userEnv(),
+			setup: setupEmpty,
+			steps: append(append(append(append([]step{}, scrollStart...), scrollShellSteps[:8]...), selectSteps...),
+				step{send: "\x03", pause: 300 * time.Millisecond},
+				step{send: "\x03", pause: 2 * time.Second},
+			),
+		},
+		{
+			// pi's own mouse selection in its fullscreen mode, the same
+			// way, offline with an empty config directory as
+			// pi-fullscreen-field.
+			name: "pi-fullscreen-select",
+			argv: []string{"pi", "--tui-mode", "fullscreen", "--offline", "--no-session",
+				"--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files"},
+			env:   append(userEnv(), "PI_CODING_AGENT_DIR="+filepath.Join(workDir, ".pi-agent")),
+			setup: setupEmpty,
+			steps: append(append(append([]step{{pause: 6 * time.Second, mark: "idle"}}, scrollShellSteps[:8]...), selectSteps...),
+				step{send: "\x03", pause: 500 * time.Millisecond},
+				step{send: "\x03", pause: 500 * time.Millisecond},
+				step{send: "\x04", pause: 2 * time.Second},
+			),
+		},
+		{
 			// Codex's input field, the same way.
 			name:  "codex-field",
 			argv:  []string{"codex", "-c", "check_for_update_on_startup=false"},
@@ -376,6 +405,42 @@ var scrollShellSteps = func() []step {
 			step{want: fmt.Sprintf("shell row %03d", last), pause: 2 * time.Second, mark: fmt.Sprintf("shell-%d", b+1)})
 	}
 	return steps
+}()
+
+// Mouse reports for the left button at a 1-based column and row (SGR):
+// a press, motion with the button held, a release.
+func mousePress(x, y int) string   { return fmt.Sprintf("\x1b[<0;%d;%dM", x, y) }
+func mouseDrag(x, y int) string    { return fmt.Sprintf("\x1b[<32;%d;%dM", x, y) }
+func mouseRelease(x, y int) string { return fmt.Sprintf("\x1b[<0;%d;%dm", x, y) }
+
+// selectSteps select over the transcript twice, each gesture marked after
+// every report: within a row, down across rows and back left, then
+// (select-*) down, back up short of where it was, and above the press;
+// a click away clears each. Then a drag held at the top edge, where the
+// agent scrolls.
+var selectSteps = func() []step {
+	p := 400 * time.Millisecond
+	click := mousePress(30, 20) + mouseRelease(30, 20)
+	return []step{
+		{send: mousePress(10, 12), pause: p, mark: "learn-pressed"},
+		{send: mouseDrag(14, 12), pause: p, mark: "learn-drag-1"},
+		{send: mouseDrag(25, 12), pause: p, mark: "learn-drag-2"},
+		{send: mouseDrag(25, 14), pause: p, mark: "learn-drag-3"},
+		{send: mouseDrag(5, 16), pause: p, mark: "learn-drag-4"},
+		{send: mouseRelease(5, 16), pause: 1500 * time.Millisecond, mark: "learn-released"},
+		{send: click, pause: time.Second, mark: "learn-cleared"},
+		{send: mousePress(12, 13), pause: p, mark: "select-pressed"},
+		{send: mouseDrag(30, 13), pause: p, mark: "select-drag-1"},
+		{send: mouseDrag(8, 17), pause: p, mark: "select-drag-2"},
+		{send: mouseDrag(40, 15), pause: p, mark: "select-drag-3"},
+		{send: mouseDrag(20, 11), pause: p, mark: "select-drag-4"},
+		{send: mouseRelease(20, 11), pause: 1500 * time.Millisecond, mark: "select-released"},
+		{send: click, pause: time.Second, mark: "select-cleared"},
+		{send: mousePress(10, 12), pause: p},
+		{send: mouseDrag(10, 1), pause: 1500 * time.Millisecond, mark: "edge-held"},
+		{send: mouseRelease(10, 1), pause: time.Second, mark: "edge-released"},
+		{send: click, pause: time.Second, mark: "edge-cleared"},
+	}
 }()
 
 // scrollPrompt asks the model for 200 rows of known text.

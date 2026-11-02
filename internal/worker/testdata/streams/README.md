@@ -20,9 +20,11 @@ benchmarks.
 | `claude-scroll-stream.vt.gz` | Claude Code 2.1 | Not recorded yet. The same transcript, then one prompt whose answer streams 200 known rows, with the wheel used while it streams. It uses the recording user's account, so record it only with their consent. |
 | `codex-field.vt.gz` | Codex 0.160 | The same. |
 | `pi-field.vt.gz` | pi 0.72 | The same; pi draws on the primary screen and paints its own cursor. |
+| `claude-select.vt.gz` | Claude Code 2.1 | Its own mouse selection on the alternate screen (any-event SGR tracking): the transcript filled from bash mode ("shell row 001" to "060"), then the left button pressed, dragged and released twice (within a row, down across rows, back up short of where it was, above the press), each cleared with a click, and a drag held at the top edge, where it scrolls. Claude Code copies on release with OSC 52. Nothing is sent to the model. `TestFramesPredictSelection` replays it. |
+| `pi-fullscreen-select.vt.gz` | pi 1.4, `--tui-mode fullscreen` | The same, offline with an empty config directory as `pi-fullscreen-field`. |
 | `pi-fullscreen-field.vt.gz` | pi 0.99, `--tui-mode fullscreen` | The same, on the alternate screen with SGR mouse reporting and focus events. pi runs offline with an empty config directory (`PI_CODING_AGENT_DIR`) and no extensions, skills or context files, so no login, setup or changelog shows. |
 
-The `*-field` and `claude-scroll*` streams come with `NAME.marks.json`: the byte offset in the stream at which
+The `*-field`, `*-select` and `claude-scroll*` streams come with `NAME.marks.json`: the byte offset in the stream at which
 each scripted state (for the field streams `idle`, `typed`, `newline`, `cleared`, `pasted`,
 `longword`) was on screen.
 `TestFieldFixtures` replays a stream to each mark and checks what the field detector reads off

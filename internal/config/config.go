@@ -70,6 +70,11 @@ type AttachConfig struct {
 	// of an agent on the alternate screen at once, and lets the agent's
 	// frames correct it, with or without AltScrollback. Unset means on.
 	PredictWheel *bool `toml:"predict_wheel"`
+	// PredictSelection, under frames, draws the selection an agent that
+	// takes the mouse (Claude Code, pi in fullscreen) makes as the left
+	// button is dragged at once, and lets the agent's frames correct it.
+	// Unset means on.
+	PredictSelection *bool `toml:"predict_selection"`
 	// SubmitAndSwitch offers Submit and switch first in the Ctrl-Y
 	// palette (so Ctrl-Y, Enter is it). Hidden unless set.
 	SubmitAndSwitch bool `toml:"submit_and_switch"`
@@ -77,6 +82,11 @@ type AttachConfig struct {
 
 // WheelPredicted is PredictWheel with its default applied.
 func (a AttachConfig) WheelPredicted() bool { return a.PredictWheel == nil || *a.PredictWheel }
+
+// SelectionPredicted is PredictSelection with its default applied.
+func (a AttachConfig) SelectionPredicted() bool {
+	return a.PredictSelection == nil || *a.PredictSelection
+}
 
 // AttachMode is Mode with its default applied.
 func (a AttachConfig) AttachMode() string {
@@ -323,6 +333,10 @@ alt_scrollback = false
 # screen scrolls it at once, and the agent's own screen corrects the guess
 # when it arrives.
 #predict_wheel = true
+# Under frames, dragging the mouse over an agent that takes it (Claude
+# Code, pi in fullscreen) draws its selection at once, and the agent's own
+# screen corrects the guess when it arrives.
+#predict_selection = true
 # Offer Submit and switch in the Ctrl-Y palette, first (so Ctrl-Y, Enter):
 # Enter goes to the agent and you move to the session that needs attention.
 #submit_and_switch = false

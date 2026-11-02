@@ -482,6 +482,8 @@ scrollback_rows = 1000
 # The wheel over a fullscreen agent's transcript (remote, under frames) is
 # drawn at once and corrected by the agent's screen; false waits for it.
 #predict_wheel = true
+# So is the selection a mouse drag makes in an agent that takes the mouse.
+#predict_selection = true
 # A prototype: keep the terminal on its primary screen and push the
 # transcript rows a fullscreen agent scrolls away into its scrollback.
 #alt_scrollback = false
@@ -587,7 +589,11 @@ trip late. Mouse input reaches the agent as it is, so in a fullscreen agent
 (Claude Code, Codex, pi) the wheel scrolls its transcript while you type; from a remote daemon
 each wheel tick is drawn at once from the agent's transcript, which the daemon records while the
 agent runs, attached or not, and the agent's screen corrects the guess a round trip later
-(`[attach] predict_wheel`). Against an older daemon the transcript is only what scrolled past
+(`[attach] predict_wheel`). A drag with the left button selects in the agent itself (Claude Code, pi
+in fullscreen), and from a remote daemon the selection is drawn at once too, as the agent drew its
+last ones, with the agent's screen correcting it (`[attach] predict_selection`); the first drag
+after attaching teaches agt how the agent draws one, and at the top or bottom row, where the agent
+scrolls, it waits for the agent. Against an older daemon the transcript is only what scrolled past
 since you attached, and rows above it come at the round trip. The agent's rendering replaces the drawing as soon as it arrives; the one thing you may
 notice is that the screen behind the box stands still for about a round trip after you pause
 typing. ARCHITECTURE.md, "The Input Field And Local Echo", has the details.
