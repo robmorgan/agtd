@@ -300,6 +300,13 @@ func (s *Server) createSession(req *protocol.CreateSession) (*session.CreateResu
 			name = &trimmed
 		}
 	}
+	if req.Clone != nil {
+		l, err := s.cloneLaunch(req, name)
+		if err != nil {
+			return nil, err
+		}
+		return s.launchSession(req, l)
+	}
 	// A client that does not know this daemon's configuration (a remote
 	// `agt --host`) leaves the agent empty to get the daemon's default.
 	if req.Agent == "" {
@@ -314,17 +321,54 @@ func (s *Server) createSession(req *protocol.CreateSession) (*session.CreateResu
 		return nil, err
 	}
 
-	// What the agent produces is measured from the repository's HEAD now.
-	// The daemon only reads it; it never creates branches or worktrees.
-	base := probeBase(cwd)
+	launchArgs := append([]string(nil), agent.Args...)
+	if req.Model != nil && agent.Flag() != "" {
+		launchArgs = append(launchArgs, agent.Flag(), *req.Model)
+	}
+	return s.launchSession(req, launch{
+		name: name, agentName: req.Agent, model: req.Model, cwd: cwd, workspace: workspace,
+		// What the agent produces is measured from the repository's HEAD
+		// now. The daemon only reads it; it never creates branches or
+		// worktrees.
+		base:    probeBase(cwd),
+		command: agent.Command, args: launchArgs,
+		agentSocket: s.config.SSHAgent.SessionSocketEnabled(),
+		loginShell:  agent.LoginShellEnabled(),
+	})
+}
+
+// launch is what a new session runs, and how: an agent from config.toml, or
+// a clone (cloneLaunch).
+type launch struct {
+	name      *string
+	agentName string
+	model     *string
+	cwd       string
+	workspace *string
+	base      repo.Base
+	command   string
+	args      []string
+	// agentSocket gives the session its own SSH agent socket, and
+	// requireForwarder answers it only with a client's forwarder
+	// (worker.Args.RequireForwarder).
+	agentSocket, requireForwarder bool
+	loginShell                    bool
+	// endedIsStarted answers a session whose program ran and ended before
+	// its worker was seen ready as created, not failed (a clone).
+	endedIsStarted bool
+}
+
+// launchSession records a session for l and waits for its worker.
+func (s *Server) launchSession(req *protocol.CreateSession, l launch) (*session.CreateResult, error) {
 	uid := db.NewUID()
-	id, createdAt, replay, err := s.allocateSession(name, req.Agent, req.Model, cwd, workspace, base, uid, req.Token)
+	id, createdAt, replay, err := s.allocateSession(l.name, l.agentName, l.model, l.cwd, l.workspace, l.base, uid, req.Token)
 	if err != nil {
 		return nil, err
 	}
 	if replay != nil {
 		return s.awaitCreated(replay)
 	}
+	cwd := l.cwd
 	fail := func(err error) (*session.CreateResult, error) {
 		_ = s.db.MarkFailedIfActive(id, err.Error())
 		return nil, err
@@ -345,41 +389,70 @@ func (s *Server) createSession(req *protocol.CreateSession) (*session.CreateResu
 		"--cwd", cwd,
 		"--created-at", createdAt,
 		"--session-uid", uid,
-		"--agent-name", req.Agent,
-		"--command", agent.Command,
+		"--agent-name", l.agentName,
+		"--command", l.command,
 	}
-	if req.Model != nil {
-		args = append(args, "--model", *req.Model)
+	if l.model != nil {
+		args = append(args, "--model", *l.model)
 	}
 	if req.Colors != nil {
 		args = append(args, "--colors", req.Colors.String())
 	}
-	if s.config.SSHAgent.SessionSocketEnabled() {
+	if l.agentSocket {
 		args = append(args, "--ssh-agent-socket")
 	}
-	if agent.LoginShellEnabled() {
+	if l.requireForwarder {
+		args = append(args, "--ssh-agent-require-forwarder")
+	}
+	if l.loginShell {
 		args = append(args, "--login-shell")
 	}
-	launchArgs := append([]string(nil), agent.Args...)
-	if req.Model != nil && agent.Flag() != "" {
-		launchArgs = append(launchArgs, agent.Flag(), *req.Model)
-	}
-	for _, a := range launchArgs {
+	for _, a := range l.args {
 		args = append(args, "--arg", a)
 	}
 
+	// Events after this one are this incarnation's (ranSince).
+	lastEvent, err := s.db.LastEventID()
+	if err != nil {
+		return fail(err)
+	}
 	cmd, exited, err := s.spawnWorker(id, args)
 	if err != nil {
 		return fail(err)
 	}
 	err = s.waitWorkerReady(id, cmd, exited)
 	s.events.notify()
+	if err != nil && l.endedIsStarted && s.ranSince(id, lastEvent) {
+		// A clone that ended before its worker was seen ready (git failed
+		// at once) still ran: its end is its result, for the client to
+		// attach to and report, not a failure to start.
+		if rec, _ := s.db.GetSession(id); rec != nil && rec.UID == uid &&
+			(rec.Status == session.StatusExited || rec.Status == session.StatusFailed) {
+			return &session.CreateResult{SessionID: id, UID: uid, Cwd: cwd, Status: rec.Status, Mode: session.ModeExecute}, nil
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
 	return &session.CreateResult{
 		SessionID: id, UID: uid, Cwd: cwd, Status: session.StatusRunning, Mode: session.ModeExecute,
 	}, nil
+}
+
+// ranSince reports whether session id's program started (EventStarted)
+// after event after: its worker got as far as running it, though the
+// session may have ended since, which clears its pids.
+func (s *Server) ranSince(id string, after uint64) bool {
+	events, err := s.db.EventsAfter(after, id, 16)
+	if err != nil {
+		return false
+	}
+	for _, e := range events {
+		if e.Kind == session.EventStarted {
+			return true
+		}
+	}
+	return false
 }
 
 // awaitCreated answers a retried CreateSession with the session the first

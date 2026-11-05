@@ -375,30 +375,34 @@ func (a *app) commands() []*cobra.Command {
 _TIME. Following reconnects by itself and resumes after the last event shown.`}
 	cmds = append(cmds, annotate(events, "[OPTIONS] [SESSION_ID]", "[SESSION_ID]"))
 
+	var cloneURL string
+	addWorkspace := annotate(a.command("add NAME [PATH]", "Add a workspace, or clone one", workspaceAddArgs, func(args []string) error {
+		path := ""
+		if len(args) > 1 {
+			path = args[1]
+		}
+		if cloneURL != "" {
+			return a.cloneWorkspace(args[0], path, cloneURL)
+		}
+		if path == "" {
+			return usageError{errors.New("accepts 2 arg(s), received 1: PATH is needed unless --clone clones it")}
+		}
+		c, err := a.connect(nil, "", nil)
+		if err != nil {
+			return err
+		}
+		if path, err = c.workspacePath(path); err != nil {
+			return err
+		}
+		return c.addWorkspace(args[0], path)
+	}), "[OPTIONS] <NAME> [PATH]", "<NAME>\n[PATH]  The directory (default with --clone: ~/src/NAME)")
+	addWorkspace.Flags().StringVar(&cloneURL, "clone", "", "Clone this SSH URL to PATH first, through your forwarded SSH agent")
+	withValue(addWorkspace, "clone", "URL")
+
 	cmds = append(cmds, group("workspace", "Manage named working directories on the daemon's machine",
 		"Name directories on the daemon's machine, then start sessions in them\nwith `agt new --workspace NAME`.",
-		"Notes:\n  Paths are resolved by the daemon; `~/` is its user's home. The directory must\n  already exist: agtd does not clone, create, or sync workspaces.\n  Removing a workspace does not affect sessions already running in it.",
-		annotate(a.command("add NAME PATH", "Add a workspace", twoArgs, func(args []string) error {
-			c, err := a.connect(nil, "", nil)
-			if err != nil {
-				return err
-			}
-			path := args[1]
-			if host := c.remoteName(); host != "" {
-				path, err = remoteWorkspacePath(host, path)
-			} else {
-				path, err = workspacePath(path)
-			}
-			if err != nil {
-				return err
-			}
-			resp, err := c.call(&protocol.Request{AddWorkspace: &protocol.AddWorkspace{Name: args[0], Path: path}}, 0, func(r *protocol.Response) bool { return r.Workspace != nil })
-			if err != nil {
-				return err
-			}
-			fmt.Printf("added workspace %s at %s\n", resp.Workspace.Name, escapeControls(resp.Workspace.Path))
-			return nil
-		}), "<NAME> <PATH>", "<NAME>\n<PATH>"),
+		"Notes:\n  Paths are resolved by the daemon; `~/` is its user's home. The directory must\n  already exist, unless --clone clones it there first (default PATH: ~/src/NAME),\n  through your forwarded SSH agent: it needs [ssh_agent] forward = true and an\n  agent holding a key, and uses no other agent. agtd does not sync workspaces.\n  Removing a workspace does not affect sessions already running in it.",
+		addWorkspace,
 		visibleAlias(a.command("list", "List workspaces", noArgs, func([]string) error {
 			c, err := a.connect(nil, "", nil)
 			if err != nil {
@@ -874,6 +878,123 @@ func workspacePath(path string) (string, error) {
 		return path, nil
 	}
 	return resolveCwd(path)
+}
+
+// workspacePath is the path sent for a workspace on c's daemon: a remote
+// one as given, once checked, a local one as workspacePath makes it.
+func (c *client) workspacePath(path string) (string, error) {
+	if host := c.remoteName(); host != "" {
+		return remoteWorkspacePath(host, path)
+	}
+	return workspacePath(path)
+}
+
+// addWorkspace registers path as workspace name.
+func (c *client) addWorkspace(name, path string) error {
+	resp, err := c.call(&protocol.Request{AddWorkspace: &protocol.AddWorkspace{Name: name, Path: path}}, 0, func(r *protocol.Response) bool { return r.Workspace != nil })
+	if err != nil {
+		return err
+	}
+	fmt.Printf("added workspace %s at %s\n", resp.Workspace.Name, escapeControls(resp.Workspace.Path))
+	return nil
+}
+
+// cloneWorkspace clones url to path (default ~/src/NAME) on the daemon's
+// machine and registers it as workspace name: the daemon runs the clone as a
+// session (protocol.CloneWorkspace) whose only SSH agent is the one an
+// attachment forwards, so agt checks it has one to lend first, attaches as
+// `agt new` does (host key questions and progress show up here), and adds
+// the workspace once git has succeeded. A detach leaves the clone running
+// and says how to add the workspace after it.
+func (a *app) cloneWorkspace(name, path, url string) error {
+	if path == "" {
+		path = "~/src/" + name
+	}
+	c, err := a.connect(nil, "", nil)
+	if err != nil {
+		return err
+	}
+	switch {
+	case c.remoteName() != "":
+		path, err = remoteWorkspacePath(c.remoteName(), path)
+	case path != "~" && !strings.HasPrefix(path, "~/"):
+		// Made absolute here, like workspacePath, but it is yet to exist.
+		path, err = filepath.Abs(path)
+	}
+	if err != nil {
+		return err
+	}
+	if err := c.checkForwarding(); err != nil {
+		return fmt.Errorf("--clone uses only your forwarded SSH agent: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), c.requestTimeout())
+	cs, err := c.controlStream(ctx)
+	cancel()
+	if err != nil {
+		return err
+	}
+	if !cs.features.Has(protocol.CapWorkspaceClone) {
+		if host := c.remoteName(); host != "" {
+			return fmt.Errorf("agtd on %s is too old to clone; upgrade it there with `agtd upgrade`", host)
+		}
+		return fmt.Errorf("the local agtd is too old to clone; %s", upgradeHint)
+	}
+	req := &protocol.CreateSession{Clone: &protocol.CloneWorkspace{Workspace: name, URL: url, Path: path}, Colors: terminalColors()}
+	resp, err := c.call(&protocol.Request{CreateSession: req}, 0, func(r *protocol.Response) bool { return r.CreateSession != nil })
+	if err != nil {
+		return err
+	}
+	id := resp.CreateSession.SessionID
+	addr := id
+	add := fmt.Sprintf("agt workspace add %s %s", name, path)
+	if host := c.remoteName(); host != "" {
+		addr = host + "/" + id
+		add = fmt.Sprintf("agt --host %s workspace add %s %s", host, name, path)
+	}
+	ended, err := c.attachLoop(id, resp.CreateSession.UID)
+	if err != nil {
+		return err
+	}
+	switch {
+	case ended == nil || ended.SessionID != id:
+		// Detached, perhaps after switching to another session.
+		fmt.Printf("the clone carries on in session %s; once it has finished, add the workspace with `%s`\n", escapeControls(addr), escapeControls(add))
+		return nil
+	case ended.Status != session.StatusExited || ended.ExitCode == nil || *ended.ExitCode != 0:
+		if !c.attached {
+			// A clone that fails at once (a mistyped host) can end
+			// before the attach shows it: what it printed comes from
+			// its history.
+			for _, line := range c.historyTail(id, cloneFailureLines) {
+				fmt.Println(escapeControls(line))
+			}
+		}
+		return fmt.Errorf("%s; its output is in `agt history %s`", formatSessionEnd(ended), escapeControls(addr))
+	}
+	return c.addWorkspace(name, path)
+}
+
+// cloneFailureLines is how much of a failed clone's output agt shows when
+// the clone ended before the attach could show it.
+const cloneFailureLines = 20
+
+// historyTail is the last n non-blank lines of an ended session's history,
+// nil when there is none (the session runs, or printed nothing).
+func (c *client) historyTail(id string, n int) []string {
+	resp, err := c.call(&protocol.Request{GetHistory: &protocol.GetHistory{SessionID: id}}, c.requestTimeout(), func(r *protocol.Response) bool { return r.History != nil })
+	if err != nil {
+		return nil
+	}
+	var lines []string
+	for _, line := range strings.Split(resp.History.Data, "\n") {
+		if line = strings.TrimRight(line, " \r"); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return lines
 }
 
 // remoteWorkspacePath checks a remote workspace's path, which is on the

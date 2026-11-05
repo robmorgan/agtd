@@ -328,3 +328,116 @@ func TestSSHAgentForwardingLocally(t *testing.T) {
 	tm.wait()
 	e.mustRun("agt", "send-input", "one", "exit\r")
 }
+
+// stubGit puts a git first on PATH (of agt, and so of the daemons the test
+// starts) that clones by listing the agent's keys, failing with none, and
+// making PATH/.git: `git clone -- URL PATH`. A URL with "missing" in it
+// fails as a repository that is not there.
+func stubGit(t *testing.T) {
+	t.Helper()
+	bin := t.TempDir()
+	stub := "#!/bin/sh\ncase \"$3\" in *missing*) echo 'fatal: repository not found'; exit 128;; esac\nkeys=$(ssh-add -l) || { echo clone-keys:none; exit 128; }\necho \"$keys\" | sed 's/^/clone-keys:/'\nmkdir -p \"$4/.git\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// workspace add --clone clones with the forwarded agent alone, even with
+// another agent in the daemon's environment, then registers the clone, on
+// this machine and over QUIC through the agtd hop; agt new runs in it.
+func TestWorkspaceClone(t *testing.T) {
+	requireOpenSSH(t)
+	stubGit(t)
+	a := serveTestAgent(t)
+	// The daemons inherit this agent; a clone must not use it.
+	decoy := serveTestAgent(t)
+	t.Setenv("SSH_AUTH_SOCK", decoy.path)
+	e := newEnv(t, forwardingConfig(a.path))
+	home := filepath.Join(e.root, "home")
+	if err := os.Mkdir(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+
+	tm := e.start("workspace", "add", "api", "--clone", "git@example.com:org/api.git")
+	m := tm.expect(0, "attached to clone-api")
+	m = tm.expect(m, "clone-keys:256 "+a.fp)
+	tm.expect(m, "added workspace api at "+filepath.Join(home, "src", "api"))
+	tm.wait()
+	if out := tm.output(); strings.Contains(out, decoy.fp) {
+		t.Fatalf("the clone used the daemon's own agent:\n%s", out)
+	}
+	if out := e.mustRun("agt", "workspace", "ls"); !strings.Contains(out, "api\t"+filepath.Join(home, "src", "api")) {
+		t.Fatalf("workspaces:\n%s", out)
+	}
+	// A clone git fails registers nothing, and says where its output is.
+	tm = e.start("workspace", "add", "gone", "--clone", "git@example.com:org/missing.git")
+	m = tm.expect(0, "fatal: repository not found")
+	tm.expect(m, "session clone-gone failed: agent exited with code 128; its output is in `agt history clone-gone`")
+	if err := tm.waitErr(); err == nil {
+		t.Fatal("a failed clone exited 0")
+	}
+	if out := e.mustRun("agt", "workspace", "ls"); strings.Contains(out, "gone") {
+		t.Fatalf("a failed clone was registered:\n%s", out)
+	}
+	if out, err := e.run("agt", "workspace", "add", "api2", "--clone", "git@example.com:org/api.git", "~/src/api"); err == nil || !strings.Contains(out, "already exists") {
+		t.Fatalf("clone onto an existing path: %v\n%s", err, out)
+	}
+
+	r := e.remoteEnv("dev")
+	tm = e.start("--host", "dev", "workspace", "add", "web", "--clone", "ssh://git@example.com/org/web.git", "~/web")
+	m = tm.expect(0, "attached to clone-web")
+	m = tm.expect(m, "clone-keys:256 "+a.fp)
+	tm.expect(m, "added workspace web at "+filepath.Join(home, "web"))
+	tm.wait()
+	if a.hops.Load() == 0 {
+		t.Fatal("a remote clone's agent connections were not bound to the agtd hop")
+	}
+	if out := r.mustRun("agt", "workspace", "ls"); !strings.Contains(out, "web\t"+filepath.Join(home, "web")) {
+		t.Fatalf("dev's workspaces:\n%s", out)
+	}
+	tm = e.start("--host", "dev", "new", "-w", "web", "in-web")
+	m = tm.expect(0, "attached to in-web")
+	tm.write("pwd\r")
+	m = tm.expect(m, filepath.Join(home, "web"))
+	tm.write("exit\r")
+	tm.expect(m, "session in-web finished")
+	tm.wait()
+}
+
+// Without forwarding, or an agent with a key to forward, a clone fails
+// before any session starts.
+func TestWorkspaceCloneNeedsForwarding(t *testing.T) {
+	requireOpenSSH(t)
+	stubGit(t)
+	a := serveTestAgent(t)
+	other := serveTestAgent(t)
+	t.Setenv("HOME", t.TempDir())
+	for _, tc := range []struct{ config, want string }{
+		{"", "--clone uses only your forwarded SSH agent: SSH agent forwarding is off: set `forward = true` under [ssh_agent]"},
+		{"\n[ssh_agent]\nforward = true\nkey = []\n", "SSH agent forwarding is off: [ssh_agent] has no setting `key`"},
+		{forwardingConfig("/nonexistent/agent.sock"), "your SSH agent (/nonexistent/agent.sock) does not answer"},
+		{forwardingConfig(a.path) + "keys = [\"" + other.fp + "\"]\n", "holds none of the keys [ssh_agent] keys allows"},
+	} {
+		e := newEnv(t, tc.config)
+		out, err := e.run("agt", "workspace", "add", "api", "--clone", "git@example.com:org/api.git")
+		if err == nil || !strings.Contains(out, tc.want) {
+			t.Fatalf("config %q: %v\n%s", tc.config, err, out)
+		}
+		if out := e.mustRun("agt", "ls"); strings.Contains(out, "clone-api") {
+			t.Fatalf("config %q: a refused clone started a session:\n%s", tc.config, out)
+		}
+	}
+
+	// What the daemon refuses comes back as is, and PATH is needed
+	// without --clone.
+	e := newEnv(t, forwardingConfig(a.path))
+	out, err := e.run("agt", "workspace", "add", "bad", "--clone", "-oProxyCommand=x:r")
+	if err == nil || !strings.Contains(out, "not a URL") {
+		t.Fatalf("an option for a URL: %v\n%s", err, out)
+	}
+	if out, err := e.run("agt", "workspace", "add", "api"); err == nil || !strings.Contains(out, "PATH is needed unless --clone") {
+		t.Fatalf("add without PATH: %v\n%s", err, out)
+	}
+}

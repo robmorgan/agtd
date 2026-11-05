@@ -441,6 +441,14 @@ Built as above, with these additions and differences:
     when forwarding resumes (used or not) and is carried across a handoff. The SSH-1 request
     `ssh-add -D` sends after its own reads as such.
 
+### After Phase 1: cloning a workspace (done)
+
+`agt workspace add NAME [PATH] --clone URL` clones with the forwarded agent (ARCHITECTURE.md,
+"Cloning a workspace"). It adds one exception to the routing above. A session started with
+`--ssh-agent-require-forwarder` has no inherited agent, and its programs wait up to 30 seconds
+from its start for the first forwarder, since the client attaches only after creating it. A
+clone therefore uses the client's keys or none.
+
 ### Phase 2: destination policy and asking (about 1 week)
 
 * Verifying session bindings, parsing user authentication and SSHSIG requests, matching

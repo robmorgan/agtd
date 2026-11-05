@@ -1141,6 +1141,12 @@ size answers on it.
 * [ ] Phase 2: destination policy (verified session bindings, `known_hosts`, `allow_hosts`,
       `allow_namespaces`), refusing onward forwarding, and asking the user from the overlay
 * [ ] Phase 3, if asked for: naming the agtd hop in OpenSSH's own destination constraints
+* [x] Cloning a workspace with the forwarded agent (`agt workspace add NAME [PATH] --clone URL`):
+      a clone session (`workspace-clone`) whose agent socket answers only with a client's
+      forwarder, waiting for the first one; the CLI checks that forwarding works first and
+      registers the workspace once git succeeds
+    * [ ] Next: `agt new --clone URL` (clone, then start the agent in the same session, recording
+          the base commit after the clone), and a worktree per session in a cloned workspace
 
 ---
 

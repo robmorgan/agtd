@@ -577,7 +577,11 @@ func resumeRuntime(st *handoffState) (*runtime, *ownerState, error) {
 				agentListener.Close()
 			}
 		} else {
-			rt.agent = newAgentServer(rt, agentPath, agentSocket, inheritedAgent(p), agentListener)
+			inherited := inheritedAgent(p)
+			if st.Args.RequireForwarder {
+				inherited = ""
+			}
+			rt.agent = newAgentServer(rt, agentPath, agentSocket, inherited, agentListener)
 		}
 	}
 	if st.Killed {
@@ -604,6 +608,9 @@ func resumeRuntime(st *handoffState) (*runtime, *ownerState, error) {
 		state.armSizeOwnerGrace()
 	}
 	state.agentForwarded, state.agentGap = st.SSHAgentForwarded, st.SSHAgentGap
+	if st.Args.RequireForwarder {
+		state.agentRequired, state.agentRequiredUntil = true, st.StartedAt.Add(requireForwarderWait)
+	}
 	if state.altRecord = restoreAltRecord(st.AltRecord); state.altRecord != nil {
 		state.altChecked = true
 	}

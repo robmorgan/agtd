@@ -32,6 +32,9 @@ type client struct {
 	// attachMode forces how the screen reaches the terminal ("frames" or
 	// "raw") over [attach] mode; empty means the config decides.
 	attachMode string
+	// attached is set once an attach has reached a live session and shown
+	// it: a session that ended before that has shown nothing.
+	attached bool
 
 	mu   sync.Mutex
 	quic *transport.QUICClient

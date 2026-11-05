@@ -82,11 +82,16 @@ type ownerState struct {
 	// for until agentWaitUntil: a forwarding owner reserved for its
 	// reattach. agentForwarded records that the session has been forwarded
 	// to, and agentGap that the current gap in forwarding has been recorded.
-	agentWake      chan struct{}
-	agentWaitFor   string
-	agentWaitUntil time.Time
-	agentForwarded bool
-	agentGap       bool
+	// agentRequired (Args.RequireForwarder) records that the session has no
+	// other agent, and new connections wait for a forwarder until
+	// agentRequiredUntil.
+	agentWake          chan struct{}
+	agentWaitFor       string
+	agentWaitUntil     time.Time
+	agentForwarded     bool
+	agentGap           bool
+	agentRequired      bool
+	agentRequiredUntil time.Time
 }
 
 type ownerAttachment struct {

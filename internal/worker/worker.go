@@ -125,6 +125,12 @@ type Args struct {
 	// SSH_AUTH_SOCK, which forwards to the client driving the session
 	// (sshagent.go).
 	SSHAgentSocket bool
+	// RequireForwarder, with SSHAgentSocket, keeps the agent the worker
+	// inherited from the session: its programs get keys only from a
+	// client's forwarder, waiting for the first one at most
+	// requireForwarderWait from the start (a clone session, which the
+	// client attaches to only once it has been created).
+	RequireForwarder bool
 	// LoginShell starts the agent through the user's login shell ($SHELL)
 	// rather than directly (shell.go).
 	LoginShell bool
@@ -298,6 +304,12 @@ func Run(args Args) error {
 	// session keeps the SSH_AUTH_SOCK the daemon was started with, unless
 	// that is another session's socket (inheritedAgent).
 	inherited := inheritedAgent(p)
+	if args.RequireForwarder {
+		if !args.SSHAgentSocket {
+			return fail(errors.New("a session that requires a forwarded SSH agent needs its own agent socket"))
+		}
+		inherited = ""
+	}
 	if inherited == "" {
 		env = slices.DeleteFunc(env, func(kv string) bool { return strings.HasPrefix(kv, "SSH_AUTH_SOCK=") })
 	}
@@ -305,7 +317,9 @@ func Run(args Args) error {
 	var agentSocket os.FileInfo
 	agentPath := p.SSHAgentSocketPath(args.UID)
 	if args.SSHAgentSocket {
-		if agentListener, agentSocket, err = listenAgentSocket(agentPath); err != nil {
+		if agentListener, agentSocket, err = listenAgentSocket(agentPath); err != nil && args.RequireForwarder {
+			return fail(fmt.Errorf("failed to bind the session's SSH agent socket: %w", err))
+		} else if err != nil {
 			fmt.Fprintf(os.Stderr, "session worker: no SSH agent socket, the session keeps the SSH_AUTH_SOCK it inherited, unless that is another session's: %v\n", err)
 		} else {
 			// The last of a repeated variable is the one exec passes on.
@@ -392,6 +406,9 @@ func Run(args Args) error {
 	state := newOwnerState(args.SessionID, ptmx, terminal)
 	state.agentName, state.command = args.AgentName, args.Command
 	state.colors = args.Colors
+	if args.RequireForwarder {
+		state.agentRequired, state.agentRequiredUntil = true, startedAt.Add(requireForwarderWait)
+	}
 	state.activity = newActivityTracker(rt.recorder, agentPID, time.Now())
 	state.owner = rt.owner
 	return rt.run(state, nil)

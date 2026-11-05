@@ -120,6 +120,11 @@ var (
 	// while they keep coming (record). Variables for tests.
 	agentEventQuiet    = 10 * time.Second
 	agentEventQuietMax = time.Hour
+	// requireForwarderWait is how long, from its start, a session that
+	// requires a forwarded agent (Args.RequireForwarder) keeps programs
+	// waiting for the first forwarder: the client creates the session,
+	// attaches, then opens one. A variable for tests.
+	requireForwarderWait = 30 * time.Second
 )
 
 var (
@@ -830,12 +835,13 @@ func (a *agentServer) serveUnavailable(c *agentConn, msg []byte) {
 }
 
 // noteUnavailable records that a program found no agent, once per gap in
-// forwarding and only in a session that has been forwarded to: one that
-// never asked for forwarding has nothing missing.
+// forwarding and only in a session that has been forwarded to, or that
+// requires a forwarder: one that never asked for forwarding has nothing
+// missing.
 func (a *agentServer) noteUnavailable() {
 	record := false
 	_ = a.rt.owner.do(func(s *ownerState) error {
-		if s.agentForwarded && !s.agentGap {
+		if (s.agentForwarded || s.agentRequired) && !s.agentGap {
 			s.agentGap, record = true, true
 		}
 		return nil
@@ -1102,8 +1108,9 @@ func (rt *runtime) serveForwarder(conn transport.Stream, reader *bufio.Reader, r
 // owner's next forwarder is awaited: its forwarder ended within
 // sizeOwnerGrace (removed or not yet, and whether or not it owned the size
 // then), so agt opens another, or its id is reserved for the reattach of an
-// owner that was forwarding (agentWaitFor); else neither (the inherited
-// agent, or none). wake is closed when the answer may have changed.
+// owner that was forwarding (agentWaitFor), or the session requires a
+// forwarder and agentRequiredUntil has yet to pass; else neither (the
+// inherited agent, or none). wake is closed when the answer may have changed.
 func (s *ownerState) agentRoute(now time.Time) (f *forwarder, until time.Time, wake <-chan struct{}) {
 	if s.agentWake == nil {
 		s.agentWake = make(chan struct{})
@@ -1121,6 +1128,9 @@ func (s *ownerState) agentRoute(now time.Time) (f *forwarder, until time.Time, w
 	}
 	if s.sizeOwner != "" && s.sizeOwner == s.agentWaitFor && now.Before(s.agentWaitUntil) {
 		return nil, s.agentWaitUntil, s.agentWake
+	}
+	if s.agentRequired && now.Before(s.agentRequiredUntil) {
+		return nil, s.agentRequiredUntil, s.agentWake
 	}
 	return nil, time.Time{}, s.agentWake
 }

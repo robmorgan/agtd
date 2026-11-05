@@ -538,6 +538,67 @@ func TestSSHAgentWaitEndsWithTheReservation(t *testing.T) {
 	h.endSession(b)
 }
 
+// A session that requires a forwarder (a clone) never uses the agent the
+// worker inherited: a program that asks before anyone forwards waits for
+// the first forwarder, which answers it.
+func TestSSHAgentRequiredForwarderIsAwaited(t *testing.T) {
+	inherited, _ := newKeyring(t, "inherited")
+	t.Setenv("SSH_AUTH_SOCK", serveKeyring(t, inherited))
+	h := startWorkerEdit(t, agentScript, func(a *Args) { a.SSHAgentSocket, a.RequireForwarder = true, true })
+
+	got := make(chan []string, 1)
+	failed := make(chan error, 1)
+	client := h.agentClient()
+	go func() {
+		keys, err := listKeys(client)
+		if err != nil {
+			failed <- err
+			return
+		}
+		got <- keys
+	}()
+	select {
+	case keys := <-got:
+		t.Fatalf("answered %v before anyone forwarded", keys)
+	case err := <-failed:
+		t.Fatalf("failed before anyone forwarded: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	a, _ := h.attachWith(protocol.AttachSession{Features: rawAttachCapabilities()})
+	ring, key := newKeyring(t, "a")
+	h.forward(a.attachID, ring)
+	select {
+	case keys := <-got:
+		if !slices.Equal(keys, fingerprints(key)) {
+			t.Fatalf("keys once a forwarded: %v", keys)
+		}
+	case err := <-failed:
+		t.Fatalf("once a forwarded: %v", err)
+	case <-time.After(testTimeout):
+		t.Fatal("the waiting connection was not answered once a forwarded")
+	}
+	h.endSession(a)
+}
+
+// The wait for a required forwarder is bounded; after it programs get no
+// keys, not the inherited agent's, and the gap is recorded.
+func TestSSHAgentRequiredForwarderWaitEnds(t *testing.T) {
+	// Set before the worker starts, which reads it.
+	defer func(w time.Duration) { requireForwarderWait = w }(requireForwarderWait)
+	requireForwarderWait = 400 * time.Millisecond
+	inherited, _ := newKeyring(t, "inherited")
+	t.Setenv("SSH_AUTH_SOCK", serveKeyring(t, inherited))
+	h := startWorkerEdit(t, agentScript, func(a *Args) { a.SSHAgentSocket, a.RequireForwarder = true, true })
+
+	if got := h.listKeys(h.agentClient()); len(got) != 0 {
+		t.Fatalf("keys without a forwarder: %v", got)
+	}
+	h.eventually("the gap to be recorded", func() bool { return len(h.events(session.EventSSHAgentUnavailable)) == 1 })
+	a, _ := h.attachWith(protocol.AttachSession{Features: rawAttachCapabilities()})
+	h.endSession(a)
+}
+
 // With nobody forwarding, the agent the worker inherited answers, byte for
 // byte and unfiltered, as sessions got before; an owner that forwards takes
 // precedence.
