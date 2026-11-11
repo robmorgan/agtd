@@ -3,7 +3,7 @@
 ZIG ?= zig
 VERSION ?= 0.2.1
 BINDIR ?= $(or $(GOBIN),$(shell go env GOPATH)/bin)
-PKG_CONFIG_PATH := $(CURDIR)/.build/ghostty-out/share/pkgconfig
+PKG_CONFIG_PATH := $(CURDIR)/.build/ghostty-out/lib/pkgconfig
 export PKG_CONFIG_PATH
 # Both binaries report the same version.
 LDFLAGS := -X agtd.sh/internal/cli.Version=$(VERSION) \

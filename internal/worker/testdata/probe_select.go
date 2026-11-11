@@ -7,7 +7,7 @@
 // each changed cell's style, and any clipboard write. Nothing is submitted
 // to a model.
 //
-//	PKG_CONFIG_PATH=.build/ghostty-out/share/pkgconfig go run internal/worker/testdata/probe_select.go -only claude -dir /tmp/x
+//	PKG_CONFIG_PATH=.build/ghostty-out/lib/pkgconfig go run internal/worker/testdata/probe_select.go -only claude -dir /tmp/x
 package main
 
 import (
@@ -181,7 +181,7 @@ func run(argv []string, env []string, st []step, dir string) error {
 		replies = nil
 	}
 	screen := func() string {
-		f, err := libghostty.NewFormatter(term, libghostty.WithFormatterFormat(libghostty.FormatterFormatPlain))
+		f, err := libghostty.NewFormatter(term, libghostty.WithFormatterFormat(libghostty.FormatterFormatPlain), libghostty.WithFormatterTrim(false))
 		if err != nil {
 			return ""
 		}
@@ -339,7 +339,7 @@ func dump(term *libghostty.Terminal, label string) error {
 	for _, m := range []struct {
 		name string
 		mode libghostty.Mode
-	}{{"1000", libghostty.ModeNormalMouse}, {"1002", libghostty.ModeButtonMouse}, {"1003", libghostty.ModeAnyMouse}, {"1006", libghostty.ModeSGRMouse}} {
+	}{{"1000", libghostty.ModeMouseEventNormal}, {"1002", libghostty.ModeMouseEventButton}, {"1003", libghostty.ModeMouseEventAny}, {"1006", libghostty.ModeMouseFormatSGR}} {
 		if on, _ := term.Mode(m.mode); on {
 			modes = append(modes, m.name)
 		}

@@ -36,7 +36,7 @@ func (s *ownerState) compose(text []byte) ([]byte, error) {
 		return nil, err
 	}
 	defer enc.Close()
-	enc.SetOptFromTerminal(term)
+	enc.SetFromTerminal(term)
 	ev, err := libghostty.NewKeyEvent()
 	if err != nil {
 		return nil, err

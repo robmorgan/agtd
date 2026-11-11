@@ -121,7 +121,7 @@ func (s *ownerState) lookAlternateErr() error {
 		}
 		s.altRecord = &altRecord{t: screen.NewTranscript(altRecordRows)}
 	}
-	if syncing, err := term.Mode(libghostty.ModeSyncOutput); err != nil || syncing {
+	if syncing, err := term.Mode(libghostty.ModeSynchronizedOutput); err != nil || syncing {
 		return err
 	}
 	cols, err := term.Cols()

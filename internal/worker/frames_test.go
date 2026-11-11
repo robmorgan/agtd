@@ -288,7 +288,7 @@ func TestFramesCarryTerminalState(t *testing.T) {
 		t.Fatalf("shape and effects: %d %q", f.CursorShape, f.Effects)
 	}
 	_, _, _, shape, _ := cellsOf(r.client)
-	if shape != libghostty.CursorVisualStyleBar {
+	if shape != libghostty.CursorStyleBar {
 		t.Fatalf("client cursor shape %v", shape)
 	}
 	r.feed("\x1b]11;#102030\x1b\\")

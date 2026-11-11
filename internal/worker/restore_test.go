@@ -26,7 +26,7 @@ type terminalImage struct {
 	CursorVisible  bool
 	PendingWrap    bool
 	CursorStyle    string
-	CursorShape    libghostty.CursorVisualStyle
+	CursorShape    libghostty.CursorStyle
 	CursorBlinking bool
 	Modes          string
 	KittyFlags     libghostty.KittyKeyFlags
@@ -55,27 +55,27 @@ var restoredModes = []struct {
 	name string
 	mode libghostty.Mode
 }{
-	{"KAM", libghostty.ModeKAM}, {"IRM", libghostty.ModeInsert}, {"SRM", libghostty.ModeSRM},
-	{"LNM", libghostty.ModeLinefeed}, {"DECCKM", libghostty.ModeDECCKM},
+	{"KAM", libghostty.ModeDisableKeyboard}, {"IRM", libghostty.ModeInsert}, {"SRM", libghostty.ModeSendReceiveMode},
+	{"LNM", libghostty.ModeLinefeed}, {"DECCKM", libghostty.ModeCursorKeys},
 	{"DECCOLM", libghostty.Mode132Column}, {"DECSCLM", libghostty.ModeSlowScroll},
 	{"DECSCNM", libghostty.ModeReverseColors}, {"DECOM", libghostty.ModeOrigin},
 	{"DECAWM", libghostty.ModeWraparound}, {"DECARM", libghostty.ModeAutorepeat},
-	{"X10Mouse", libghostty.ModeX10Mouse}, {"CursorBlink", libghostty.ModeCursorBlinking},
+	{"X10Mouse", libghostty.ModeMouseEventX10}, {"CursorBlink", libghostty.ModeCursorBlinking},
 	{"DECTCEM", libghostty.ModeCursorVisible}, {"Mode3", libghostty.ModeEnableMode3},
 	{"ReverseWrap", libghostty.ModeReverseWrap}, {"Alt47", libghostty.ModeAltScreenLegacy},
 	{"DECNKM", libghostty.ModeKeypadKeys}, {"DECBKM", libghostty.ModeBackarrowKeyMode},
-	{"DECLRMM", libghostty.ModeLeftRightMargin}, {"NormalMouse", libghostty.ModeNormalMouse},
-	{"ButtonMouse", libghostty.ModeButtonMouse}, {"AnyMouse", libghostty.ModeAnyMouse},
-	{"Focus", libghostty.ModeFocusEvent}, {"UTF8Mouse", libghostty.ModeUTF8Mouse},
-	{"SGRMouse", libghostty.ModeSGRMouse}, {"AltScroll", libghostty.ModeAltScroll},
-	{"URxvtMouse", libghostty.ModeURxvtMouse}, {"SGRPixels", libghostty.ModeSGRPixelsMouse},
-	{"NumLock", libghostty.ModeNumlockKeypad}, {"AltEscPrefix", libghostty.ModeAltEscPrefix},
-	{"AltSendsEsc", libghostty.ModeAltSendsEsc}, {"ReverseWrapExt", libghostty.ModeReverseWrapExt},
-	{"Alt1047", libghostty.ModeAltScreen}, {"Alt1049", libghostty.ModeAltScreenSave},
-	{"BracketedPaste", libghostty.ModeBracketedPaste}, {"SyncOutput", libghostty.ModeSyncOutput},
-	{"Grapheme", libghostty.ModeGraphemeCluster}, {"ColorScheme", libghostty.ModeColorSchemeReport},
-	{"Visibility", libghostty.ModeVisibilityReport}, {"InBandResize", libghostty.ModeInBandResize},
-	{"PasteEvents", libghostty.ModePasteEvents},
+	{"DECLRMM", libghostty.ModeEnableLeftAndRightMargin}, {"NormalMouse", libghostty.ModeMouseEventNormal},
+	{"ButtonMouse", libghostty.ModeMouseEventButton}, {"AnyMouse", libghostty.ModeMouseEventAny},
+	{"Focus", libghostty.ModeFocusEvent}, {"UTF8Mouse", libghostty.ModeMouseFormatUTF8},
+	{"SGRMouse", libghostty.ModeMouseFormatSGR}, {"AltScroll", libghostty.ModeMouseAlternateScroll},
+	{"URxvtMouse", libghostty.ModeMouseFormatURxvt}, {"SGRPixels", libghostty.ModeMouseFormatSGRPixels},
+	{"NumLock", libghostty.ModeIgnoreKeypadWithNumlock}, {"AltEscPrefix", libghostty.ModeAltEscPrefix},
+	{"AltSendsEsc", libghostty.ModeAltSendsEscape}, {"ReverseWrapExt", libghostty.ModeReverseWrapExtended},
+	{"Alt1047", libghostty.ModeAltScreen}, {"Alt1049", libghostty.ModeAltScreenSaveCursorClearEnter},
+	{"BracketedPaste", libghostty.ModeBracketedPaste}, {"SyncOutput", libghostty.ModeSynchronizedOutput},
+	{"Grapheme", libghostty.ModeGraphemeCluster}, {"ColorScheme", libghostty.ModeReportColorScheme},
+	{"Visibility", libghostty.ModeReportVisibility}, {"InBandResize", libghostty.ModeInBandSizeReports},
+	{"PasteEvents", libghostty.ModeKittyPasteEvents},
 }
 
 func must[T any](v T, err error) T {
@@ -95,14 +95,15 @@ func formatContent(term *libghostty.Terminal, format libghostty.FormatterFormat,
 	f := must(libghostty.NewFormatter(term,
 		libghostty.WithFormatterFormat(format),
 		libghostty.WithFormatterTrim(trim),
-		libghostty.WithFormatterUnwrap(false)))
+		libghostty.WithFormatterUnwrap(false),
+		libghostty.WithFormatterExtras(libghostty.FormatterExtrasNone)))
 	defer f.Close()
 	return must(f.FormatString())
 }
 
 // cellsOf renders the visible screen cell by cell: one line per row, each
 // cell as its text and its resolved foreground, background and style.
-func cellsOf(term *libghostty.Terminal) (cells, blanks, rowFlags string, shape libghostty.CursorVisualStyle, blinking bool) {
+func cellsOf(term *libghostty.Terminal) (cells, blanks, rowFlags string, shape libghostty.CursorStyle, blinking bool) {
 	rs := must(libghostty.NewRenderState())
 	defer rs.Close()
 	if err := rs.Update(term); err != nil {
@@ -168,7 +169,7 @@ func imageOf(term *libghostty.Terminal) terminalImage {
 		CursorY:        must(term.CursorY()),
 		CursorVisible:  must(term.CursorVisible()),
 		PendingWrap:    must(term.CursorPendingWrap()),
-		CursorStyle:    styleString(must(term.CursorStyle())),
+		CursorStyle:    styleString(must(term.CursorSGRStyle())),
 		Modes:          strings.Join(modes, ","),
 		KittyFlags:     must(term.KittyKeyboardFlags()),
 		ScrollbackRows: must(term.ScrollbackRows()),
@@ -300,6 +301,7 @@ func TestSnapshotRestores(t *testing.T) {
 		{"pending wrap on a wide character", strings.Repeat("x", 78) + "界"},
 		// Restoring a saved cursor after its line was erased.
 		{"pending wrap over a blank cell", "\x1b[1;80Hx\x1b7\x1b[2K\x1b8"},
+		{"pending wrap at a right margin", "\x1b[?69h\x1b[;10s" + strings.Repeat("x", 10)},
 		{"hidden cursor", "text\x1b[?25l"},
 		{"blinking bar cursor", "\x1b[5 q"},
 		{"steady underline cursor", "\x1b[4 q"},
@@ -515,14 +517,6 @@ func TestSnapshotKnownLimits(t *testing.T) {
 			// alternate screen scrollback, and nothing a client is sent can.
 			name: "scrollback on the alternate screen", stream: "\x1b[?1047h0\x1b[22J0",
 			differs: []string{"ScrollbackRows", "Text", "Styled"},
-		},
-		{
-			// The cursor block recreates a pending wrap only in the last
-			// column; within left and right margins (DECSLRM) a wrap is
-			// pending at the right margin, and the cursor comes back there
-			// without it, so the next character overwrites the last one.
-			name: "pending wrap at a right margin", stream: "\x1b[?69h\x1b[;10s" + strings.Repeat("x", 10),
-			differs: []string{"PendingWrap"},
 		},
 		{
 			// The cursor saved with DECSC (or 1048) is not formatted.

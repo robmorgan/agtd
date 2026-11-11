@@ -250,9 +250,10 @@ middle of an escape sequence or UTF-8 character, so the rest of a sequence the a
 is parsed the same way after the handoff. Tests compare the terminals before and after (VT and
 plain renderings, cursor, active screen, modes) across real execs, and check that continuous
 output across five handoffs ends up in the shadow terminal exactly once and in order. libghostty
-does not yet promise the snapshot format stable across versions (the move from Ghostty 81598385d
-to f54340ad kept it byte for byte, apart from Kitty image records that an older image cannot
-read), so the state also carries the VT rendering; a new image that cannot decode the snapshot
+does not promise the snapshot format stable across versions (libghostty-vt 1.0 versions it
+apart from the ABI; the move from Ghostty 81598385d to f54340ad kept it byte for byte, apart from
+Kitty image records that an older image cannot read, and the move to 1.0 at 5813c9461 kept it
+readable both ways), so the state also carries the VT rendering; a new image that cannot decode the snapshot
 rebuilds the terminal from that (screen and scrollback text, most modes) and logs it. An
 unfinished sequence longer than 1 MiB cannot be snapshotted, and the handoff is refused until it
 completes.
@@ -1747,10 +1748,6 @@ formatter's):
 * **A hyperlink that ends in a pending wrap.** The cursor block reprints the last cell to recreate
   the pending wrap, inside a fresh OSC 8, so a link without an explicit id comes back as two links
   to the same URI, the last cell its own.
-* **A pending wrap at a right margin.** The cursor block recreates a pending wrap by reprinting
-  the cell under the cursor only when the cursor is in the last column; within left and right
-  margins (DECSLRM) a wrap is pending at the right margin, and the cursor comes back there
-  without it, so the next character overwrites the last one instead of wrapping.
 * **Text printed before grapheme clustering (mode 2027) was switched.** The mode decides how
   codepoints join into cells, cells do not record which mode made them, and the snapshot sets
   the current mode before the contents, so text printed under the other mode can split or join

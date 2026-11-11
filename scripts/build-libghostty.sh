@@ -4,7 +4,8 @@
 # go.mitchellh.com/libghostty tracks a specific ghostty commit; this pin must
 # match the GIT_TAG in that module's CMakeLists.txt, or be a later commit with
 # the same C API (include/ghostty). It currently matches the bindings' pin
-# (df1957c, 2026-10-21). Ghostty needs Zig 0.17+ since ghostty #14519.
+# (b13f277, 2026-11-07), libghostty-vt 1.0, whose build installs the .pc files
+# under lib/pkgconfig. Ghostty needs Zig 0.17+ since ghostty #14519.
 #
 # GHOSTTY_TARGET (a Zig target triple, e.g. x86_64-linux-gnu.2.28 or
 # x86_64-macos) builds for that target into its own directory,
@@ -17,7 +18,7 @@
 #        eval "$(scripts/build-libghostty.sh --env)"   # only print exports
 set -euo pipefail
 
-GHOSTTY_COMMIT="f54340ad77814fe319d136e5e915d6a48de8dd23"
+GHOSTTY_COMMIT="5813c9461d5af78b6307a1254d00b1bc190eaccd"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD="${HERE}/../.build"
 SRC="${BUILD}/ghostty"
@@ -30,13 +31,13 @@ OPTIMIZE="${GHOSTTY_OPTIMIZE:-ReleaseFast}"
 STAMP="${GHOSTTY_COMMIT} ${OPTIMIZE}${TARGET:+ ${TARGET}}"
 
 if [[ "${1:-}" == "--env" ]]; then
-  echo "export PKG_CONFIG_PATH=\"${OUT}/share/pkgconfig\""
+  echo "export PKG_CONFIG_PATH=\"${OUT}/lib/pkgconfig\""
   exit 0
 fi
 
-if [[ -f "${OUT}/share/pkgconfig/libghostty-vt-static.pc" && "$(cat "${OUT}/.commit" 2>/dev/null)" == "${STAMP}" ]]; then
+if [[ -f "${OUT}/lib/pkgconfig/libghostty-vt-static.pc" && "$(cat "${OUT}/.commit" 2>/dev/null)" == "${STAMP}" ]]; then
   echo "libghostty-vt ready: ${OUT}" >&2
-  echo "export PKG_CONFIG_PATH=\"${OUT}/share/pkgconfig\""
+  echo "export PKG_CONFIG_PATH=\"${OUT}/lib/pkgconfig\""
   exit 0
 fi
 
@@ -70,4 +71,4 @@ rm -rf "${OUT}"
 echo "${STAMP}" > "${OUT}/.commit"
 
 echo "libghostty-vt ready: ${OUT}" >&2
-echo "export PKG_CONFIG_PATH=\"${OUT}/share/pkgconfig\""
+echo "export PKG_CONFIG_PATH=\"${OUT}/lib/pkgconfig\""

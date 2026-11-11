@@ -478,6 +478,7 @@ func formatRow(term *libghostty.Terminal, cols uint16, y uint32) ([]byte, error)
 		libghostty.WithFormatterFormat(libghostty.FormatterFormatVT),
 		libghostty.WithFormatterTrim(false),
 		libghostty.WithFormatterUnwrap(false),
+		libghostty.WithFormatterExtras(libghostty.FormatterExtrasNone),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create formatter: %w", err)
