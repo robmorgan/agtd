@@ -920,7 +920,8 @@ agt attach devbox-1/auth-tests
       on the row's host, Tab to attach or remove (by UID, `kill-expect-uid`), hosts probed in the
       background with backoff
     * [x] Detach returning to the inbox (attach owns the alternate screen when launched from it)
-    * [ ] Phase 2: the full actions menu (stop, take over size, diff, history)
+    * [x] Phase 2: the full actions menu (a detail line with who is attached and who owns the
+          size; stop, take over size, diff, history), diff and history in the inbox's own pager
     * [ ] Phase 3: new session anywhere (host, workspace, agent, name), workspaces added and removed inline
     * [ ] Phase 4: peek and inline reply, gated on a timed trial
     * [ ] Phase 5: host health inline

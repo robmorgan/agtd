@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -83,6 +84,13 @@ func (f *fakeRemote) serve(s transport.Stream) {
 	defer s.Close()
 	r := bufio.NewReader(s)
 	req, err := protocol.ReadRequest(r)
+	if err == nil && req != nil && req.Role() == protocol.RoleArtifact {
+		// An artifact stream: the test answers it with untagged frames,
+		// and it stays open until the client closes it.
+		f.requests <- fakeRequest{req: req, answer: func(resp *protocol.Response) { protocol.WriteResponse(s, resp) }}
+		io.Copy(io.Discard, r)
+		return
+	}
 	if err != nil || req == nil || req.Hello == nil {
 		return
 	}

@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -28,8 +30,9 @@ import (
 //
 // Ownership: the inbox's state (an *inbox) belongs to the goroutine running
 // runInbox. Host probes reach it as immutable snapshots from a hostSet, and
-// actions (remove, create) run on goroutines of their own and report on a
-// channel, so a slow host never stalls the screen. See "The inbox" in
+// actions (stop, remove, create, and loading a diff or history for the
+// pager) run on goroutines of their own and report on a channel, so a slow
+// host never stalls the screen. See "The inbox" in
 // ARCHITECTURE.md.
 
 const (
@@ -43,7 +46,7 @@ const (
 	inboxNoticeTime = 10 * time.Second
 	// inboxTick redraws for the elapsed times and expiring notices.
 	inboxTick = time.Second
-	// inboxActionTimeout bounds a remove or a create: longer than the
+	// inboxActionTimeout bounds an action or a load: longer than the
 	// daemon may take to stop a session's agent (workerStopTimeout plus
 	// workerKillTimeout, 10s) with a remote round trip on top.
 	inboxActionTimeout = 30 * time.Second
@@ -127,20 +130,46 @@ const (
 	inboxActions
 	inboxConfirm
 	inboxCreateAgent
+	inboxPager
 )
 
 type rowAction int
 
 const (
 	rowAttach rowAction = iota
+	rowStop
 	rowRemove
+	rowTakeSize
+	rowDiff
+	rowHistory
 )
 
 func (a rowAction) label() string {
-	if a == rowAttach {
-		return "attach"
+	return [...]string{"attach", "stop", "remove", "take over size", "diff", "history"}[a]
+}
+
+// inboxLoad is a diff or a history being fetched for the pager.
+type inboxLoad struct {
+	key  rowKey
+	what rowAction
+}
+
+// inboxDetail is who is attached to the session whose menu is open, once
+// its host has said.
+type inboxDetail struct {
+	key         rowKey
+	attachments []session.AttachmentRecord
+	loaded      bool
+}
+
+// sizeOwner is the attachment that owns the session's size, if any.
+func (d *inboxDetail) sizeOwner() *session.AttachmentRecord {
+	for n := range d.attachments {
+		if d.attachments[n].SizeOwner {
+			return &d.attachments[n]
+		}
 	}
-	return "remove"
+	return nil
 }
 
 // inboxNotice is a passing message: an action's success, or the answer to a key
@@ -158,12 +187,20 @@ type inboxLeave struct{ outcome *inboxOutcome }
 type inboxOutcome struct {
 	host    *transport.Host // nil for this machine
 	id, uid string
+	// takeSize takes the session's size from the attachment that owns it.
+	takeSize bool
 }
 
 // inboxEffect is work a key asked for, which the loop starts on a goroutine
 // of its own.
 type inboxEffect struct {
-	remove      *inboxRow
+	remove *inboxRow
+	stop   *inboxRow
+	// load fetches the row's loadWhat (rowDiff or rowHistory) for the
+	// pager, and attachments who is attached to it.
+	load        *inboxRow
+	loadWhat    rowAction
+	attachments *inboxRow
 	createName  string
 	createAgent string
 	create      bool
@@ -182,6 +219,14 @@ type inboxResult struct {
 	// created is the session a create started.
 	created *session.CreateResult
 	create  bool
+	// stop is set for a stop's result (a remove's otherwise).
+	stop bool
+	// page is what a load fetched (load says what was asked for), and
+	// attachments who is attached (when isDetail).
+	load        *inboxLoad
+	page        *inboxPage
+	isDetail    bool
+	attachments []session.AttachmentRecord
 }
 
 type inbox struct {
@@ -204,13 +249,24 @@ type inbox struct {
 	modeIndex int
 	showKeys  bool
 	// modeActions are the actions the open menu was drawn with.
-	// confirmShown is when a remove confirmation was first drawn (zero
+	// confirmShown is when a stop or remove confirmation was first drawn (zero
 	// while it is not on screen), and confirmCropped is set while a
 	// terminal too short for it hides it: it takes Enter or y only once it
 	// has been on screen for inboxAcknowledgeAfter.
 	modeActions    []rowAction
 	confirmShown   time.Time
 	confirmCropped bool
+	// confirming is what the open confirmation asks for: rowStop or
+	// rowRemove.
+	confirming rowAction
+	// detail is who is attached to the row whose menu is open.
+	detail *inboxDetail
+
+	// page is open in the pager (inboxPager), and loading is what is being
+	// fetched for it. A load is not an action: nothing waits for it, and
+	// an attachment or leaving drops it.
+	page    *inboxPage
+	loading *inboxLoad
 
 	// What the inbox tells the user. A notice goes after inboxNoticeTime
 	// or at the next key. failures are actions that failed and that the
@@ -400,11 +456,31 @@ func (i *inbox) row(k rowKey) (inboxRow, bool) {
 	return inboxRow{}, false
 }
 
+// actions are what a row's menu offers, in a fixed order: attach and stop
+// for a live session, remove, take over size once its host says another
+// attachment owns it, then the diff, and the history of an ended session.
+// Only take over size comes and goes while the menu is open, and it comes
+// after the actions that ask to confirm, so their digits never move.
 func (i *inbox) actions(r inboxRow) []rowAction {
+	var out []rowAction
 	if r.live() {
-		return []rowAction{rowAttach, rowRemove}
+		out = append(out, rowAttach)
 	}
-	return []rowAction{rowRemove}
+	if r.rec.Status == session.StatusRunning {
+		out = append(out, rowStop)
+	}
+	out = append(out, rowRemove)
+	if r.live() && i.detail != nil && i.detail.key == r.key() && i.detail.sizeOwner() != nil {
+		out = append(out, rowTakeSize)
+	}
+	if r.host.has(protocol.CapArtifacts) {
+		out = append(out, rowDiff)
+	}
+	if !r.live() {
+		// Kept when the session ended, so there is none before.
+		out = append(out, rowHistory)
+	}
+	return out
 }
 
 // clampMode leaves a menu whose row went away.
@@ -473,6 +549,10 @@ func (i *inbox) leave(outcome *inboxOutcome) (bool, *inboxOutcome) {
 		return true, outcome
 	}
 	i.leaving = &inboxLeave{outcome}
+	if i.mode == inboxPager {
+		// The line that says what the leave waits for is in the list.
+		i.mode, i.page = inboxBrowse, nil
+	}
 	return false, nil
 }
 
@@ -553,6 +633,9 @@ func (i *inbox) handleKey(ev keyEvent) (done bool, outcome *inboxOutcome) {
 	case inboxCreateAgent:
 		i.handleCreateAgentKey(ev)
 		return false, nil
+	case inboxPager:
+		i.handlePagerKey(ev)
+		return false, nil
 	}
 	return i.handleBrowseKey(ev)
 }
@@ -606,14 +689,31 @@ func (i *inbox) handleBrowseKey(ev keyEvent) (bool, *inboxOutcome) {
 }
 
 func (i *inbox) attach(r inboxRow) (bool, *inboxOutcome) {
-	if word, ok := i.pending[r.key()]; ok {
-		i.errorNotice("%s is %s", r.address(), strings.TrimSuffix(word, "…"))
+	return i.attachWith(r, false)
+}
+
+func (i *inbox) attachWith(r inboxRow, takeSize bool) (bool, *inboxOutcome) {
+	if i.refusePending(r) {
 		return false, nil
 	}
-	return i.leave(&inboxOutcome{host: r.host.host, id: r.rec.SessionID, uid: r.rec.UID})
+	return i.leave(&inboxOutcome{host: r.host.host, id: r.rec.SessionID, uid: r.rec.UID, takeSize: takeSize})
+}
+
+// refusePending refuses an action on a row that has one in progress.
+func (i *inbox) refusePending(r inboxRow) bool {
+	word, ok := i.pending[r.key()]
+	if ok {
+		i.errorNotice("%s is %s", r.address(), strings.TrimSuffix(word, "…"))
+	}
+	return ok
 }
 
 func (i *inbox) openActions(r inboxRow) {
+	i.detail = &inboxDetail{key: r.key()}
+	if r.live() {
+		// Who is attached, for the detail line and take over size.
+		i.effects = append(i.effects, inboxEffect{attachments: &r})
+	}
 	i.mode, i.modeRow, i.modeIndex, i.modeActions = inboxActions, r.key(), 0, i.actions(r)
 	// Pin the selection to it, so a reorder never moves the highlight
 	// away from the row the menu acts on.
@@ -657,15 +757,18 @@ func (i *inbox) handleActionKey(ev keyEvent) (bool, *inboxOutcome) {
 	}
 	actions := i.actions(r)
 	run := func(a rowAction) (bool, *inboxOutcome) {
-		if a == rowAttach {
+		switch a {
+		case rowAttach, rowTakeSize:
 			i.mode = inboxBrowse
-			return i.attach(r)
-		}
-		if word, ok := i.pending[r.key()]; ok {
-			i.errorNotice("%s is %s", r.address(), strings.TrimSuffix(word, "…"))
+			return i.attachWith(r, a == rowTakeSize)
+		case rowDiff, rowHistory:
+			i.startLoad(r, a)
 			return false, nil
 		}
-		i.mode, i.confirmShown, i.confirmCropped = inboxConfirm, time.Time{}, false
+		if i.refusePending(r) {
+			return false, nil
+		}
+		i.mode, i.confirming, i.confirmShown, i.confirmCropped = inboxConfirm, a, time.Time{}, false
 		return false, nil
 	}
 	switch {
@@ -690,30 +793,50 @@ func (i *inbox) handleConfirmKey(ev keyEvent) {
 		i.mode = inboxActions
 		if r, ok := i.row(i.modeRow); ok {
 			i.modeActions = i.actions(r)
-			i.modeIndex = slices.Index(i.modeActions, rowRemove)
+			i.modeIndex = max(slices.Index(i.modeActions, i.confirming), 0)
 		}
 	}
 	switch {
 	case ev.code == keyEnter, ev.code == keyChar && ev.mods == 0 && ev.r == 'y':
 		switch {
 		case i.confirmCropped:
-			i.errorNotice("make the terminal taller to see what this removes")
+			i.errorNotice("make the terminal taller to see what this %ss", i.confirming.label())
 			return
 		case i.confirmShown.IsZero() || i.now().Sub(i.confirmShown) < inboxAcknowledgeAfter:
 			// Not drawn yet, or only just (keys that came with the one
 			// that asked, key repeat, a burst queued over ssh): the
-			// user has not had time to see what this would remove.
+			// user has not had time to see what this would do.
 			return
 		}
 		r, ok := i.row(i.modeRow)
 		i.mode = inboxBrowse
-		if ok {
+		switch {
+		case !ok:
+		case i.confirming == rowStop:
+			i.pending[r.key()] = "stopping…"
+			i.effects = append(i.effects, inboxEffect{stop: &r})
+		default:
 			i.pending[r.key()] = "removing…"
 			i.effects = append(i.effects, inboxEffect{remove: &r})
 		}
 	case ev.code == keyEsc, ev.code == keyChar && ev.mods == 0 && ev.r == 'n':
 		back()
 	}
+}
+
+// startLoad fetches the row's diff or history for the pager. One load runs
+// at a time; the row stays usable meanwhile.
+func (i *inbox) startLoad(r inboxRow, what rowAction) {
+	switch {
+	case i.refusePending(r):
+		return
+	case i.loading != nil:
+		i.errorNotice("still loading the last one")
+		return
+	}
+	i.mode = inboxBrowse
+	i.loading = &inboxLoad{key: r.key(), what: what}
+	i.effects = append(i.effects, inboxEffect{load: &r, loadWhat: what})
 }
 
 func (i *inbox) handleCreateAgentKey(ev keyEvent) {
@@ -750,6 +873,18 @@ func digitIndex(ev keyEvent) int {
 
 // finish takes an action's result. done ends the inbox, as for handleKey.
 func (i *inbox) finish(res inboxResult) (done bool, outcome *inboxOutcome) {
+	switch {
+	case res.isDetail:
+		i.finishDetail(res)
+		return false, nil
+	case res.load != nil:
+		i.finishLoad(res)
+		return false, nil
+	}
+	verb, doing, past := "remove", "removing", "removed"
+	if res.stop {
+		verb, doing, past = "stop", "stopping", "stopped"
+	}
 	if res.create {
 		i.creating = false
 		switch {
@@ -771,13 +906,15 @@ func (i *inbox) finish(res inboxResult) (done bool, outcome *inboxOutcome) {
 		delete(i.pending, res.key)
 		switch {
 		case res.unknown:
-			i.fail("removing %s: %v; result unknown, refreshing", res.address, res.err)
+			i.fail("%s %s: %v; result unknown, refreshing", doing, res.address, res.err)
 			i.effects = append(i.effects, inboxEffect{reprobe: res.host})
 		case res.err != nil:
-			i.fail("could not remove %s: %v", res.address, res.err)
+			i.fail("could not %s %s: %v", verb, res.address, res.err)
 		default:
-			i.gone[res.key] = true
-			i.setNotice(&inboxNotice{message: "removed session " + res.address})
+			if !res.stop {
+				i.gone[res.key] = true
+			}
+			i.setNotice(&inboxNotice{message: past + " session " + res.address})
 			i.effects = append(i.effects, inboxEffect{reprobe: res.host})
 		}
 	}
@@ -794,6 +931,47 @@ func (i *inbox) finish(res inboxResult) (done bool, outcome *inboxOutcome) {
 	}
 	i.clampMode()
 	return false, nil
+}
+
+// finishDetail takes who is attached to the row whose menu is open. Take
+// over size may join its menu; the highlight stays on the action it was on.
+// A failure only leaves the detail line without them.
+func (i *inbox) finishDetail(res inboxResult) {
+	if i.detail == nil || i.detail.key != res.key || res.err != nil {
+		return
+	}
+	i.detail.attachments, i.detail.loaded = res.attachments, true
+	r, ok := i.row(res.key)
+	if i.mode != inboxActions || i.modeRow != res.key || !ok {
+		return
+	}
+	current := i.modeActions[i.modeIndex]
+	i.modeActions = i.actions(r)
+	i.modeIndex = max(slices.Index(i.modeActions, current), 0)
+}
+
+// finishLoad opens what a load fetched in the pager, unless the user has
+// moved on to something else meanwhile.
+func (i *inbox) finishLoad(res inboxResult) {
+	if i.loading == nil || *i.loading != *res.load {
+		return // an attachment came between: nobody waits for it now
+	}
+	i.loading = nil
+	what := res.load.what.label()
+	switch {
+	case res.err != nil:
+		i.fail("could not load the %s of %s: %v", what, res.address, res.err)
+	case res.page == nil && res.load.what == rowDiff:
+		i.setNotice(&inboxNotice{message: "no changes in " + res.address + " since it started"})
+	case res.page == nil:
+		i.setNotice(&inboxNotice{message: res.address + " has no history"})
+	case i.leaving != nil:
+	case i.mode != inboxBrowse && i.mode != inboxActions:
+		// A confirmation or the agent chooser is open: never pulled away.
+		i.setNotice(&inboxNotice{message: "the " + what + " of " + res.address + " is ready; choose it again to read it"})
+	default:
+		i.mode, i.page = inboxPager, res.page
+	}
 }
 
 // answered reports whether every host has been heard from.
@@ -842,6 +1020,8 @@ func (i *inbox) state(r inboxRow) (word, glyph, style string) {
 	}
 	if p, ok := i.pending[r.key()]; ok {
 		word = p
+	} else if i.loading != nil && i.loading.key == r.key() {
+		word = "loading…"
 	}
 	return word, glyph, style
 }
@@ -1081,7 +1261,7 @@ func (i *inbox) hintLine(h [][2]string) line {
 // wraps one), at most rows-1 of them: drawing moves the cursor up over the
 // previous drawing, which cannot go past the top of the screen. It also
 // notes what made it onto the screen: when the failures were first drawn
-// (failuresShown, which acknowledge relies on) and when a remove
+// (failuresShown, which acknowledge relies on) and when a stop or remove
 // confirmation was (confirmShown, confirmCropped).
 func (i *inbox) render(cols, rows int) []string {
 	t := i.theme
@@ -1108,7 +1288,7 @@ func (i *inbox) render(cols, rows int) []string {
 			if i.mode == inboxConfirm {
 				confirmAt = len(body)
 			}
-			body = append(body, i.menuLines(r)...)
+			body = append(body, i.menuLines(r, width)...)
 		}
 		if n == sel {
 			selLast = len(body) - 1
@@ -1179,16 +1359,53 @@ func (i *inbox) render(cols, rows int) []string {
 	return out
 }
 
-func (i *inbox) menuLines(r inboxRow) []line {
+func (i *inbox) menuLines(r inboxRow, width int) []line {
 	t := i.theme
 	if i.mode == inboxConfirm {
-		return []line{{spans: []span{{"", "    "}, {t.signalFG, "Remove " + escapeControls(r.address()) + "?"}, {t.mutedFG, " Its working directory is kept."}}}}
+		ask, then := "Remove ", " Its working directory is kept."
+		if i.confirming == rowStop {
+			ask, then = "Stop ", " Its agent is ended; the session stays listed."
+		}
+		return []line{{spans: []span{{"", "    "}, {t.signalFG, ask + escapeControls(r.address()) + "?"}, {t.mutedFG, then}}}}
 	}
-	var lines []line
+	lines := []line{{spans: []span{{"", "    "}, {t.mutedFG, truncateCells(i.detailText(r), max(width-4, 1))}}}}
 	for n, a := range i.actions(r) {
 		lines = append(lines, i.menuLine(n, a.label(), n == i.modeIndex))
 	}
 	return lines
+}
+
+// detailText is the line above a row's actions: where the session is, what
+// runs there, and who is attached.
+func (i *inbox) detailText(r inboxRow) string {
+	cwd := r.rec.Cwd
+	if r.host.host == nil {
+		if home, err := os.UserHomeDir(); err == nil && home != "" && (cwd == home || strings.HasPrefix(cwd, home+"/")) {
+			cwd = "~" + cwd[len(home):]
+		}
+	}
+	parts := []string{r.address(), cwd, r.rec.Agent}
+	if d := i.detail; r.live() && d != nil && d.key == r.key() && d.loaded {
+		parts = append(parts, attachedText(d))
+	}
+	return escapeControls(strings.Join(parts, " · "))
+}
+
+// attachedText says who is attached and who owns the size.
+func attachedText(d *inboxDetail) string {
+	n := len(d.attachments)
+	if n == 0 {
+		return "nobody attached"
+	}
+	text := fmt.Sprintf("%d attached", n)
+	if o := d.sizeOwner(); o != nil {
+		who := "one owns"
+		if n == 1 {
+			who = "owns"
+		}
+		text += fmt.Sprintf(" (%s the size, %d×%d)", who, o.Cols, o.Rows)
+	}
+	return text
 }
 
 func (i *inbox) createMenuLines() []line {
@@ -1358,24 +1575,46 @@ func (a *app) runInbox() error {
 	began := time.Now()
 	var screen inlineScreen
 	drawn := false
+	// The pager draws on the alternate screen, which keeps the inbox's
+	// block on the primary one as it was; paging is set while it is up.
+	var pager fullScreen
+	paging := false
+	leavePager := func() {
+		if paging {
+			writeOut([]byte("\x1b[?1049l"))
+			paging = false
+		}
+	}
+	defer leavePager()
 	for {
 		// A row's menu closes once it is not shown, even when only time
 		// changed what the filter matches.
 		i.clampMode()
 		cols, rows, _, _ := terminalGeometry()
-		view := chooseInboxView(int(cols), drawn, i.answered() || time.Since(began) > probeTimeout)
-		i.setHidden(view != inboxDrawn)
-		switch view {
-		case inboxDrawn:
-			screen.draw(i.render(int(cols), int(rows)), int(cols))
-			drawn = true
-		case inboxNarrowed:
-			screen.draw(narrowNotice(int(cols), i.narrowStatus()), int(cols))
-		case inboxListed:
-			screen.clear(int(cols))
-			i.printNarrow(int(cols))
-			printUnseen(i.unseen())
-			return nil
+		if i.mode == inboxPager {
+			if !paging {
+				writeOut([]byte("\x1b[?1049h"))
+				paging, pager = true, fullScreen{}
+			}
+			// It fills the screen at any size, so it is never hidden.
+			i.setHidden(false)
+			pager.draw(i.renderPage(int(cols), int(rows)))
+		} else {
+			leavePager()
+			view := chooseInboxView(int(cols), drawn, i.answered() || time.Since(began) > probeTimeout)
+			i.setHidden(view != inboxDrawn)
+			switch view {
+			case inboxDrawn:
+				screen.draw(i.render(int(cols), int(rows)), int(cols))
+				drawn = true
+			case inboxNarrowed:
+				screen.draw(narrowNotice(int(cols), i.narrowStatus()), int(cols))
+			case inboxListed:
+				screen.clear(int(cols))
+				i.printNarrow(int(cols))
+				printUnseen(i.unseen())
+				return nil
+			}
 		}
 		// What the decoder holds (a lone ESC, a paste, or the rest of a
 		// given-up one) is given up when nothing completes it in time.
@@ -1417,7 +1656,7 @@ func (a *app) runInbox() error {
 				screen.clear(int(cols))
 				return errors.New("stdin closed")
 			}
-			if c, r, _, _ := terminalGeometry(); c != cols || r != rows {
+			if c, r, _, _ := terminalGeometry(); (c != cols || r != rows) && !paging {
 				// Resized since the last drawing: what is on screen is
 				// not known (the terminal may have rewrapped or scrolled
 				// it), so these keys meet a hidden inbox, and the top of
@@ -1440,6 +1679,11 @@ func (a *app) runInbox() error {
 			start(e)
 		}
 		i.effects = nil
+		if done {
+			// Back to the primary screen: to the inbox's block, to be
+			// cleared or to attach over.
+			leavePager()
+		}
 		if done && outcome == nil {
 			cols, _, _, _ := terminalGeometry()
 			screen.clear(int(cols))
@@ -1471,15 +1715,31 @@ func (a *app) runInboxEffect(ctx context.Context, e inboxEffect) inboxResult {
 		res, message, err := c.createHere(ctx, e.createName, e.createAgent)
 		return createResult(res, message, c.explain(err), requestSent(err))
 	}
-	r := e.remove
-	out := inboxResult{key: r.key(), address: r.address(), host: r.host.name}
+	r := cmp.Or(e.remove, e.stop, e.load, e.attachments)
+	out := inboxResult{key: r.key(), address: r.address(), host: r.host.name, stop: e.stop != nil}
 	c := &client{paths: a.paths, host: r.host.host}
 	defer c.close()
 	ctx, cancel := context.WithTimeout(ctx, inboxActionTimeout)
 	defer cancel()
+	switch {
+	case e.attachments != nil:
+		out.isDetail = true
+		resp, err := c.callCtx(ctx, &protocol.Request{ListAttachments: &protocol.SessionRef{SessionID: r.rec.SessionID}}, func(r *protocol.Response) bool { return r.Attachments != nil })
+		if err != nil {
+			out.err = err
+			return out
+		}
+		out.attachments = *resp.Attachments
+		return out
+	case e.load != nil:
+		out.load = &inboxLoad{key: r.key(), what: e.loadWhat}
+		out.page, out.err = a.loadPage(ctx, c, r, e.loadWhat)
+		out.err = c.explain(out.err)
+		return out
+	}
 	// ExpectUID makes the daemon refuse if the session the user confirmed
 	// was replaced by a new one under its name (protocol.CapKillExpectUID).
-	// A daemon without it would remove by name, so the inbox asks it for the
+	// A daemon without it would act by name, so the inbox asks it for the
 	// session first and refuses if the UID changed. A replacement between
 	// that answer and the kill still goes through there. Nothing was sent
 	// if this fails, so its errors are certain.
@@ -1487,7 +1747,7 @@ func (a *app) runInboxEffect(ctx context.Context, e inboxEffect) inboxResult {
 		out.err = c.explain(err)
 		return out
 	}
-	resp, err := c.requestCtx(ctx, &protocol.Request{KillSession: &protocol.KillSession{SessionID: r.rec.SessionID, Remove: true, ExpectUID: r.rec.UID}})
+	resp, err := c.requestCtx(ctx, &protocol.Request{KillSession: &protocol.KillSession{SessionID: r.rec.SessionID, Remove: e.remove != nil, ExpectUID: r.rec.UID}})
 	switch {
 	case err != nil:
 		// Unknown once the kill was sent: the daemon may have acted.
@@ -1498,6 +1758,56 @@ func (a *app) runInboxEffect(ctx context.Context, e inboxEffect) inboxResult {
 		out.err = fmt.Errorf("unexpected response: %s", describeResponse(resp))
 	}
 	return out
+}
+
+// loadPage fetches a session's diff or (plain) history for the pager, cut
+// at inboxPageMax; nil when there is nothing to show. It refuses a session
+// that is no longer the one the row showed.
+func (a *app) loadPage(ctx context.Context, c *client, r *inboxRow, what rowAction) (*inboxPage, error) {
+	id := r.rec.SessionID
+	if r.rec.UID != "" {
+		resp, err := c.callCtx(ctx, &protocol.Request{GetSession: &protocol.SessionRef{SessionID: id}}, func(r *protocol.Response) bool { return r.Session != nil })
+		if err != nil {
+			return nil, err
+		}
+		if resp.Session.UID != r.rec.UID {
+			return nil, fmt.Errorf("session `%s` is not the session you chose: it was removed and a new session was started under the same name", id)
+		}
+	}
+	cs, err := c.controlStream(ctx)
+	if err != nil {
+		return nil, err
+	}
+	buf := &pageBuffer{limit: inboxPageMax}
+	switch {
+	case what == rowDiff:
+		err = c.streamArtifactCtx(ctx, id, "diff", buf)
+	case cs.features.Has(protocol.CapArtifacts):
+		err = c.streamArtifactCtx(ctx, id, "history", buf)
+	default:
+		// An older daemon sends the whole history in one response.
+		var resp *protocol.Response
+		resp, err = c.callCtx(ctx, &protocol.Request{GetHistory: &protocol.GetHistory{SessionID: id}}, func(r *protocol.Response) bool { return r.History != nil })
+		if err == nil {
+			_, err = buf.Write([]byte(resp.History.Data))
+		}
+	}
+	if err != nil && !errors.Is(err, errPageFull) {
+		return nil, err
+	}
+	if len(bytes.TrimSpace(buf.buf)) == 0 {
+		return nil, nil
+	}
+	title := what.label() + " of " + r.address()
+	p := newPage(escapeControls(title), buf.buf, what == rowDiff)
+	if buf.truncated {
+		command := "agt diff "
+		if what == rowHistory {
+			command = "agt history "
+		}
+		p.note = fmt.Sprintf("only the first %s are shown; `%s%s` prints all of it", formatBytes(uint64(inboxPageMax)), command, r.address())
+	}
+	return p, nil
 }
 
 // createResult is what a create reports: a daemon's refusal (message) is
@@ -1637,7 +1947,7 @@ func (i *inbox) messageLines() []line {
 // inbox's screen (client.fromInbox), and says how the session ended if it
 // did.
 func (a *app) attachFromInbox(o *inboxOutcome) (*protocol.SessionEnded, error) {
-	c := &client{paths: a.paths, host: o.host, fromInbox: true}
+	c := &client{paths: a.paths, host: o.host, fromInbox: true, takeSize: o.takeSize}
 	a.client = c // so a refused key's error explains itself
 	defer c.close()
 	return c.attachLoop(o.id, o.uid)
@@ -1648,6 +1958,11 @@ func (a *app) attachFromInbox(o *inboxOutcome) (*protocol.SessionEnded, error) {
 // attach, and asks the session's host again.
 func (i *inbox) attached(o *inboxOutcome, ended *protocol.SessionEnded, err error) {
 	i.leaving = nil
+	// What was being loaded or read is not what the user came back for.
+	i.loading, i.page, i.detail = nil, nil, nil
+	if i.mode == inboxPager {
+		i.mode = inboxBrowse
+	}
 	name, address := localHostName, o.id
 	if o.host != nil {
 		name, address = o.host.Name, o.host.Name+"/"+o.id

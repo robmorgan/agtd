@@ -64,6 +64,11 @@ type hostProbe struct {
 
 func (h *hostProbe) online() bool { return h.status == hostOnline }
 
+// has reports whether the host's daemon advertised capability c.
+func (h *hostProbe) has(c string) bool {
+	return h.welcome != nil && protocol.HasCapability(h.welcome.Capabilities, c)
+}
+
 // running counts the host's running sessions.
 func (h *hostProbe) running() int {
 	n := 0
