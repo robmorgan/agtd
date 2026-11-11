@@ -64,6 +64,12 @@ func (i *inbox) keys(t *testing.T, evs ...keyEvent) (bool, *inboxOutcome) {
 	return false, nil
 }
 
+// actionEffects are the effects that act or ask a host again: all but the
+// fetch of who is attached that opening a live row's menu makes.
+func (i *inbox) actionEffects() []inboxEffect {
+	return slices.DeleteFunc(slices.Clone(i.effects), func(e inboxEffect) bool { return e.attachments != nil })
+}
+
 func (i *inbox) typed(t *testing.T, s string) {
 	t.Helper()
 	for _, r := range s {
@@ -203,15 +209,15 @@ func TestInboxEscOrder(t *testing.T) {
 		t.Fatalf("tab: %v", i.mode)
 	}
 	i.keys(t, char('x'))
-	i.keys(t, char('2'))
+	i.keys(t, char('3'))
 	if i.mode != inboxConfirm || i.query != "alp" {
 		t.Fatalf("2: %v %q", i.mode, i.query)
 	}
 	i.keys(t, key(keyEsc))
-	if i.mode != inboxActions || i.modeIndex != 1 {
+	if i.mode != inboxActions || i.modeIndex != 2 {
 		t.Fatalf("esc from confirm: %v %d", i.mode, i.modeIndex)
 	}
-	i.keys(t, char('2'), char('n'))
+	i.keys(t, char('3'), char('n'))
 	if i.mode != inboxActions {
 		t.Fatalf("n on confirm: %v", i.mode)
 	}
@@ -225,13 +231,13 @@ func TestInboxEscOrder(t *testing.T) {
 	if done, out := i.keys(t, key(keyEsc)); !done || out != nil {
 		t.Fatalf("esc quits: %v %+v", done, out)
 	}
-	if len(i.effects) != 0 {
-		t.Fatalf("quitting acted: %+v", i.effects)
+	if len(i.actionEffects()) != 0 {
+		t.Fatalf("quitting acted: %+v", i.actionEffects())
 	}
 }
 
 // Enter attaches to a running row and opens the actions of an ended one,
-// whose only action is remove.
+// which cannot be attached to or stopped.
 func TestInboxEnterAndActions(t *testing.T) {
 	i := testInbox(t, hostWith(localHostName, withUID(demo("alpha"), "1"), withUID(demoWith("old", session.StatusExited), "2")))
 	i.keys(t, key(keyDown))
@@ -239,12 +245,12 @@ func TestInboxEnterAndActions(t *testing.T) {
 		t.Fatalf("enter on exited: %v %v", done, i.mode)
 	}
 	r, _ := i.row(i.modeRow)
-	if got := i.actions(r); len(got) != 1 || got[0] != rowRemove {
+	if got := i.actions(r); !slices.Equal(got, []rowAction{rowRemove, rowHistory}) {
 		t.Fatalf("exited actions = %v", got)
 	}
 	i.keys(t, key(keyEsc), key(keyUp), key(keyRight))
 	r, _ = i.row(i.modeRow)
-	if got := i.actions(r); len(got) != 2 || got[0] != rowAttach || i.mode != inboxActions {
+	if got := i.actions(r); !slices.Equal(got, []rowAction{rowAttach, rowStop, rowRemove}) || i.mode != inboxActions {
 		t.Fatalf("running actions = %v", got)
 	}
 	if done, out := i.keys(t, char('1')); !done || out.id != "alpha" || out.host != nil {
@@ -263,20 +269,20 @@ func TestInboxEnterAndActions(t *testing.T) {
 func TestInboxRemove(t *testing.T) {
 	i := testInbox(t, hostWith(localHostName, withUID(demo("demo"), "l1")), hostWith("dev", withUID(demo("demo"), "d1")))
 	i.typed(t, "dev/")
-	i.keys(t, key(keyTab), char('2'))
+	i.keys(t, key(keyTab), char('3'))
 	if !strings.Contains(i.screen(100, 30), "Remove dev/demo? Its working directory is kept.") {
 		t.Fatalf("confirm:\n%s", i.screen(100, 30))
 	}
 	i.keys(t, key(keyEnter))
-	if len(i.effects) != 1 || i.effects[0].remove == nil || i.effects[0].remove.host.name != "dev" || i.effects[0].remove.rec.UID != "d1" {
-		t.Fatalf("effects = %+v", i.effects)
+	if len(i.actionEffects()) != 1 || i.actionEffects()[0].remove == nil || i.actionEffects()[0].remove.host.name != "dev" || i.actionEffects()[0].remove.rec.UID != "d1" {
+		t.Fatalf("effects = %+v", i.actionEffects())
 	}
-	e := i.effects[0]
+	e := i.actionEffects()[0]
 	i.effects = nil
 	if !strings.Contains(i.screen(100, 30), "removing…") {
 		t.Fatalf("pending:\n%s", i.screen(100, 30))
 	}
-	i.keys(t, key(keyTab), char('2'))
+	i.keys(t, key(keyTab), char('3'))
 	if i.mode == inboxConfirm || i.notice == nil || !strings.Contains(i.notice.message, "is removing") {
 		t.Fatalf("second remove: %v %+v", i.mode, i.notice)
 	}
@@ -294,8 +300,8 @@ func TestInboxRemove(t *testing.T) {
 	// Lost answer: the host is asked again.
 	i.pending[k] = "removing…"
 	i.finish(inboxResult{key: k, address: "dev/demo", host: "dev", err: errors.New("connection lost"), unknown: true})
-	if len(i.failures) != 2 || !strings.Contains(i.failures[1], "result unknown, refreshing") || len(i.effects) != 1 || i.effects[0].reprobe != "dev" {
-		t.Fatalf("unknown: %q %+v", i.failures, i.effects)
+	if len(i.failures) != 2 || !strings.Contains(i.failures[1], "result unknown, refreshing") || len(i.actionEffects()) != 1 || i.actionEffects()[0].reprobe != "dev" {
+		t.Fatalf("unknown: %q %+v", i.failures, i.actionEffects())
 	}
 	i.effects = nil
 	// Done: the row goes at once, and stays gone until dev's next probe.
@@ -314,8 +320,8 @@ func TestInboxRemove(t *testing.T) {
 // leaves at once.
 func TestInboxLeaveWaitsForActions(t *testing.T) {
 	i := testInbox(t, hostWith(localHostName, withUID(demo("a"), "1"), withUID(demo("b"), "2")))
-	i.keys(t, key(keyTab), char('2'), key(keyEnter))
-	k := i.effects[0].remove.key()
+	i.keys(t, key(keyTab), char('3'), key(keyEnter))
+	k := i.actionEffects()[0].remove.key()
 	if done, _ := i.keys(t, key(keyEsc)); done || !strings.Contains(i.screen(100, 30), "finishing removing") {
 		t.Fatalf("esc with a remove pending: %v\n%s", done, i.screen(100, 30))
 	}
@@ -324,15 +330,15 @@ func TestInboxLeaveWaitsForActions(t *testing.T) {
 	}
 
 	i = testInbox(t, hostWith(localHostName, withUID(demo("a"), "1"), withUID(demo("b"), "2")))
-	i.keys(t, key(keyTab), char('2'), key(keyEnter), key(keyDown))
+	i.keys(t, key(keyTab), char('3'), key(keyEnter), key(keyDown))
 	if done, _ := i.keys(t, key(keyEnter)); done || i.leaving == nil || i.leaving.outcome == nil {
 		t.Fatalf("attach with a remove pending: %v", done)
 	}
 	// Value: protects=while a leave waits, typing, pastes, arrows, Tab and Enter change nothing, so the chosen session stays the one attached; fails_when=keys reach the list while leaving; why_new=only Esc and Ctrl-C were sent while waiting; seam=none; no_claim=drawing
 	// While it waits, other keys and pastes change nothing.
 	i.handlePaste("pasted")
-	if done, _ := i.keys(t, char('x'), key(keyUp), key(keyTab), key(keyEnter), ctrl('n')); done || i.query != "" || i.mode != inboxBrowse || len(i.effects) != 1 || i.leaving.outcome.id != "b" {
-		t.Fatalf("keys while leaving: %v %q %v %+v %+v", done, i.query, i.mode, i.effects, i.leaving.outcome)
+	if done, _ := i.keys(t, char('x'), key(keyUp), key(keyTab), key(keyEnter), ctrl('n')); done || i.query != "" || i.mode != inboxBrowse || len(i.actionEffects()) != 1 || i.leaving.outcome.id != "b" {
+		t.Fatalf("keys while leaving: %v %q %v %+v %+v", done, i.query, i.mode, i.actionEffects(), i.leaving.outcome)
 	}
 	if done, out := i.keys(t, key(keyEsc)); !done || out == nil || out.id != "b" {
 		t.Fatalf("second esc: %v %+v", done, out)
@@ -534,7 +540,7 @@ func TestInboxHeightCap(t *testing.T) {
 		t.Fatalf("selection scrolled away:\n%s", s)
 	}
 	i.keys(t, key(keyTab))
-	if s := stripANSI(strings.Join(i.render(100, 16), "\n")); !strings.Contains(s, "2. remove") {
+	if s := stripANSI(strings.Join(i.render(100, 16), "\n")); !strings.Contains(s, "3. remove") {
 		t.Fatalf("menu scrolled away:\n%s", s)
 	}
 	// A tiny terminal still gets no more lines than it has.
@@ -1315,33 +1321,33 @@ func TestInboxConfirmsOnlyWhatWasDrawn(t *testing.T) {
 	i := testInbox(t, hostWith(localHostName, withUID(demo("a"), "1")))
 	i.now = func() time.Time { return now }
 	i.keys(t, key(keyTab))
-	for _, ev := range []keyEvent{char('2'), key(keyEnter), char('y')} { // one read
+	for _, ev := range []keyEvent{char('3'), key(keyEnter), char('y')} { // one read
 		i.handleKey(ev)
 	}
-	if i.mode != inboxConfirm || len(i.effects) != 0 {
-		t.Fatalf("burst confirmed: %v %+v", i.mode, i.effects)
+	if i.mode != inboxConfirm || len(i.actionEffects()) != 0 {
+		t.Fatalf("burst confirmed: %v %+v", i.mode, i.actionEffects())
 	}
 	i.render(100, 30)
 	now = now.Add(30 * time.Millisecond) // key repeat
 	i.handleKey(key(keyEnter))
 	i.render(100, 30)
-	if len(i.effects) != 0 {
-		t.Fatalf("confirmed 30 ms after drawing: %+v", i.effects)
+	if len(i.actionEffects()) != 0 {
+		t.Fatalf("confirmed 30 ms after drawing: %+v", i.actionEffects())
 	}
 	now = now.Add(inboxAcknowledgeAfter)
 	i.handleKey(key(keyEnter))
-	if len(i.effects) != 1 || i.effects[0].remove == nil {
-		t.Fatalf("seen confirmation: %+v", i.effects)
+	if len(i.actionEffects()) != 1 || i.actionEffects()[0].remove == nil {
+		t.Fatalf("seen confirmation: %+v", i.actionEffects())
 	}
 
 	i = testInbox(t, hostWith(localHostName, withUID(demo("a"), "1")))
 	i.now = func() time.Time { return now }
-	i.keys(t, key(keyTab), char('2'))
+	i.keys(t, key(keyTab), char('3'))
 	i.render(100, 5) // only the input box and hints fit
 	now = now.Add(time.Second)
 	i.handleKey(key(keyEnter))
-	if len(i.effects) != 0 || i.notice == nil || !strings.Contains(i.notice.message, "taller") {
-		t.Fatalf("cropped confirmation: %+v %+v", i.effects, i.notice)
+	if len(i.actionEffects()) != 0 || i.notice == nil || !strings.Contains(i.notice.message, "taller") {
+		t.Fatalf("cropped confirmation: %+v %+v", i.actionEffects(), i.notice)
 	}
 }
 
@@ -1396,19 +1402,19 @@ func TestInboxHidingRestartsAConfirmation(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	i := testInbox(t, hostWith(localHostName, withUID(demo("a"), "1")))
 	i.now = func() time.Time { return now }
-	i.keys(t, key(keyTab), char('2'))
+	i.keys(t, key(keyTab), char('3'))
 	now = now.Add(time.Second)
 	i.setHidden(true)
 	i.setHidden(false)
 	i.render(100, 30)
 	i.handleKey(key(keyEnter))
-	if len(i.effects) != 0 {
-		t.Fatalf("confirmed at once after being hidden: %+v", i.effects)
+	if len(i.actionEffects()) != 0 {
+		t.Fatalf("confirmed at once after being hidden: %+v", i.actionEffects())
 	}
 	now = now.Add(inboxAcknowledgeAfter)
 	i.handleKey(key(keyEnter))
-	if len(i.effects) != 1 {
-		t.Fatalf("not confirmed after its wait: %+v", i.effects)
+	if len(i.actionEffects()) != 1 {
+		t.Fatalf("not confirmed after its wait: %+v", i.actionEffects())
 	}
 }
 
@@ -1433,5 +1439,184 @@ func TestInboxAfterAnAttachment(t *testing.T) {
 	i.attached(&inboxOutcome{id: "a", uid: "1"}, nil, nil) // a detach
 	if i.notice != nil || len(i.failures) != 1 || len(i.effects) != 1 {
 		t.Fatalf("after a detach: %+v %q %+v", i.notice, i.failures, i.effects)
+	}
+}
+
+// Value: protects=stop asks on the line, runs against the row's host and incarnation without removing it, and reports like remove; fails_when=stop sends Remove, drops the row, or skips the confirmation; why_new=phase 2 added stop; seam=none; no_claim=the daemon's stop (TestInboxStopEndToEnd covers none; internal/daemon tests killSession)
+// Stop confirms, then stops the row's own session and leaves it listed.
+func TestInboxStop(t *testing.T) {
+	i := testInbox(t, hostWith(localHostName, withUID(demo("demo"), "l1")), hostWith("dev", withUID(demo("demo"), "d1")))
+	i.typed(t, "dev/")
+	i.keys(t, key(keyTab), char('2'))
+	if s := i.screen(100, 30); !strings.Contains(s, "Stop dev/demo? Its agent is ended; the session stays listed.") {
+		t.Fatalf("confirm:\n%s", s)
+	}
+	// Esc goes back to the menu, on stop.
+	i.keys(t, key(keyEsc))
+	if i.mode != inboxActions || i.modeActions[i.modeIndex] != rowStop {
+		t.Fatalf("esc: %v %d", i.mode, i.modeIndex)
+	}
+	i.keys(t, key(keyEnter), key(keyEnter))
+	effects := i.actionEffects()
+	if len(effects) != 1 || effects[0].stop == nil || effects[0].stop.host.name != "dev" || effects[0].stop.rec.UID != "d1" || effects[0].remove != nil {
+		t.Fatalf("effects = %+v", effects)
+	}
+	i.effects = nil
+	if s := i.screen(100, 30); !strings.Contains(s, "stopping…") {
+		t.Fatalf("pending:\n%s", s)
+	}
+	k := effects[0].stop.key()
+	i.finish(inboxResult{key: k, address: "dev/demo", host: "dev", stop: true, err: errors.New("session `demo` is not running")})
+	if len(i.failures) != 1 || i.failures[0] != "could not stop dev/demo: session `demo` is not running" {
+		t.Fatalf("refused: %q", i.failures)
+	}
+	i.pending[k] = "stopping…"
+	i.finish(inboxResult{key: k, address: "dev/demo", host: "dev", stop: true, err: errors.New("connection lost"), unknown: true})
+	if len(i.failures) != 2 || !strings.HasPrefix(i.failures[1], "stopping dev/demo: connection lost; result unknown") {
+		t.Fatalf("unknown: %q", i.failures)
+	}
+	i.effects = nil
+	i.pending[k] = "stopping…"
+	i.finish(inboxResult{key: k, address: "dev/demo", host: "dev", stop: true})
+	if i.notice == nil || i.notice.message != "stopped session dev/demo" || len(i.gone) != 0 || len(i.effects) != 1 || i.effects[0].reprobe != "dev" {
+		t.Fatalf("stopped: %+v %v %+v", i.notice, i.gone, i.effects)
+	}
+	// An ended session has nothing to stop.
+	ended := demoWith("old", session.StatusExited)
+	if slices.Contains(i.actions(inboxRow{host: hostWith(localHostName), rec: &ended}), rowStop) {
+		t.Fatal("stop offered for an ended session")
+	}
+}
+
+// Value: protects=the menu's detail line names where the session is and who is attached, and take over size appears only once another attachment owns the size, without moving the highlight; fails_when=the fetch is not made, a stale answer lands on another row, or the highlight jumps; why_new=phase 2 added the detail line and take over size; seam=none; no_claim=ListAttachments on a daemon
+// A menu says where the session runs and who is attached; take over size
+// joins it when another attachment owns the size, and attaches taking it.
+func TestInboxDetailAndTakeSize(t *testing.T) {
+	i := testInbox(t, hostWith(localHostName, withUID(demo("a"), "1")), hostWith("dev", withUID(demo("demo"), "d1")))
+	i.typed(t, "dev/")
+	i.keys(t, key(keyTab), key(keyDown), key(keyDown))
+	if len(i.effects) != 1 || i.effects[0].attachments == nil || i.effects[0].attachments.host.name != "dev" {
+		t.Fatalf("effects = %+v", i.effects)
+	}
+	if s := i.screen(100, 30); !strings.Contains(s, "dev/demo · /tmp/demo · codex ") || strings.Contains(s, "attached") || strings.Contains(s, "take over size") {
+		t.Fatalf("before the answer:\n%s", s)
+	}
+	k := rowKey{host: "dev", uid: "d1"}
+	// An answer for another row (a menu since closed) is dropped.
+	i.finish(inboxResult{key: rowKey{host: localHostName, uid: "1"}, isDetail: true, attachments: []session.AttachmentRecord{{SizeOwner: true}}})
+	if i.detail.loaded {
+		t.Fatal("took another row's attachments")
+	}
+	i.finish(inboxResult{key: k, isDetail: true, attachments: []session.AttachmentRecord{{AttachID: "x", SizeOwner: true, Cols: 120, Rows: 40}}})
+	s := i.screen(100, 30)
+	if !strings.Contains(s, "dev/demo · /tmp/demo · codex · 1 attached (owns the size, 120×40)") || !strings.Contains(s, "4. take over size") {
+		t.Fatalf("after the answer:\n%s", s)
+	}
+	if i.modeActions[i.modeIndex] != rowRemove {
+		t.Fatalf("highlight moved to %v", i.modeActions[i.modeIndex])
+	}
+	if done, out := i.keys(t, char('4')); !done || out == nil || !out.takeSize || out.host.Name != "dev" || out.uid != "d1" {
+		t.Fatalf("take over size: %v %+v", done, out)
+	}
+	if got := attachedText(&inboxDetail{attachments: make([]session.AttachmentRecord, 2)}); got != "2 attached" {
+		t.Fatalf("no owner: %q", got)
+	}
+	if got := attachedText(&inboxDetail{}); got != "nobody attached" {
+		t.Fatalf("none: %q", got)
+	}
+}
+
+// withArtifacts is h as a daemon that streams artifacts.
+func withArtifacts(h *hostProbe) *hostProbe {
+	h.welcome = &protocol.Welcome{Capabilities: []string{protocol.CapArtifacts}}
+	return h
+}
+
+// Value: protects=diff and history load off the UI goroutine, open the pager when they arrive, and never pull the user out of a confirmation; fails_when=a load blocks leaving, opens over a confirmation, or survives an attachment; why_new=phase 2 added diff and history; seam=none; no_claim=fetching (TestInboxLoadPage)
+// Diff and history load in the background and open in the pager.
+func TestInboxDiffAndHistory(t *testing.T) {
+	old := withUID(demoWith("old", session.StatusExited), "2")
+	i := testInbox(t, withArtifacts(hostWith(localHostName, withUID(demo("a"), "1"), old)))
+	r, _ := i.row(rowKey{host: localHostName, uid: "2"})
+	if got := i.actions(r); !slices.Equal(got, []rowAction{rowRemove, rowDiff, rowHistory}) {
+		t.Fatalf("ended actions = %v", got)
+	}
+	i.keys(t, key(keyTab), char('4'))
+	effects := i.actionEffects()
+	if len(effects) != 1 || effects[0].load == nil || effects[0].loadWhat != rowDiff || i.mode != inboxBrowse {
+		t.Fatalf("diff: %+v %v", effects, i.mode)
+	}
+	i.effects = nil
+	if s := i.screen(100, 30); !strings.Contains(s, "loading…") {
+		t.Fatalf("loading:\n%s", s)
+	}
+	// One at a time; and a load never holds up leaving.
+	i.keys(t, key(keyDown), key(keyTab), char('2'))
+	if i.notice == nil || i.notice.message != "still loading the last one" || len(i.actionEffects()) != 0 {
+		t.Fatalf("second load: %+v %+v", i.notice, i.effects)
+	}
+	i.keys(t, key(keyEsc))
+	if ok, _ := i.leave(nil); !ok {
+		t.Fatal("leaving waited for a load")
+	}
+	load := &inboxLoad{key: rowKey{host: localHostName, uid: "1"}, what: rowDiff}
+	page := newPage("diff of a", []byte(sampleDiff), true)
+	i.finish(inboxResult{key: load.key, address: "a", load: load, page: page})
+	if i.mode != inboxPager || i.page != page || i.loading != nil {
+		t.Fatalf("arrived: %v %v", i.mode, i.loading)
+	}
+	i.keys(t, char('q'))
+	if i.mode != inboxBrowse || i.page != nil {
+		t.Fatalf("q: %v", i.mode)
+	}
+	// Quitting from the pager while an action runs shows what it waits for.
+	i.mode, i.page = inboxPager, page
+	i.pending[rowKey{host: localHostName, uid: "2"}] = "removing…"
+	if done, _ := i.keys(t, ctrl('c')); done || i.mode != inboxBrowse || !strings.Contains(i.screen(100, 30), "finishing removing old") {
+		t.Fatalf("ctrl-c from the pager: %v %v\n%s", done, i.mode, i.screen(100, 30))
+	}
+	i.leaving = nil
+	delete(i.pending, rowKey{host: localHostName, uid: "2"})
+
+	// A load that arrives during a confirmation waits for the user.
+	i.keys(t, key(keyTab), char('3'))
+	h := i.loading
+	i.effects = nil
+	i.keys(t, key(keyTab), char('1'))
+	if i.mode != inboxConfirm {
+		t.Fatalf("mode %v", i.mode)
+	}
+	i.finish(inboxResult{key: h.key, address: "old", load: h, page: newPage("history of old", []byte("$ make\nok\n"), false)})
+	if i.mode != inboxConfirm || i.notice == nil || !strings.Contains(i.notice.message, "the history of old is ready") {
+		t.Fatalf("during a confirmation: %v %+v", i.mode, i.notice)
+	}
+	i.keys(t, key(keyEsc), key(keyEsc))
+
+	// Nothing to show, a failure, and an attachment in between.
+	for _, tc := range []struct {
+		res  inboxResult
+		want string
+	}{
+		{inboxResult{address: "a", load: &inboxLoad{what: rowDiff}}, "no changes in a since it started"},
+		{inboxResult{address: "old", load: &inboxLoad{what: rowHistory}}, "old has no history"},
+	} {
+		i.loading = tc.res.load
+		i.finish(tc.res)
+		if i.notice == nil || i.notice.message != tc.want || i.mode != inboxBrowse {
+			t.Fatalf("empty: %+v %v", i.notice, i.mode)
+		}
+	}
+	i.loading = &inboxLoad{what: rowDiff}
+	i.finish(inboxResult{address: "a", load: i.loading, err: errors.New("session `a` does not run in a git repository")})
+	if len(i.failures) != 1 || i.failures[0] != "could not load the diff of a: session `a` does not run in a git repository" {
+		t.Fatalf("failed: %q", i.failures)
+	}
+	i.loading = &inboxLoad{what: rowDiff}
+	l := i.loading
+	i.mode, i.page = inboxPager, page
+	i.attached(&inboxOutcome{id: "a", uid: "1"}, nil, nil)
+	i.finish(inboxResult{address: "a", load: l, page: page})
+	if i.mode != inboxBrowse || i.page != nil {
+		t.Fatalf("after an attachment: %v", i.mode)
 	}
 }

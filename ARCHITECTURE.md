@@ -1535,15 +1535,22 @@ a time: every 200 ms for this machine's daemon, every 2 s for a remote one, and 
 cannot be reached after a backoff from 2 s doubling to 30 s, which Ctrl-R resets. Each probe goes to
 the inbox as a new `hostProbe` the goroutine never touches again, on a channel that holds one per
 host, so a busy inbox only delays probing and nothing is shared. Stopping the set cancels every
-goroutine, closing its connections, and waits for them; the inbox stops it before attaching, so a
-probe never competes with an attachment.
+goroutine, closing its connections, and waits for them; the inbox stops it when it ends. An
+attachment never shares a probe's connection: it dials its own.
 
-Actions never run on the inbox's goroutine. A remove (Tab, remove, confirmed on the line) runs on
-a goroutine of its own over a client of its own for the row's host, sends `KillSession` with
-`Remove` and the row's UID as `ExpectUID` (`kill-expect-uid`), and reports on a channel; the row
-reads `removing…` meanwhile and refuses a second action. A daemon without `kill-expect-uid` would
-remove by name, so the inbox first asks it for the session and refuses if its UID changed; a session
-replaced between that answer and the kill is still removed there. Creating a session runs the same
+Actions never run on the inbox's goroutine. Tab opens a row's menu: a detail line (the session's
+address, directory and agent, and for a live one who is attached and who owns the size, from
+`ListAttachments` on the row's host once the menu is open), then attach, stop, remove, take over
+size, diff and history, each where it applies (stop for a running session, take over size once
+another attachment owns the size, diff when the host serves artifacts, history once the session
+has ended, since it is saved then). Take over size joins the menu after the items that confirm, so
+their digits never move, and the highlight stays on its item. A stop or remove (confirmed on the
+line) runs on a goroutine of its own over a client of its own for the row's host, sends
+`KillSession` (with `Remove` for a remove) and the row's UID as `ExpectUID` (`kill-expect-uid`), and
+reports on a channel; the row reads `stopping…` or `removing…` meanwhile and refuses a second
+action. A daemon without `kill-expect-uid` would act by name, so the inbox first asks it for the
+session and refuses if its UID changed; a session replaced between that answer and the kill is
+still stopped or removed there. Take over size attaches with `TakeSize`, as `agt attach --take-size`. Creating a session runs the same
 way, and attaches to it when it is up. It creates on this machine, in the current directory; in a
 view locked to a remote host, Ctrl-N and the `+` row show the `agt new -C DIR host/NAME` to run instead.
 
@@ -1558,10 +1565,10 @@ own, and a second Esc leaves at once; a failure meanwhile cancels the leave, say
 an attach. Leaving prints the failures the user has not seen and any action a second Esc
 abandoned in flight: at once when quitting, after the attachment ends when attaching (its first
 repaint would clear them). A row's menu closes when its actions change (its session exited, say), so
-the highlight never slides onto remove, and when the filter no longer shows the row. A remove
+the highlight never slides onto remove, and when the filter no longer shows the row. A
 confirmation takes Enter or y only once it has been on screen for 500 ms, so keys that arrive
 with or just after the one that opened it (key repeat, a burst queued over ssh) cannot confirm it
-unseen; while a terminal too short for it crops it, Enter says so. A menu is checked against the
+unseen; while a terminal too short for it crops it, Enter says so. Stop's confirmation is the same. A menu is checked against the
 filter on every redraw, since time alone can change what it matches. Only a terminal that cannot be read or drawn ends the
 inbox.
 
@@ -1589,8 +1596,21 @@ The terminal restores the main screen with the inbox's block as it was, and the 
 over it, saying how the session ended or why it could not attach. Hosts go on being probed and
 actions go on running meanwhile; what they report waits for the inbox. An agent that draws on the
 main screen runs on the alternate one when attached from the inbox, so its output there is not in
-the terminal's scrollback; plain `agt attach` is unchanged. The full actions menu (phase 2) and
-later phases are in `docs/designs/agt-inbox.md`.
+the terminal's scrollback; plain `agt attach` is unchanged.
+
+Diff and history open in the inbox's own pager (`pager.go`), not `$PAGER`: the inbox's stdin
+reader (`stdinChunks`) would take an external pager's keys. A load runs like an action, on its
+own goroutine and client, checks the row's UID with `GetSession`, and streams the `diff` or
+`history` artifact (`GetHistory` from a daemon without artifacts) into a buffer capped at 4 MiB;
+the rest is cut and the page's last line names the `agt diff` or `agt history` command that prints
+all of it. The cap bounds what the pager holds; the stream's flow control slows the daemon while
+the buffer fills, and a full buffer ends the stream. The row reads `loading…`. A load is not an
+action: one runs at a time, nothing waits for it to leave, and an attachment or quit drops it (its
+context's end cuts the stream through a deadline, over QUIC as over the Unix socket). Its page
+opens on the alternate screen over the inbox's block, unless a confirmation or the agent chooser
+is open then (the inbox says it is ready instead); it is drawn whole on every change, with the
+inbox's own keys (↑↓ j k, space and b, g and G, q or Esc back), so host probes and action results
+keep arriving while it is up. Later phases are in `docs/designs/agt-inbox.md`.
 
 ## Runtime Root
 

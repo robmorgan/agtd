@@ -167,7 +167,9 @@ paired host, the ones that need you first, below the prompt.
 
 Type to filter (`devbox/` narrows to one host), Enter attaches to the selected session on whichever
 host runs it (a detach, or the session ending, comes back to the inbox), Tab opens its actions
-(attach, remove), Ctrl-N or the `+` row starts an agent in the
+(where it runs and who is attached, then attach, stop, remove, take over size, its diff, and the
+history of an ended session; diff and history open in a pager, q goes back), Ctrl-N or the `+` row
+starts an agent in the
 current directory (named by the filter, if any), Ctrl-R asks every host again, and Esc (or Ctrl-C) quits with everything still running.
 `agt --host NAME` opens it on that host alone; for a remote host, Ctrl-N there shows the
 `agt new -C DIR NAME/SESSION` command that starts a session on it.

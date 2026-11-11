@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -77,23 +78,30 @@ func (c *client) listArtifacts(id string) ([]session.Artifact, error) {
 // connection. Chunks are written to w as they arrive; if w is slow, the
 // stream's flow control slows the daemon (and git) down to match.
 func (c *client) streamArtifact(id, name string, w io.Writer) error {
+	return c.streamArtifactCtx(context.Background(), id, name, w)
+}
+
+// streamArtifactCtx is streamArtifact until ctx ends: its end cuts the
+// stream through a deadline, which unblocks a read on either transport.
+func (c *client) streamArtifactCtx(ctx context.Context, id, name string, w io.Writer) error {
 	if err := c.requireCapability(protocol.CapArtifacts, "artifacts"); err != nil {
 		return err
 	}
-	s, err := c.open(context.Background())
+	s, err := c.open(ctx)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+	defer context.AfterFunc(ctx, func() { s.SetDeadline(time.Now()) })()
 	if err := protocol.WriteRequest(s, &protocol.Request{GetArtifact: &protocol.GetArtifact{SessionID: id, Name: name}}); err != nil {
-		return err
+		return cmp.Or(ctx.Err(), err)
 	}
 	r := bufio.NewReader(s)
 	for {
 		resp, err := protocol.ReadResponse(r)
 		switch {
 		case err != nil:
-			return err
+			return cmp.Or(ctx.Err(), err)
 		case resp == nil:
 			return fmt.Errorf("agtd closed the stream before the end of artifact `%s`", name)
 		case resp.ArtifactChunk != nil:

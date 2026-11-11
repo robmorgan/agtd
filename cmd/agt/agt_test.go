@@ -610,7 +610,7 @@ func TestInboxEndToEnd(t *testing.T) {
 		tm.write("\x1c")
 		m = tm.expect(m, "\x1b[?1049l")
 		tm.write("\t")
-		end := tm.expectScreen(m, `2\. remove`)
+		end := tm.expectScreen(m, `3\. remove`)
 		if back := tm.output()[m:end]; strings.Contains(back, "\x1b[2J") || strings.Contains(back, "attached to") || strings.Contains(back, "ended") {
 			t.Fatalf("the return to the inbox cleared or printed:\n%q", back)
 		}
@@ -627,8 +627,8 @@ func TestInboxEndToEnd(t *testing.T) {
 	// Tab, remove, confirm: dev's demo goes, and this machine's keeps
 	// running. Esc clears the filter, then quits.
 	tm.write("\t")
-	m = tm.expectScreen(m, `2\. remove`)
-	tm.write("2")
+	m = tm.expectScreen(m, `3\. remove`)
+	tm.write("3")
 	m = tm.expectScreen(m, `Remove dev/demo\? Its working directory is kept\.`)
 	// A confirmation takes Enter only once it has been on screen for
 	// 500 ms (the inbox's inboxAcknowledgeAfter): read it first.
@@ -646,6 +646,77 @@ func TestInboxEndToEnd(t *testing.T) {
 	}
 	if out := e.mustRun("agt", "ls"); !regexp.MustCompile(`demo\s+(running|working|idle)`).MatchString(sgrSequence.ReplaceAllString(out, "")) {
 		t.Fatalf("local demo after removing dev's:\n%s", out)
+	}
+}
+
+// A row's menu on another host: who is attached, take over size, the diff
+// in the pager, stop, and the history of the stopped session, each on the
+// row's own daemon over QUIC.
+func TestInboxActionsEndToEnd(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	// An agent that ends on SIGTERM, as a coding agent does.
+	const loop = "\n[agents.loop]\ncommand = \"/bin/sh\"\nargs = [\"-c\", \"echo ready; while :; do sleep 1; done\"]\n"
+	e := newEnv(t, "")
+	r := e.remoteEnv("dev", loop)
+	gitIn(t, r.work, "init", "-q", "-b", "main")
+	os.WriteFile(filepath.Join(r.work, "README"), []byte("hello\n"), 0o644)
+	gitIn(t, r.work, "add", ".")
+	gitIn(t, r.work, "commit", "-q", "-m", "initial")
+	other := e.start("--host", "dev", "new", "-C", r.work, "--agent", "loop", "three")
+	other.expect(0, "ready")
+	os.WriteFile(filepath.Join(r.work, "README"), []byte("hello\nworld\n"), 0o644)
+
+	// The other attachment owns the size: the menu says so and offers to
+	// take it, which attaches.
+	tm := e.start()
+	m := tm.expectScreen(0, `three\s+dev\s+loop`)
+	tm.write("dev/\t")
+	m = tm.expectScreen(m, `dev/three · \S+ · loop · 1 attached \(owns the size, \d+×\d+\)`)
+	m = tm.expectScreen(m, `4\. take over size`)
+	tm.write("4")
+	m = tm.expect(m, "\x1b[?1049h")
+	tm.write("\x1c")
+	m = tm.expect(m, "\x1b[?1049l")
+	other.write("\x1c")
+	other.wait()
+
+	// The diff opens in the pager, on the alternate screen; q goes back.
+	tm.write("\t")
+	m = tm.expectScreen(m, `nobody attached`)
+	m = tm.expectScreen(m, `4\. diff`)
+	tm.write("4")
+	m = tm.expect(m, "\x1b[?1049h")
+	m = tm.expectScreen(m, `(?s)diff of dev/three\s+lines 1–\d+ of \d+.*\+world`)
+	tm.write("q")
+	m = tm.expect(m, "\x1b[?1049l")
+
+	// Stop asks, then stops dev's session and keeps it listed.
+	tm.write("\t")
+	m = tm.expectScreen(m, `2\. stop`)
+	tm.write("2")
+	m = tm.expectScreen(m, `Stop dev/three\? Its agent is ended; the session stays listed\.`)
+	time.Sleep(600 * time.Millisecond) // gstack-timing-ok: waits out the inbox's confirm delay, asserts no timing
+	tm.write("\r")
+	m = tm.expectScreen(m, `stopped session dev/three`)
+	m = tm.expectScreen(m, `three\s+dev\s+loop\s+exited`)
+
+	// An ended session's history, saved when it ended.
+	tm.write("\t")
+	m = tm.expectScreen(m, `3\. history`)
+	tm.write("3")
+	m = tm.expect(m, "\x1b[?1049h")
+	m = tm.expectScreen(m, `(?s)history of dev/three.*ready`)
+	tm.write("\x1b")
+	m = tm.expect(m, "\x1b[?1049l")
+	// Esc clears the filter, then quits.
+	tm.write("\x1b")
+	tm.expectScreen(m, `esc quit`)
+	tm.write("\x1b")
+	tm.wait()
+	if out := sgrSequence.ReplaceAllString(r.mustRun("agt", "ls"), ""); !regexp.MustCompile(`three\s+exited`).MatchString(out) {
+		t.Fatalf("dev after the stop:\n%s", out)
 	}
 }
 
