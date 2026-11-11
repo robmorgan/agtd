@@ -5,7 +5,7 @@
 // same after typing, after an Alt-Enter newline, after a bracketed paste, and
 // after clearing. Nothing is submitted to a model.
 //
-//	PKG_CONFIG_PATH=.build/ghostty-out/share/pkgconfig go run internal/worker/testdata/probe_field.go -only claude -dir /tmp/x
+//	PKG_CONFIG_PATH=.build/ghostty-out/lib/pkgconfig go run internal/worker/testdata/probe_field.go -only claude -dir /tmp/x
 package main
 
 import (
@@ -151,7 +151,7 @@ func run(argv []string, st []step, dir string) error {
 		replies = nil
 	}
 	screen := func() string {
-		f, err := libghostty.NewFormatter(term, libghostty.WithFormatterFormat(libghostty.FormatterFormatPlain))
+		f, err := libghostty.NewFormatter(term, libghostty.WithFormatterFormat(libghostty.FormatterFormatPlain), libghostty.WithFormatterTrim(false))
 		if err != nil {
 			return ""
 		}

@@ -472,7 +472,7 @@ machine was shared with other jobs (load average 5-40), so the median of three r
 
 ```sh
 make libghostty
-export PKG_CONFIG_PATH=$PWD/.build/ghostty-out/share/pkgconfig
+export PKG_CONFIG_PATH=$PWD/.build/ghostty-out/lib/pkgconfig
 go test ./internal/worker -run '^$' -bench 'VTWrite|TerminalFeed|TerminalSnapshot|RecordedStream|NewTerminal' -benchmem -count 3
 go test ./internal/worker -run '^$' -bench 'PTYThroughput|FanOut|Attach' -benchmem -count 3
 ```

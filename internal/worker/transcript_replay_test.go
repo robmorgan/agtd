@@ -115,7 +115,7 @@ func replayTranscript(t *testing.T, pieces [][]byte) (*screen.Transcript, int) {
 		}
 		// A repaint is looked at whole, as the worker does: never inside
 		// a synchronized-output block.
-		if syncing, err := term.Mode(libghostty.ModeSyncOutput); err != nil || syncing {
+		if syncing, err := term.Mode(libghostty.ModeSynchronizedOutput); err != nil || syncing {
 			continue
 		}
 		rows, err := frameRows(term, streamCols, streamRows)

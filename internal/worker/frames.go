@@ -182,7 +182,7 @@ func (s *ownerState) noteFrameOutput() {
 		s.syncSince = time.Time{}
 		return
 	}
-	if syncing, err := s.terminal.term.Mode(libghostty.ModeSyncOutput); err == nil && syncing {
+	if syncing, err := s.terminal.term.Mode(libghostty.ModeSynchronizedOutput); err == nil && syncing {
 		if s.syncSince.IsZero() {
 			s.syncSince = time.Now()
 		}
@@ -374,7 +374,7 @@ func frameRows(term *libghostty.Terminal, cols, lines uint16) ([][]byte, error) 
 	if err != nil {
 		return nil, err
 	}
-	out, err := formatRowsOnly(term, sel, nil)
+	out, err := formatRowsOnly(term, sel, libghostty.FormatterExtrasNone)
 	if err != nil {
 		return nil, err
 	}
@@ -400,7 +400,7 @@ func historyRows(term *libghostty.Terminal, cols uint16, history uint, n int) ([
 	if err != nil {
 		return nil, err
 	}
-	out, err := formatRowsOnly(term, &libghostty.Selection{Start: *first, End: *last}, nil)
+	out, err := formatRowsOnly(term, &libghostty.Selection{Start: *first, End: *last}, libghostty.FormatterExtrasNone)
 	if err != nil {
 		return nil, err
 	}
@@ -431,14 +431,14 @@ func screenSelection(term *libghostty.Terminal, cols, lines uint16) (*libghostty
 
 // formatRowsOnly formats sel as VT with no state before or after the rows
 // beyond extras.
-func formatRowsOnly(term *libghostty.Terminal, sel *libghostty.Selection, extras []libghostty.FormatterOption) ([]byte, error) {
-	opts := append([]libghostty.FormatterOption{
+func formatRowsOnly(term *libghostty.Terminal, sel *libghostty.Selection, extras libghostty.FormatterExtras) ([]byte, error) {
+	f, err := libghostty.NewFormatter(term,
 		libghostty.WithFormatterSelection(sel),
 		libghostty.WithFormatterFormat(libghostty.FormatterFormatVT),
 		libghostty.WithFormatterTrim(false),
 		libghostty.WithFormatterUnwrap(false),
-	}, extras...)
-	f, err := libghostty.NewFormatter(term, opts...)
+		libghostty.WithFormatterExtras(extras),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create formatter: %w", err)
 	}
@@ -457,15 +457,15 @@ func frameExtras(term *libghostty.Terminal) (prefix, keyboard []byte, err error)
 		return nil, nil, err
 	}
 	sel := &libghostty.Selection{Start: *cell, End: *cell}
-	base, err := formatRowsOnly(term, sel, nil)
+	base, err := formatRowsOnly(term, sel, libghostty.FormatterExtrasNone)
 	if err != nil {
 		return nil, nil, err
 	}
-	modes, err := formatRowsOnly(term, sel, []libghostty.FormatterOption{libghostty.WithFormatterExtraModes(true), libghostty.WithFormatterExtraTabstops(true)})
+	modes, err := formatRowsOnly(term, sel, libghostty.FormatterExtraModes|libghostty.FormatterExtraTabstops)
 	if err != nil {
 		return nil, nil, err
 	}
-	kb, err := formatRowsOnly(term, sel, []libghostty.FormatterOption{libghostty.WithFormatterExtraKeyboard(true), libghostty.WithFormatterExtraKittyKeyboard(true)})
+	kb, err := formatRowsOnly(term, sel, libghostty.FormatterExtraKeyboard|libghostty.FormatterExtraKittyKeyboard)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -508,9 +508,9 @@ func frameCursorShape(rs *libghostty.RenderState, term *libghostty.Terminal) (ui
 	}
 	var n uint8
 	switch shape {
-	case libghostty.CursorVisualStyleBar:
+	case libghostty.CursorStyleBar:
 		n = 6
-	case libghostty.CursorVisualStyleUnderline:
+	case libghostty.CursorStyleUnderline:
 		n = 4
 	default:
 		return 0, nil
@@ -630,7 +630,7 @@ func (s *terminalState) historySnapshot(scrollback int) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	out, err := formatRowsOnly(term, &libghostty.Selection{Start: *first, End: *last}, nil)
+	out, err := formatRowsOnly(term, &libghostty.Selection{Start: *first, End: *last}, libghostty.FormatterExtrasNone)
 	if err != nil {
 		return nil, err
 	}

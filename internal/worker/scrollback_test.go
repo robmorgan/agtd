@@ -136,6 +136,7 @@ func formatSelection(term *libghostty.Terminal, format libghostty.FormatterForma
 		libghostty.WithFormatterFormat(format),
 		libghostty.WithFormatterTrim(trim),
 		libghostty.WithFormatterUnwrap(false),
+		libghostty.WithFormatterExtras(libghostty.FormatterExtrasNone),
 		libghostty.WithFormatterSelection(sel)))
 	defer f.Close()
 	return must(f.FormatString())

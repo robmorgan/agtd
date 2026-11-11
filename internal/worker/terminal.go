@@ -573,9 +573,9 @@ func appendCursorShape(out []byte, term *libghostty.Terminal, block bool) ([]byt
 	}
 	var n int
 	switch shape {
-	case libghostty.CursorVisualStyleBar:
+	case libghostty.CursorStyleBar:
 		n = 6
-	case libghostty.CursorVisualStyleUnderline:
+	case libghostty.CursorStyleUnderline:
 		n = 4
 	default:
 		if !block {
@@ -702,7 +702,7 @@ func leaveStrayAlternate(term *libghostty.Terminal, formatted []byte) ([]byte, e
 	}{
 		{libghostty.ModeAltScreenLegacy, "\x1b[?47l"},
 		{libghostty.ModeAltScreen, "\x1b[?1047l"},
-		{libghostty.ModeAltScreenSave, "\x1b[?1049l"},
+		{libghostty.ModeAltScreenSaveCursorClearEnter, "\x1b[?1049l"},
 	}
 	stray, leave := false, ""
 	for _, m := range modes {
@@ -765,23 +765,23 @@ func scrollbackSelection(term *libghostty.Terminal, scrollback int) (*libghostty
 // scrolling region if region is set, keyboard modes, then cursor, pen,
 // hyperlink, protection, kitty keyboard flags and charsets) follows.
 func runFormatter(term *libghostty.Terminal, format libghostty.FormatterFormat, region bool, sel *libghostty.Selection) ([]byte, error) {
+	// Every extra but the palette and the working directory. Tab stops also
+	// matter for the alternate screen: setting them ends with CUP home, which
+	// is where the screen contents start.
+	extras := libghostty.FormatterExtraModes | libghostty.FormatterExtraTabstops |
+		libghostty.FormatterExtraKeyboard | libghostty.FormatterExtraCursor |
+		libghostty.FormatterExtraStyle | libghostty.FormatterExtraHyperlink |
+		libghostty.FormatterExtraProtection | libghostty.FormatterExtraKittyKeyboard |
+		libghostty.FormatterExtraCharsets
+	if region {
+		extras |= libghostty.FormatterExtraScrollingRegion
+	}
 	f, err := libghostty.NewFormatter(term,
 		libghostty.WithFormatterSelection(sel),
 		libghostty.WithFormatterFormat(format),
 		libghostty.WithFormatterTrim(false),
 		libghostty.WithFormatterUnwrap(false),
-		libghostty.WithFormatterExtraModes(true),
-		// Tab stops also matter for the alternate screen: setting them
-		// ends with CUP home, which is where the screen contents start.
-		libghostty.WithFormatterExtraTabstops(true),
-		libghostty.WithFormatterExtraScrollingRegion(region),
-		libghostty.WithFormatterExtraKeyboard(true),
-		libghostty.WithFormatterExtraCursor(true),
-		libghostty.WithFormatterExtraStyle(true),
-		libghostty.WithFormatterExtraHyperlink(true),
-		libghostty.WithFormatterExtraProtection(true),
-		libghostty.WithFormatterExtraKittyKeyboard(true),
-		libghostty.WithFormatterExtraCharsets(true),
+		libghostty.WithFormatterExtras(extras),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create formatter: %w", err)

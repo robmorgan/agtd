@@ -55,7 +55,7 @@ build_agtd() {
   GHOSTTY_TARGET="${target}" "${ROOT}/scripts/build-libghostty.sh" >/dev/null
   # GOAMD64=v1 and GOARM64=v8.0 are Go's defaults; set so that an
   # environment asking for more never leaks into a release.
-  PKG_CONFIG_PATH="${ROOT}/.build/ghostty-out-${target}/share/pkgconfig" \
+  PKG_CONFIG_PATH="${ROOT}/.build/ghostty-out-${target}/lib/pkgconfig" \
     CGO_ENABLED=1 GOOS="${goos}" GOARCH="${goarch}" GOAMD64=v1 GOARM64=v8.0 CC="${cc}" \
     go build -C "${ROOT}" -trimpath -ldflags "${LDFLAGS}${extld:+ -extldflags=${extld}}" -o "${out}" ./cmd/agtd
 }

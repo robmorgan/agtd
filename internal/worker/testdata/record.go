@@ -672,7 +672,7 @@ func record(sc scenario) ([]byte, map[string]int, error) {
 		replies = nil
 	}
 	screen := func() string {
-		f, err := libghostty.NewFormatter(term, libghostty.WithFormatterFormat(libghostty.FormatterFormatPlain))
+		f, err := libghostty.NewFormatter(term, libghostty.WithFormatterFormat(libghostty.FormatterFormatPlain), libghostty.WithFormatterTrim(false))
 		if err != nil {
 			return ""
 		}
