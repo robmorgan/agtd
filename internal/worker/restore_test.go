@@ -505,6 +505,14 @@ func TestSnapshotKnownLimits(t *testing.T) {
 			differs: []string{"Styled"},
 		},
 		{
+			// The hyperlink block reopens the cursor's link with a fresh
+			// OSC 8, so text printed after the snapshot in a link without
+			// an explicit id joins a new link to the same URI rather than
+			// the one it continues.
+			name: "hyperlink still open", stream: "\x1b]8;;https://example.com\x1b\\abc", probe: "def",
+			differs: []string{"Styled"},
+		},
+		{
 			// Without grapheme clustering a zero-width codepoint joins the
 			// cell before it; with it, U+061C (a control) starts its own
 			// grapheme and is dropped. Cells do not record which mode
