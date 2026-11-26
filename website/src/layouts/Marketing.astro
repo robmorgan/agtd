@@ -5,6 +5,7 @@ import '@fontsource-variable/figtree';
 import '@fontsource-variable/fraunces/full.css';
 import '../styles/tokens.css';
 import '../styles/marketing.css';
+import Announcement from '../components/Announcement.astro';
 import ThemeToggle from '../components/ThemeToggle.astro';
 
 interface Props {
@@ -51,6 +52,7 @@ const ogImage = new URL('/agtd-icon-512.png', Astro.site);
 	</head>
 	<body>
 		<a class="skip-link" href="#main">Skip to content</a>
+		<Announcement />
 		<header class="site-header">
 			<div class="header-bar">
 				<a href="/" aria-label="agtd home" class="header-logo">

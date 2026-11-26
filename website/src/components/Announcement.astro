@@ -1,0 +1,23 @@
+---
+/*
+ * The site-wide announcement bar: one line on a forest band. Renders nothing
+ * while src/announcement.ts is null.
+ */
+import { announcement } from '../announcement';
+---
+
+{
+	announcement && (
+		<div class="agtd-announce not-content" role="region" aria-label="Announcement">
+			<span class="agtd-announce-text">{announcement.text}</span>
+			{announcement.href && (
+				<a class="agtd-announce-link" href={announcement.href}>
+					{announcement.linkLabel ?? 'Learn more'}
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+						<path d="M5 12h14M13 6l6 6-6 6" />
+					</svg>
+				</a>
+			)}
+		</div>
+	)
+}

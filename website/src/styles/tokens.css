@@ -406,3 +406,44 @@
 	border-radius: var(--radius-xs);
 	padding: 1px 5px;
 }
+
+/* Announcement bar: one line on a forest band, above everything. */
+.agtd-announce {
+	box-sizing: border-box;
+	height: 40px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: var(--space-3);
+	padding: 0 var(--space-4);
+	background: var(--forest);
+	color: var(--on-forest);
+	font-family: var(--font-sans);
+	font-size: 14px;
+	line-height: 20px;
+}
+.agtd-announce-text {
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+	font-weight: 500;
+}
+.agtd-announce-link {
+	flex: none;
+	display: inline-flex;
+	align-items: center;
+	gap: var(--space-1);
+	color: var(--on-forest-muted);
+	text-decoration: underline;
+	text-decoration-color: var(--on-forest-muted);
+	text-underline-offset: 3px;
+	white-space: nowrap;
+}
+.agtd-announce-link:hover {
+	color: var(--on-forest);
+}
+.agtd-announce-link svg {
+	width: 14px;
+	height: 14px;
+}

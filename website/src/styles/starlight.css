@@ -53,6 +53,34 @@ body {
 	-webkit-font-smoothing: antialiased;
 }
 
+/*
+ * The announcement bar (src/announcement.ts) sits in the top 40px of the fixed
+ * header. While it is there the header is 40px taller, which moves everything
+ * Starlight places under it.
+ */
+:root:has(header.header .agtd-announce) {
+	--agtd-announce-height: 40px;
+	--sl-nav-height: calc(3.5rem + var(--agtd-announce-height));
+}
+@media (min-width: 50em) {
+	:root:has(header.header .agtd-announce) {
+		--sl-nav-height: calc(4rem + var(--agtd-announce-height));
+	}
+}
+header.header:has(.agtd-announce) {
+	padding-top: calc(var(--sl-nav-pad-y) + var(--agtd-announce-height));
+}
+header.header .agtd-announce {
+	position: absolute;
+	inset: 0 0 auto 0;
+}
+:root:has(header.header .agtd-announce) .sl-menu-button {
+	top: calc(
+		var(--agtd-announce-height) +
+			(var(--sl-nav-height) - var(--agtd-announce-height) - var(--sl-menu-button-size)) / 2
+	);
+}
+
 /* Headlines in Fraunces, light and soft; smaller headings in the sans */
 h1,
 .sl-markdown-content :is(h1, h2) {

@@ -1,0 +1,11 @@
+---
+/*
+ * Starlight's header with the announcement bar above it. The header is fixed,
+ * so the bar sits in its top 40px and starlight.css makes room for it.
+ */
+import Default from '@astrojs/starlight/components/Header.astro';
+import Announcement from '../Announcement.astro';
+---
+
+<Announcement />
+<Default><slot /></Default>
