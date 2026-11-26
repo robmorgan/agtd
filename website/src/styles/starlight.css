@@ -205,9 +205,9 @@ site-search > button > kbd {
 .sidebar-content a[aria-current='page'],
 .sidebar-content a[aria-current='page']:hover,
 .sidebar-content a[aria-current='page']:focus {
-	color: var(--on-forest);
+	color: var(--text);
 	font-weight: 500;
-	background: var(--forest);
+	background: var(--dawn);
 }
 .sidebar-content details details > summary {
 	border-radius: var(--radius-full);
