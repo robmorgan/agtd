@@ -155,20 +155,46 @@ site-search > button > kbd {
 	background: var(--stone);
 }
 
-/* Sidebar: muted pills, the current page on forest green, a third level under a chevron */
+/*
+ * Sidebar, three levels:
+ *   1. section headings: larger, and never collapsed (astro.config.mjs keeps
+ *      them open; here they stop looking or acting like a toggle);
+ *   2. pages, and groups of pages: lighter, flush with the heading;
+ *   3. a group's children: indented on a guide line, under a chevron.
+ */
 .sidebar-content {
 	--sl-color-hairline-light: transparent;
 }
+.sidebar-content ul ul li {
+	margin-inline-start: 0;
+	padding-inline-start: 0;
+	border-inline-start: 0;
+}
+
+/* Level 1 */
+.sidebar-content .top-level > li > details > summary {
+	padding-inline: var(--space-3);
+	pointer-events: none;
+	cursor: default;
+}
+.sidebar-content .top-level > li > details > summary > svg {
+	display: none;
+}
 .sidebar-content .top-level > li > details > summary .group-label .large {
-	font-size: 13px;
-	line-height: 20px;
+	font-size: 17px;
+	line-height: 28px;
 	font-weight: 500;
-	letter-spacing: 0.01em;
 	color: var(--text);
 }
+.sidebar-content .top-level > li + li {
+	margin-top: var(--space-6);
+}
+
+/* Level 2 */
 .sidebar-content a {
-	font-size: 15px;
-	line-height: 24px;
+	font-size: 14px;
+	line-height: 22px;
+	font-weight: 400;
 	color: var(--text-muted);
 	border-radius: var(--radius-full);
 	padding-inline: var(--space-3);
@@ -183,28 +209,27 @@ site-search > button > kbd {
 	font-weight: 500;
 	background: var(--forest);
 }
-/* A group inside a group: its label reads as a link, its children sit on a guide line. */
 .sidebar-content details details > summary {
 	border-radius: var(--radius-full);
 	padding-inline: var(--space-3);
+	color: var(--text-muted);
 }
 .sidebar-content details details > summary .group-label .large {
-	font-size: 15px;
-	line-height: 24px;
-	font-weight: 500;
-	color: var(--text);
-}
-.sidebar-content details details > summary:hover {
-	background: var(--stone);
-}
-.sidebar-content details details > ul {
-	margin-inline-start: 20px;
-	padding-inline-start: var(--space-2);
-	border-inline-start: 1px solid var(--line);
-}
-.sidebar-content details details > ul a {
 	font-size: 14px;
 	line-height: 22px;
+	font-weight: 400;
+	color: var(--text-muted);
+}
+.sidebar-content details details > summary:hover,
+.sidebar-content details details > summary:hover .group-label .large {
+	color: var(--text);
+}
+
+/* Level 3 */
+.sidebar-content details details > ul {
+	margin-inline-start: var(--space-3);
+	padding-inline-start: var(--space-2);
+	border-inline-start: 1px solid var(--line);
 }
 
 /* On this page */
