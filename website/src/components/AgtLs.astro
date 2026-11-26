@@ -61,6 +61,6 @@ const lines = rows.map((r) => {
 <Wrap {...wrapProps}>
 	<figure class:list={['agtd-term not-content', className]}>
 		<div class="agtd-term-bar">agt</div>
-		<pre class="agtd-term-body"><span class="agtd-t-dim">❯</span> agt ls{'\n\n'}<span class="agtd-t-dim">{header}</span>{lines.map((segs) => <>{'\n'}{segs.map((s) => (s.cls ? <span class={s.cls}>{s.text}</span> : s.text))}</>)}</pre>
+		<pre class="agtd-term-body"><span class="agtd-t-dim">❯</span> <span style="color:var(--term-syn-command)">agt</span> ls{'\n\n'}<span class="agtd-t-dim">{header}</span>{lines.map((segs) => <>{'\n'}{segs.map((s) => (s.cls ? <span class={s.cls}>{s.text}</span> : s.text))}</>)}</pre>
 	</figure>
 </Wrap>
