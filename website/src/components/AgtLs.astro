@@ -17,6 +17,8 @@ interface Row {
 
 interface Props {
 	rows?: Row[];
+	/** Set the window on a soft gradient stage, bleeding off its right and bottom edges. */
+	stage?: boolean;
 	class?: string;
 }
 
@@ -27,7 +29,9 @@ const defaultRows: Row[] = [
 	{ run: 'exited', age: '1h', name: 'refactor', activity: 'exited', cwd: '~/src/app', attention: 'finished (exit 0)' },
 ];
 
-const { rows = defaultRows, class: className } = Astro.props;
+const { rows = defaultRows, stage = false, class: className } = Astro.props;
+const Wrap = stage ? 'div' : Fragment;
+const wrapProps = stage ? { class: 'agtd-stage not-content' } : {};
 
 const glyph: Record<Run, string> = { needs: '⚠', running: '●', exited: '○' };
 const header = '  RUN  AGE    NAME            ACTIVITY     CWD                 ATTENTION';
@@ -54,7 +58,9 @@ const lines = rows.map((r) => {
 });
 ---
 
-<figure class:list={['agtd-term not-content', className]}>
-	<div class="agtd-term-bar">agt</div>
-	<pre class="agtd-term-body"><span class="agtd-t-dim">❯</span> agt ls{'\n\n'}<span class="agtd-t-dim">{header}</span>{lines.map((segs) => <>{'\n'}{segs.map((s) => (s.cls ? <span class={s.cls}>{s.text}</span> : s.text))}</>)}</pre>
-</figure>
+<Wrap {...wrapProps}>
+	<figure class:list={['agtd-term not-content', className]}>
+		<div class="agtd-term-bar">agt</div>
+		<pre class="agtd-term-body"><span class="agtd-t-dim">❯</span> agt ls{'\n\n'}<span class="agtd-t-dim">{header}</span>{lines.map((segs) => <>{'\n'}{segs.map((s) => (s.cls ? <span class={s.cls}>{s.text}</span> : s.text))}</>)}</pre>
+	</figure>
+</Wrap>

@@ -1,8 +1,8 @@
 ---
 import '@fontsource/ibm-plex-mono/400.css';
 import '@fontsource/ibm-plex-mono/500.css';
-import '@fontsource/ibm-plex-sans/400.css';
-import '@fontsource/ibm-plex-sans/500.css';
+import '@fontsource-variable/figtree';
+import '@fontsource-variable/fraunces/full.css';
 import '../styles/tokens.css';
 import '../styles/marketing.css';
 import ThemeToggle from '../components/ThemeToggle.astro';
@@ -34,7 +34,7 @@ const ogImage = new URL('/agtd-icon-512.png', Astro.site);
 		<meta property="og:url" content={canonical} />
 		<meta property="og:image" content={ogImage} />
 		<meta name="twitter:card" content="summary" />
-		<meta name="theme-color" content="#0f1113" />
+		<meta name="theme-color" content="#0f1411" />
 		{/* The Go import path agtd.sh resolves to the GitHub repository; see README.md. */}
 		<meta name="go-import" content="agtd.sh git https://github.com/robmorgan/agtd" />
 		{/* The same logic as Starlight's ThemeProvider, inlined to avoid a flash. */}
@@ -52,17 +52,17 @@ const ogImage = new URL('/agtd-icon-512.png', Astro.site);
 	<body>
 		<a class="skip-link" href="#main">Skip to content</a>
 		<header class="site-header">
-			<div class="wrap header-row">
+			<div class="header-bar">
 				<a href="/" aria-label="agtd home" class="header-logo">
-					<img class="on-dark" src="/brand/agtd-logo-on-dark.svg" alt="agtd" width="70" height="28" />
-					<img class="on-light" src="/brand/agtd-logo-on-light.svg" alt="agtd" width="70" height="28" />
+					<img class="on-dark" src="/brand/agtd-logo-on-dark.svg" alt="agtd" width="71" height="28" />
+					<img class="on-light" src="/brand/agtd-logo-on-light.svg" alt="agtd" width="71" height="28" />
 				</a>
 				<nav aria-label="Main" class="header-nav">
 					<a class="nav-link" href="/docs/">Docs</a>
 					<a class="nav-link" href="/#install">Install</a>
 					<a class="nav-link" href="https://github.com/robmorgan/agtd">GitHub</a>
+					<ThemeToggle />
 				</nav>
-				<ThemeToggle />
 			</div>
 		</header>
 
@@ -71,16 +71,14 @@ const ogImage = new URL('/agtd-icon-512.png', Astro.site);
 		</main>
 
 		<footer class="site-footer">
-			<div class="wrap footer-row">
-				<img class="on-dark" src="/brand/agtd-mark-on-dark.svg" alt="" width="15" height="24" />
-				<img class="on-light" src="/brand/agtd-mark-on-light.svg" alt="" width="15" height="24" />
-				<span class="t-small muted">agtd. Quiet infrastructure for coding agents.</span>
-				<nav aria-label="Footer" class="footer-nav">
-					<a class="nav-link" href="/docs/">Docs</a>
-					<a class="nav-link" href="https://github.com/robmorgan/agtd">GitHub</a>
-					<a class="nav-link" href="https://github.com/robmorgan/agtd/blob/main/LICENSE">License</a>
-				</nav>
-			</div>
+			<span class="t-small muted">
+				agtd. Quiet infrastructure for coding agents. Open source under the{' '}
+				<a href="https://github.com/robmorgan/agtd/blob/main/LICENSE">MIT License</a>.
+			</span>
+			<nav aria-label="Footer" class="footer-nav">
+				<a class="nav-link" href="/docs/">Docs</a>
+				<a class="nav-link" href="https://github.com/robmorgan/agtd">GitHub</a>
+			</nav>
 		</footer>
 	</body>
 </html>

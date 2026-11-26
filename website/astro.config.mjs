@@ -17,14 +17,21 @@ export default defineConfig({
 				{ tag: 'meta', attrs: { property: 'og:image', content: 'https://agtd.sh/agtd-icon-512.png' } },
 				// The Go import path agtd.sh resolves to the GitHub repository; see README.md.
 				{ tag: 'meta', attrs: { name: 'go-import', content: 'agtd.sh git https://github.com/robmorgan/agtd' } },
+				// The sidebar's section headings are not collapsible: keep them open, whatever
+				// Starlight restored, and take their toggles out of the tab order.
+				{
+					tag: 'script',
+					content:
+						"document.addEventListener('DOMContentLoaded',()=>{document.querySelectorAll('.sidebar-content .top-level > li > details').forEach((d)=>{d.open=true;const s=d.querySelector(':scope > summary');if(s){s.tabIndex=-1;s.addEventListener('click',(e)=>e.preventDefault());}});});",
+				},
 			],
 			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/robmorgan/agtd' }],
 			editLink: { baseUrl: 'https://github.com/robmorgan/agtd/edit/main/website/' },
 			customCss: [
 				'@fontsource/ibm-plex-mono/400.css',
 				'@fontsource/ibm-plex-mono/500.css',
-				'@fontsource/ibm-plex-sans/400.css',
-				'@fontsource/ibm-plex-sans/500.css',
+				'@fontsource-variable/figtree',
+				'@fontsource-variable/fraunces/full.css',
 				'./src/styles/tokens.css',
 				'./src/styles/starlight.css',
 			],
@@ -52,8 +59,19 @@ export default defineConfig({
 				{
 					label: 'Getting started',
 					items: [
-						{ label: 'Quickstart', slug: 'docs' },
-						{ label: 'Install', link: '/docs/#install' },
+						{
+							label: 'Quickstart',
+							collapsed: false,
+							items: [
+								{ label: 'Overview', slug: 'docs' },
+								{ label: 'Install', link: '/docs/#install' },
+								{ label: 'Start a task', link: '/docs/#start-a-task' },
+								{ label: 'See what needs you', link: '/docs/#see-what-needs-you' },
+								{ label: 'Attach and detach', link: '/docs/#attach-and-detach' },
+								{ label: 'Review what it produced', link: '/docs/#review-what-it-produced' },
+								{ label: 'Stop and clean up', link: '/docs/#stop-and-clean-up' },
+							],
+						},
 						{ label: 'How it works', slug: 'docs/how-it-works' },
 					],
 				},

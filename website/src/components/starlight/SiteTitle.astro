@@ -13,10 +13,10 @@ const links = [
 
 <div class="agtd-title">
 	<a href="/" class="agtd-logo" aria-label="agtd home">
-		<img class="on-dark" src="/brand/agtd-logo-on-dark.svg" alt="agtd" width="70" height="28" />
-		<img class="on-light" src="/brand/agtd-logo-on-light.svg" alt="agtd" width="70" height="28" />
+		<img class="on-dark" src="/brand/agtd-logo-on-dark.svg" alt="agtd" width="71" height="28" />
+		<img class="on-light" src="/brand/agtd-logo-on-light.svg" alt="agtd" width="71" height="28" />
 	</a>
-	<a href="/docs/" class="agtd-docs-label">docs</a>
+	<a href="/docs/" class="agtd-docs-label">Docs</a>
 	<nav aria-label="Docs sections" class="agtd-topnav">
 		{links.map((l) => <a href={l.href} aria-current={l.current ? 'page' : undefined}>{l.label}</a>)}
 	</nav>
@@ -40,10 +40,10 @@ const links = [
 		display: block;
 	}
 	.agtd-docs-label {
-		font-family: var(--font-mono);
-		font-size: 13px;
-		line-height: 20px;
-		font-weight: 500;
+		font-family: var(--font-sans);
+		font-size: 15px;
+		line-height: 24px;
+		font-weight: 400;
 		color: var(--text-muted);
 		text-decoration: none;
 	}
@@ -59,13 +59,16 @@ const links = [
 		font-weight: 500;
 		text-decoration: none;
 		color: var(--text-muted);
-		padding: 10px 12px;
-		border-radius: var(--radius-sm);
+		padding: 10px var(--space-4);
+		border-radius: var(--radius-full);
 		white-space: nowrap;
 	}
-	.agtd-topnav a:hover,
-	.agtd-topnav a[aria-current='page'] {
+	.agtd-topnav a:hover {
 		color: var(--text);
+	}
+	.agtd-topnav a[aria-current='page'] {
+		color: var(--on-forest);
+		background: var(--forest);
 	}
 	@media (min-width: 72rem) {
 		.agtd-topnav {

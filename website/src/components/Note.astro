@@ -1,52 +1,35 @@
 ---
-/* A quiet callout: a label and one or two sentences, on surface. */
+/*
+ * A callout: a tinted card with an icon and a title in the ink of its kind,
+ * and one or two sentences. The icon's shape carries the kind as well as the
+ * colour.
+ */
+type Kind = 'note' | 'tip' | 'warning' | 'danger';
+
 interface Props {
 	title: string;
+	type?: Kind;
 }
 
-const { title } = Astro.props;
+const { title, type = 'note' } = Astro.props;
+const label: Record<Kind, string> = { note: 'Note', tip: 'Tip', warning: 'Warning', danger: 'Danger' };
 ---
 
-<div class="agtd-note not-content">
-	<p class="agtd-note-title">{title}</p>
-	<div class="agtd-note-body"><slot /></div>
-</div>
+<aside class:list={['agtd-callout not-content', `agtd-callout-${type}`]}>
+	<svg class="agtd-callout-icon" role="img" aria-label={label[type]} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+		{type === 'note' && <><circle cx="12" cy="12" r="9" /><path d="M12 11v5" /><path d="M12 7.6v.4" /></>}
+		{type === 'tip' && <><path d="M9 18h6" /><path d="M10 21h4" /><path d="M12 3a6 6 0 0 0-4 10.5c.6.6 1 1.4 1 2.5h6c0-1.1.4-1.9 1-2.5A6 6 0 0 0 12 3z" /></>}
+		{type === 'warning' && <><path d="M12 4l9 16H3z" /><path d="M12 10v4" /><path d="M12 16.8v.4" /></>}
+		{type === 'danger' && <><path d="M8 3h8l5 5v8l-5 5H8l-5-5V8z" /><path d="M12 7.5v5.5" /><path d="M12 16v.4" /></>}
+	</svg>
+	<div>
+		<p class="agtd-callout-title">{title}</p>
+		<div class="agtd-callout-body"><slot /></div>
+	</div>
+</aside>
 
 <style>
-	.agtd-note {
+	.agtd-callout {
 		margin-top: var(--space-6);
-		padding: var(--space-4) 20px;
-		background: var(--surface);
-		border: 1px solid var(--line);
-		border-radius: var(--radius-lg);
-	}
-	.agtd-note-title {
-		margin: 0;
-		font-family: var(--font-sans);
-		font-size: 13px;
-		line-height: 20px;
-		font-weight: 500;
-		letter-spacing: 0.01em;
-		color: var(--text);
-	}
-	.agtd-note-body {
-		margin-top: var(--space-1);
-		font-size: 15px;
-		line-height: 24px;
-		color: var(--text-muted);
-	}
-	.agtd-note-body :global(p) {
-		margin: 0;
-	}
-	.agtd-note-body :global(a) {
-		color: var(--text);
-	}
-	.agtd-note-body :global(code) {
-		font-family: var(--font-mono);
-		font-size: 0.86em;
-		background: var(--ground);
-		border: 1px solid var(--line);
-		border-radius: var(--radius-sm);
-		padding: 1px 5px;
 	}
 </style>
