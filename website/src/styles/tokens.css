@@ -247,6 +247,47 @@
 	height: 10px;
 	background: radial-gradient(circle at 5px 5px, var(--term-line) 4.5px, transparent 5px) 0 0 / 17px 10px repeat-x;
 }
+/* Copy button: quiet at the right of the title bar, brighter on hover. */
+.agtd-term-copy {
+	flex: none;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 28px;
+	height: 28px;
+	margin-left: auto;
+	margin-right: calc(-1 * var(--space-2));
+	padding: 0;
+	border: 0;
+	border-radius: var(--radius-sm);
+	background: transparent;
+	color: var(--term-muted);
+	cursor: pointer;
+	transition: color 150ms, background-color 150ms;
+}
+.agtd-term-copy:hover {
+	color: var(--term-text);
+	background: var(--term-raised);
+}
+.agtd-term-copy:focus-visible {
+	outline: none;
+	box-shadow: var(--focus-ring);
+}
+.agtd-term-copy svg {
+	width: 16px;
+	height: 16px;
+	display: block;
+}
+.agtd-term-copy .done {
+	color: var(--term-ok);
+}
+.agtd-term-copy .done,
+.agtd-term-copy[data-copied] .idle {
+	display: none;
+}
+.agtd-term-copy[data-copied] .done {
+	display: block;
+}
 .agtd-term-body {
 	margin: 0;
 	padding: var(--space-4) var(--space-6) 20px;
