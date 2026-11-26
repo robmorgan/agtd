@@ -108,6 +108,12 @@ button:focus-visible {
 .footer-nav .nav-link {
 	color: var(--text-muted);
 }
+.site-footer .muted a {
+	color: var(--text-muted);
+}
+.site-footer .muted a:hover {
+	color: var(--text);
+}
 
 /* Hero: logo, one line, the install command, the docs */
 main {
