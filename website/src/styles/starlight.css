@@ -159,8 +159,9 @@ site-search > button > kbd {
  * Sidebar, three levels:
  *   1. section headings: larger, and never collapsed (astro.config.mjs keeps
  *      them open; here they stop looking or acting like a toggle);
- *   2. pages, and groups of pages: lighter, flush with the heading;
- *   3. a group's children: indented on a guide line, under a chevron.
+ *   2. pages, and groups of pages: semibold, flush with the heading;
+ *   3. a group's children: regular weight, indented on a guide line, under
+ *      a chevron.
  */
 .sidebar-content {
 	--sl-color-hairline-light: transparent;
@@ -206,8 +207,12 @@ site-search > button > kbd {
 .sidebar-content a[aria-current='page']:hover,
 .sidebar-content a[aria-current='page']:focus {
 	color: var(--text);
-	font-weight: 500;
 	background: var(--haze);
+}
+/* Level 2 is always semibold, a page as much as a group; the current
+ * page is marked by its haze pill alone, at whatever weight its level has. */
+.sidebar-content .top-level > li > details > ul > li > a {
+	font-weight: 600;
 }
 .sidebar-content details details > summary {
 	border-radius: var(--radius-full);
@@ -217,7 +222,7 @@ site-search > button > kbd {
 .sidebar-content details details > summary .group-label .large {
 	font-size: 14px;
 	line-height: 22px;
-	font-weight: 400;
+	font-weight: 600;
 	color: var(--text-muted);
 }
 .sidebar-content details details > summary:hover,
