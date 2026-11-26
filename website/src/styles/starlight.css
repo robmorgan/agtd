@@ -207,7 +207,7 @@ site-search > button > kbd {
 .sidebar-content a[aria-current='page']:focus {
 	color: var(--text);
 	font-weight: 500;
-	background: var(--dawn);
+	background: var(--haze);
 }
 .sidebar-content details details > summary {
 	border-radius: var(--radius-full);
