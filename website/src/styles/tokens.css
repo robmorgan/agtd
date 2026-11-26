@@ -2,9 +2,13 @@
  * The agtd design system (claude.ai "agtd" design system: tokens.json and
  * components/bundle.css), shared by the landing page and the Starlight docs.
  *
- * Dark is the first theme. The theme lives in <html data-theme>, set before
- * paint by Starlight's ThemeProvider in the docs and by the same inline script
- * on the landing page; both read localStorage["starlight-theme"].
+ * Warm paper, deep evergreen and a soft serif; a terminal that stays dark in
+ * both themes; tomato (signal) only for the one thing that needs you.
+ *
+ * The theme lives in <html data-theme>, set before paint by Starlight's
+ * ThemeProvider in the docs and by the same inline script on the landing page;
+ * both read localStorage["starlight-theme"]. :root carries the dark values and
+ * [data-theme='light'] the light ones.
  */
 
 /* The symbols agt prints (● ⚠ ❯ ○) that IBM Plex Mono lacks. */
@@ -22,48 +26,111 @@
 }
 
 :root {
-	--ground: #0f1113;
-	--surface: #181a1d;
-	--line: #2a2d32;
-	--text: #ebedef;
-	--text-muted: #8b9098;
+	--ground: #0f1411;
+	--surface: #171d19;
+	--stone: #212823;
+	--line: #2a322c;
+	--line-strong: #737c73;
+	--text: #eef0ea;
+	--text-muted: #a2aaa2;
 	--quiet: #83868c;
-	--signal: #fda934;
-	--signal-text: #fda934;
-	--on-signal: #0f1113;
+	--primary: #e8ebe2;
+	--on-primary: #142019;
+	--forest: #213a2c;
+	--on-forest: #f4f2ea;
+	--on-forest-muted: #b4c0b4;
+	--signal: #cf7862;
+	--signal-text: #dd917d;
+	--on-signal: #1d100c;
 	--ok: #8cc265;
-	--focus-ring: 0 0 0 2px #0f1113, 0 0 0 4px #fda934;
 
+	/* Atmosphere tints: the soft field a terminal sits on. */
+	--haze: #26302a;
+	--moss: #4d5f43;
+	--mist: #3b5553;
+	--dawn: #7a5a2c;
+
+	/* The terminal does not change with the theme. */
+	--term-ground: #171916;
+	--term-raised: #22251f;
+	--term-line: #2e312c;
+	--term-text: #e9ebe5;
+	--term-muted: #969b93;
+	--term-ok: #8cc265;
+	--term-signal: #dd917d;
+
+	/* Callouts: a tint and the ink of its icon and title. */
+	--note-bg: #1c2b2a;
+	--note-ink: #9fc7c3;
+	--tip-bg: #1f2b1e;
+	--tip-ink: #8cc265;
+	--warning-bg: #2e2616;
+	--warning-ink: #dfbe86;
+	--danger-bg: #32201b;
+	--danger-ink: #dd917d;
+
+	--focus-ring: 0 0 0 2px #0f1411, 0 0 0 4px #dd917d;
+	--shadow-float: 0 1px 2px rgba(0, 0, 0, 0.4), 0 12px 32px rgba(0, 0, 0, 0.5);
+	--shadow-window: 0 24px 60px rgba(15, 20, 17, 0.28);
+
+	--font-display: 'Fraunces Variable', 'Iowan Old Style', 'Palatino Linotype', Georgia, serif;
+	--font-sans: 'Figtree Variable', system-ui, -apple-system, 'Segoe UI', sans-serif;
 	--font-mono: 'IBM Plex Mono', 'agtd glyphs', ui-monospace, Menlo, Consolas, monospace;
-	--font-sans: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
 
 	--space-1: 4px;
 	--space-2: 8px;
+	--space-3: 12px;
 	--space-4: 16px;
 	--space-6: 24px;
+	--space-8: 32px;
 	--space-12: 48px;
+	--space-16: 64px;
 	--space-24: 96px;
+	--space-32: 128px;
 
+	--radius-xs: 4px;
 	--radius-sm: 6px;
 	--radius-md: 10px;
 	--radius-lg: 12px;
+	--radius-xl: 20px;
 	--radius-full: 9999px;
 
 	color-scheme: dark;
 }
 
 :root[data-theme='light'] {
-	--ground: #f8f7f4;
+	--ground: #fbfaf7;
 	--surface: #ffffff;
-	--line: #dcdddf;
-	--text: #1c1e22;
-	--text-muted: #5e636b;
+	--stone: #efede7;
+	--line: #e3e0d8;
+	--line-strong: #85847c;
+	--text: #18211c;
+	--text-muted: #59615b;
 	--quiet: #74777d;
-	--signal: #e48215;
-	--signal-text: #a65c12;
-	--on-signal: #0f1113;
+	--primary: #1f3a2c;
+	--on-primary: #f7f6f1;
+	--forest: #1c3226;
+	--signal: #b0513d;
+	--signal-text: #9c4331;
+	--on-signal: #fdf8f4;
 	--ok: #3e8e41;
-	--focus-ring: 0 0 0 2px #f8f7f4, 0 0 0 4px #a65c12;
+
+	--haze: #e7ebdc;
+	--moss: #a3b287;
+	--mist: #a9c6c3;
+	--dawn: #dfbe86;
+
+	--note-bg: #e3eeec;
+	--note-ink: #2c5754;
+	--tip-bg: #e7ebdc;
+	--tip-ink: #2f6b32;
+	--warning-bg: #f4e7cf;
+	--warning-ink: #7a5310;
+	--danger-bg: #f6e3dc;
+	--danger-ink: #9c4331;
+
+	--focus-ring: 0 0 0 2px #fbfaf7, 0 0 0 4px #9c4331;
+	--shadow-float: 0 1px 2px rgba(24, 33, 28, 0.06), 0 12px 32px rgba(24, 33, 28, 0.1);
 
 	color-scheme: light;
 }
@@ -74,7 +141,17 @@
 	display: none !important;
 }
 
-/* Button */
+/* Headlines: Fraunces, light and soft. */
+.agtd-display {
+	font-family: var(--font-display);
+	font-variation-settings:
+		'SOFT' 100,
+		'WONK' 0;
+	font-weight: 300;
+	letter-spacing: -0.015em;
+}
+
+/* Button: every control is a pill, 44px tall. Tomato is never a button. */
 .agtd-btn {
 	box-sizing: border-box;
 	display: inline-flex;
@@ -82,76 +159,134 @@
 	justify-content: center;
 	gap: var(--space-2);
 	height: 44px;
-	padding: 0 var(--space-4);
-	border: 1px solid var(--text-muted);
-	border-radius: var(--radius-sm);
-	background: transparent;
+	padding: 0 var(--space-6);
+	border: 1px solid transparent;
+	border-radius: var(--radius-full);
+	background: var(--stone);
 	color: var(--text);
-	font-family: var(--font-mono);
-	font-size: 14px;
+	font-family: var(--font-sans);
+	font-size: 15px;
 	font-weight: 500;
 	line-height: 20px;
 	text-decoration: none;
+	white-space: nowrap;
 	cursor: pointer;
+	transition:
+		background-color 150ms,
+		border-color 150ms,
+		box-shadow 150ms;
 }
 .agtd-btn:hover {
+	border-color: var(--line-strong);
+}
+.agtd-btn-primary {
+	background: var(--primary);
+	color: var(--on-primary);
+}
+/* The main action on a forest band or over photography. */
+.agtd-btn-forest-primary {
+	background: var(--on-forest);
+	color: var(--forest);
+}
+.agtd-btn-primary:hover,
+.agtd-btn-forest-primary:hover {
+	border-color: transparent;
+	box-shadow: var(--shadow-float);
+}
+.agtd-btn-outline {
+	background: transparent;
+	border-color: var(--line-strong);
+}
+.agtd-btn-outline:hover {
 	border-color: var(--text);
 }
-.agtd-btn-signal {
-	background: var(--signal);
-	border-color: var(--signal);
-	color: var(--on-signal);
+.agtd-btn-on-forest {
+	background: rgba(244, 242, 234, 0.16);
+	color: var(--on-forest);
+}
+.agtd-btn-on-forest:hover {
+	border-color: var(--on-forest-muted);
 }
 .agtd-btn:focus-visible {
 	outline: 2px solid transparent;
 	outline-offset: 2px;
 	box-shadow: var(--focus-ring);
 }
+.agtd-btn svg {
+	width: 16px;
+	height: 16px;
+	flex: none;
+}
 
-/* Terminal */
+/* Terminal: dark in both themes. */
 .agtd-term {
 	margin: 0;
 	min-width: 0;
-	background: var(--surface);
-	border: 1px solid var(--line);
-	border-radius: var(--radius-md);
+	background: var(--term-ground);
+	border: 1px solid var(--term-line);
+	border-radius: var(--radius-lg);
 	overflow: hidden;
-	color: var(--text);
+	color: var(--term-text);
 }
 .agtd-term-bar {
-	height: 32px;
+	height: 40px;
 	display: flex;
 	align-items: center;
-	justify-content: center;
-	border-bottom: 1px solid var(--line);
-	font-family: var(--font-sans);
+	gap: var(--space-3);
+	padding: 0 var(--space-4);
+	border-bottom: 1px solid var(--term-line);
+	font-family: var(--font-mono);
 	font-size: 12px;
-	color: var(--text-muted);
+	line-height: 18px;
+	color: var(--term-muted);
+}
+.agtd-term-bar::before {
+	content: '';
+	flex: none;
+	width: 44px;
+	height: 10px;
+	background: radial-gradient(circle at 5px 5px, var(--term-line) 4.5px, transparent 5px) 0 0 / 17px 10px repeat-x;
 }
 .agtd-term-body {
 	margin: 0;
-	padding: var(--space-4) var(--space-6);
+	padding: var(--space-4) var(--space-6) 20px;
 	overflow-x: auto;
 	background: transparent;
 	border: 0;
-	color: var(--text);
+	color: var(--term-text);
 	font-family: var(--font-mono);
 	font-size: 14px;
 	line-height: 22px;
 	white-space: pre;
 }
 .agtd-t-dim {
-	color: var(--text-muted);
+	color: var(--term-muted);
 }
 .agtd-t-ok {
-	color: var(--ok);
+	color: var(--term-ok);
 }
 .agtd-t-sig {
-	color: var(--signal-text);
+	color: var(--term-signal);
 }
 .agtd-t-bold {
 	font-weight: 500;
-	color: var(--text);
+	color: var(--term-text);
+}
+
+/* Stage: the soft field a terminal sits on, bleeding off its right and bottom edges. */
+.agtd-stage {
+	box-sizing: border-box;
+	padding: 40px 0 0 40px;
+	border-radius: var(--radius-xs);
+	overflow: hidden;
+	background: linear-gradient(200deg, var(--mist), var(--haze) 45%, var(--dawn));
+}
+.agtd-stage > .agtd-term {
+	margin: 0;
+	border-right: 0;
+	border-bottom: 0;
+	border-radius: var(--radius-lg) 0 0 0;
+	box-shadow: var(--shadow-window);
 }
 
 /* Dot */
@@ -182,7 +317,7 @@
 	gap: var(--space-2);
 }
 
-/* Theme toggle and other square icon buttons */
+/* Theme toggle, copy and other round icon buttons */
 .icon-btn {
 	box-sizing: border-box;
 	display: inline-flex;
@@ -192,15 +327,18 @@
 	width: 44px;
 	height: 44px;
 	padding: 0;
-	border: 1px solid var(--line);
-	border-radius: var(--radius-sm);
-	background: transparent;
+	border: 1px solid transparent;
+	border-radius: var(--radius-full);
+	background: var(--stone);
 	color: var(--text-muted);
 	cursor: pointer;
+	transition:
+		color 150ms,
+		border-color 150ms;
 }
 .icon-btn:hover {
 	color: var(--text);
-	border-color: var(--text-muted);
+	border-color: var(--line-strong);
 }
 .icon-btn:focus-visible {
 	outline: 2px solid transparent;
@@ -210,4 +348,61 @@
 	width: 20px;
 	height: 20px;
 	display: block;
+}
+
+/* Callout: a tinted card whose icon and title carry its kind. */
+.agtd-callout {
+	display: flex;
+	gap: var(--space-3);
+	padding: var(--space-4) 20px;
+	border-radius: var(--radius-md);
+	background: var(--note-bg);
+	--callout-ink: var(--note-ink);
+}
+.agtd-callout-tip {
+	background: var(--tip-bg);
+	--callout-ink: var(--tip-ink);
+}
+.agtd-callout-warning {
+	background: var(--warning-bg);
+	--callout-ink: var(--warning-ink);
+}
+.agtd-callout-danger {
+	background: var(--danger-bg);
+	--callout-ink: var(--danger-ink);
+}
+.agtd-callout-icon {
+	flex: none;
+	width: 22px;
+	height: 22px;
+	margin-top: 1px;
+	color: var(--callout-ink);
+}
+.agtd-callout-title {
+	margin: 0;
+	font-family: var(--font-sans);
+	font-size: 15px;
+	line-height: 24px;
+	font-weight: 500;
+	color: var(--callout-ink);
+}
+.agtd-callout-body {
+	margin-top: 2px;
+	font-size: 15px;
+	line-height: 24px;
+	color: var(--text);
+}
+.agtd-callout-body p {
+	margin: 0;
+}
+.agtd-callout-body a {
+	color: var(--text);
+}
+.agtd-callout-body code {
+	font-family: var(--font-mono);
+	font-size: 0.86em;
+	background: var(--surface);
+	border: 0;
+	border-radius: var(--radius-xs);
+	padding: 1px 5px;
 }

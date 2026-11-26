@@ -14,36 +14,36 @@
 	--sl-color-gray-3: var(--text-muted);
 	--sl-color-gray-4: var(--quiet);
 	--sl-color-gray-5: var(--line);
-	--sl-color-gray-6: var(--surface);
+	--sl-color-gray-6: var(--stone);
 	--sl-color-gray-7: var(--surface);
 	--sl-color-black: var(--ground);
 
-	--sl-color-accent-low: var(--surface);
-	--sl-color-accent: var(--signal);
-	--sl-color-accent-high: var(--signal-text);
+	--sl-color-accent-low: var(--haze);
+	--sl-color-accent: var(--primary);
+	--sl-color-accent-high: var(--primary);
 
 	--sl-color-text: var(--text);
 	--sl-color-text-accent: var(--text);
-	--sl-color-text-invert: var(--on-signal);
+	--sl-color-text-invert: var(--on-primary);
 	--sl-color-bg: var(--ground);
 	--sl-color-bg-nav: var(--ground);
 	--sl-color-bg-sidebar: var(--ground);
-	--sl-color-bg-inline-code: var(--surface);
-	--sl-color-bg-accent: var(--signal);
+	--sl-color-bg-inline-code: var(--stone);
+	--sl-color-bg-accent: var(--primary);
 	--sl-color-hairline-light: var(--line);
 	--sl-color-hairline: var(--line);
 	--sl-color-hairline-shade: var(--line);
 
 	--sl-text-body: 17px;
 	--sl-line-height: 28px;
-	--sl-line-height-headings: 1.25;
-	--sl-text-h1: 32px;
-	--sl-text-h2: 20px;
-	--sl-text-h3: 17px;
-	--sl-content-width: 680px;
-	--sl-sidebar-width: 264px;
+	--sl-line-height-headings: 1.2;
+	--sl-text-h1: 56px;
+	--sl-text-h2: 32px;
+	--sl-text-h3: 20px;
+	--sl-content-width: 720px;
+	--sl-sidebar-width: 280px;
 
-	/* Flat: panels are set apart by line, not elevation. */
+	/* Borders before shadows. */
 	--sl-shadow-sm: none;
 	--sl-shadow-md: none;
 	--sl-shadow-lg: none;
@@ -53,29 +53,43 @@ body {
 	-webkit-font-smoothing: antialiased;
 }
 
-/* Headings and titles in the mono face */
+/* Headlines in Fraunces, light and soft; smaller headings in the sans */
 h1,
-h2,
-h3,
-h4,
-.sl-markdown-content :is(h1, h2, h3, h4) {
-	font-family: var(--font-mono);
+.sl-markdown-content :is(h1, h2) {
+	font-family: var(--font-display);
+	font-variation-settings:
+		'SOFT' 100,
+		'WONK' 0;
+	color: var(--text);
+}
+h1 {
+	font-weight: 300;
+	letter-spacing: -0.015em;
+}
+.sl-markdown-content h2 {
+	font-weight: 400;
+	letter-spacing: -0.01em;
+	line-height: 40px;
+}
+.sl-markdown-content :is(h3, h4) {
+	font-family: var(--font-sans);
 	font-weight: 500;
 	color: var(--text);
 }
-/* Starlight wraps each heading in a flex row; the section rule goes on it. */
 .sl-markdown-content .sl-heading-wrapper.level-h2 {
 	margin-top: var(--space-12);
-	padding-top: var(--space-6);
-	border-top: 1px solid var(--line);
 }
-.sl-markdown-content h2 {
-	line-height: 28px;
+@media (max-width: 760px) {
+	:root,
+	:root[data-theme='light'] {
+		--sl-text-h1: 40px;
+		--sl-text-h2: 28px;
+	}
 }
 
 /* The lead paragraph under a page title */
 .sl-markdown-content .lead {
-	font-size: 19px;
+	font-size: 20px;
 	line-height: 30px;
 	color: var(--text-muted);
 }
@@ -90,36 +104,74 @@ h4,
 	text-decoration-color: var(--text);
 }
 
-/* Inline code */
+/* Inline code: a chip on stone */
 .sl-markdown-content code:not(:where(.not-content *, pre *)) {
 	font-size: 0.86em;
-	background: var(--surface);
-	border: 1px solid var(--line);
-	border-radius: var(--radius-sm);
+	background: var(--stone);
+	border: 0;
+	border-radius: var(--radius-xs);
 	padding: 1px 5px;
 }
 
-/* Terminal windows in prose */
-.sl-markdown-content .agtd-term {
+/* Terminal windows, stages and callouts in prose */
+.sl-markdown-content .agtd-term,
+.sl-markdown-content .agtd-stage {
 	margin-top: 20px;
 }
+.sl-markdown-content .agtd-stage > .agtd-term {
+	margin-top: 0;
+}
 
-/* Sidebar: muted links, the current page raised on surface */
+/* Starlight's own asides, in the callout colours */
+.starlight-aside {
+	border: 0;
+	border-radius: var(--radius-md);
+	background: var(--note-bg);
+	color: var(--text);
+	--sl-color-asides-text-accent: var(--note-ink);
+}
+.starlight-aside--tip {
+	background: var(--tip-bg);
+	--sl-color-asides-text-accent: var(--tip-ink);
+}
+.starlight-aside--caution {
+	background: var(--warning-bg);
+	--sl-color-asides-text-accent: var(--warning-ink);
+}
+.starlight-aside--danger {
+	background: var(--danger-bg);
+	--sl-color-asides-text-accent: var(--danger-ink);
+}
+
+/* Header: a hairline under it, a pill for search */
+site-search > button {
+	border-color: var(--line-strong);
+	border-radius: var(--radius-full);
+	background: var(--surface);
+	color: var(--text-muted);
+}
+site-search > button > kbd {
+	border-radius: var(--radius-full);
+	background: var(--stone);
+}
+
+/* Sidebar: muted pills, the current page on haze, a third level under a chevron */
 .sidebar-content {
 	--sl-color-hairline-light: transparent;
 }
-.sidebar-content .group-label .large {
+.sidebar-content .top-level > li > details > summary .group-label .large {
 	font-size: 13px;
 	line-height: 20px;
 	font-weight: 500;
 	letter-spacing: 0.01em;
-	color: var(--text-muted);
+	color: var(--text);
 }
 .sidebar-content a {
 	font-size: 15px;
 	line-height: 24px;
 	color: var(--text-muted);
-	border-radius: var(--radius-sm);
+	border-radius: var(--radius-full);
+	padding-inline: var(--space-3);
 }
 .sidebar-content a:hover {
 	color: var(--text);
@@ -127,10 +179,32 @@ h4,
 .sidebar-content a[aria-current='page'],
 .sidebar-content a[aria-current='page']:hover,
 .sidebar-content a[aria-current='page']:focus {
+	color: var(--primary);
+	font-weight: 500;
+	background: var(--haze);
+}
+/* A group inside a group: its label reads as a link, its children sit on a guide line. */
+.sidebar-content details details > summary {
+	border-radius: var(--radius-full);
+	padding-inline: var(--space-3);
+}
+.sidebar-content details details > summary .group-label .large {
+	font-size: 15px;
+	line-height: 24px;
+	font-weight: 500;
 	color: var(--text);
-	font-weight: 400;
-	background: var(--surface);
-	box-shadow: inset 0 0 0 1px var(--line);
+}
+.sidebar-content details details > summary:hover {
+	background: var(--stone);
+}
+.sidebar-content details details > ul {
+	margin-inline-start: 20px;
+	padding-inline-start: var(--space-2);
+	border-inline-start: 1px solid var(--line);
+}
+.sidebar-content details details > ul a {
+	font-size: 14px;
+	line-height: 22px;
 }
 
 /* On this page */
@@ -150,32 +224,25 @@ starlight-toc a:hover {
 	color: var(--text);
 }
 
-/* Search: a quiet input with a text-muted control border */
-site-search > button {
-	border-color: var(--text-muted);
-	border-radius: var(--radius-md);
-	background: var(--surface);
-	color: var(--text-muted);
-}
-
-/* Previous / next */
+/* Previous / next: quiet cards on stone */
 .pagination-links a {
-	border: 1px solid var(--line);
-	border-radius: var(--radius-lg);
+	border: 0;
+	border-radius: var(--radius-md);
+	background: var(--stone);
 	box-shadow: none;
 	color: var(--text);
 }
 .pagination-links a:hover {
-	border-color: var(--text-muted);
+	box-shadow: inset 0 0 0 1px var(--line-strong);
 }
 .pagination-links .link-title {
-	font-family: var(--font-mono);
+	font-family: var(--font-sans);
 	font-weight: 500;
-	font-size: 17px;
+	font-size: 20px;
 	color: var(--text);
 }
 
-/* Keyboard focus is the one shadow */
+/* Keyboard focus is the tomato ring */
 :is(a, button, input, select, summary):focus-visible {
 	outline: 2px solid transparent;
 	box-shadow: var(--focus-ring);
@@ -188,7 +255,7 @@ site-search > button {
 	display: flex;
 	flex-direction: column;
 	border: 1px solid var(--line);
-	border-radius: var(--radius-lg);
+	border-radius: var(--radius-md);
 	overflow: hidden;
 }
 .agtd-level {

@@ -1,8 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="178" height="278" viewBox="0 0 178 278" role="img" aria-label="agtd">
+<svg xmlns="http://www.w3.org/2000/svg" width="384" height="384" viewBox="0 0 96 96" role="img" aria-label="agtd">
 <title>agtd</title>
-<circle cx="139" cy="39" r="39" fill="#FDA934"></circle>
-<circle cx="39" cy="139" r="39" fill="#83868C"></circle>
-<circle cx="139" cy="139" r="39" fill="#83868C"></circle>
-<circle cx="39" cy="239" r="39" fill="#83868C"></circle>
-<circle cx="139" cy="239" r="39" fill="#83868C"></circle>
+<path d="M40 31a20 20 0 0 1 40 0z" fill="#cf7862"/>
+<rect x="12" y="37" width="72" height="12" rx="6" fill="#f4f2ea"/>
+<rect x="12" y="55" width="44" height="12" rx="6" fill="#f4f2ea"/>
+<rect x="12" y="73" width="60" height="12" rx="6" fill="#f4f2ea"/>
 </svg>
