@@ -2,7 +2,8 @@
 /*
  * A terminal window showing agt the way it prints. Pass commands to show
  * prompts; agt output with colour goes through AgtLs instead. Long lines
- * scroll inside the window rather than wrapping. The title bar's copy button
+ * scroll inside the window rather than wrapping. Commands are highlighted as
+ * shell (src/lib/shell.ts). The title bar's copy button
  * copies the commands, one per line, without their prompts.
  */
 interface Props {
@@ -12,7 +13,10 @@ interface Props {
 	class?: string;
 }
 
+import { shellTokens } from '../lib/shell';
+
 const { title = 'agt', commands, class: className } = Astro.props;
+const lines = commands.map(shellTokens);
 const label = commands.length > 1 ? 'Copy commands' : 'Copy command';
 ---
 
@@ -24,7 +28,7 @@ const label = commands.length > 1 ? 'Copy commands' : 'Copy command';
 			<svg class="done" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg>
 		</button>
 	</div>
-	<pre class="agtd-term-body">{commands.map((cmd, i) => <>{i > 0 && '\n'}<span class="agtd-t-dim">❯</span> {cmd}</>)}</pre>
+	<pre class="agtd-term-body">{lines.map((line, i) => <>{i > 0 && '\n'}<span class="agtd-t-dim">❯</span> {line.map((t) => (t.color ? <span style={`color:${t.color}`}>{t.content}</span> : t.content))}</>)}</pre>
 </figure>
 
 <script>

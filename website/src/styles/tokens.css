@@ -58,6 +58,12 @@
 	--term-muted: #969b93;
 	--term-ok: #8cc265;
 	--term-signal: #dd917d;
+	/* Shell highlighting in the docs' Terminal blocks: commands, flags and
+	 * variables, quoted strings. Plain arguments stay --term-text, operators
+	 * and comments --term-muted. */
+	--term-syn-command: #8cc265;
+	--term-syn-flag: #8fbcb5;
+	--term-syn-string: #dfbe86;
 
 	/* Callouts: a tint and the ink of its icon and title. */
 	--note-bg: #1c2b2a;
