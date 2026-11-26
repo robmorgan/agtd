@@ -155,7 +155,7 @@ site-search > button > kbd {
 	background: var(--stone);
 }
 
-/* Sidebar: muted pills, the current page on haze, a third level under a chevron */
+/* Sidebar: muted pills, the current page on forest green, a third level under a chevron */
 .sidebar-content {
 	--sl-color-hairline-light: transparent;
 }
@@ -179,9 +179,9 @@ site-search > button > kbd {
 .sidebar-content a[aria-current='page'],
 .sidebar-content a[aria-current='page']:hover,
 .sidebar-content a[aria-current='page']:focus {
-	color: var(--primary);
+	color: var(--on-forest);
 	font-weight: 500;
-	background: var(--haze);
+	background: var(--forest);
 }
 /* A group inside a group: its label reads as a link, its children sit on a guide line. */
 .sidebar-content details details > summary {
